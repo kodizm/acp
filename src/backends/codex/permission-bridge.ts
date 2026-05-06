@@ -23,8 +23,19 @@
  *     reject        -> { permissions: { type: 'disabled' }, scope: 'Turn' }
  */
 
-import { awaitPermissionResponse } from '../claude/permission-bridge.ts'
+import { DEFERRED_SENTINEL, awaitPermissionResponse } from '../claude/permission-bridge.ts'
 import type { AcpServerLike, EmitLike } from '../claude/permission-bridge.ts'
+
+/**
+ * Defer hook signature: codex driver calls this when the
+ * `deferTimeoutMs` racer wins (Phase 1.6 Pattern B). Implementation
+ * writes the synthetic RolloutItem sentinel + persists deferred
+ * state + emits `permission_deferred` event.
+ */
+export type CodexDeferHandler = (args: {
+  method: CodexApprovalMethod
+  params: CodexApprovalParams
+}) => Promise<void>
 
 type CodexApprovalMethod =
   | 'item/commandExecution/requestApproval'
@@ -73,6 +84,8 @@ export async function handleCodexApproval(args: {
   emit: EmitLike
   signal: AbortSignal
   permissionTimeoutMs?: number
+  deferTimeoutMs?: number
+  onDefer?: CodexDeferHandler
 }): Promise<CodexApprovalResult> {
   const name = approvalRpcToCanonicalName(args.method)
   const toolUseId =
@@ -89,7 +102,17 @@ export async function handleCodexApproval(args: {
   })
 
   // 2. Send outbound session/request_permission RPC + race against
-  //    abort signal + optional deadline.
+  //    abort signal + optional deadline + defer threshold (Pattern B).
+  const raceOptions: { signal: AbortSignal; timeoutMs?: number; deferTimeoutMs?: number } = {
+    signal: args.signal,
+  }
+  if (args.permissionTimeoutMs !== undefined) {
+    raceOptions.timeoutMs = args.permissionTimeoutMs
+  }
+  if (args.deferTimeoutMs !== undefined && args.onDefer !== undefined) {
+    raceOptions.deferTimeoutMs = args.deferTimeoutMs
+  }
+
   const response = await awaitPermissionResponse<OutcomeEnvelope>(
     args.server,
     'session/request_permission',
@@ -107,11 +130,19 @@ export async function handleCodexApproval(args: {
         { kind: 'reject_once', name: 'Decline', optionId: 'reject' },
       ],
     },
-    {
-      signal: args.signal,
-      ...(args.permissionTimeoutMs === undefined ? {} : { timeoutMs: args.permissionTimeoutMs }),
-    },
+    raceOptions,
   )
+
+  // 3. Pattern B: defer racer won. Driver-supplied onDefer writes
+  //    JSONL sentinel + persists deferred state + emits
+  //    permission_deferred event; we return Decline so codex
+  //    unwinds the turn.
+  if (response === DEFERRED_SENTINEL) {
+    if (args.onDefer !== undefined) {
+      await args.onDefer({ method: args.method, params: args.params })
+    }
+    return defaultDecline(args.method)
+  }
 
   if (response === undefined || (response as { outcome?: unknown }).outcome === undefined) {
     return defaultDecline(args.method)
