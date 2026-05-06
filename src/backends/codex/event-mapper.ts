@@ -24,6 +24,8 @@
  * T8 will extend this with CollabAgentToolCall (subagent) handling.
  */
 
+import { randomUUID } from 'node:crypto'
+
 import type { SessionUpdateEvent } from '../../wire/events.ts'
 
 interface TokenCounts {
@@ -56,6 +58,11 @@ interface CodexItem {
   tool?: string
   arguments?: unknown
   result?: unknown
+  // CollabAgentToolCall
+  sender_thread_id?: string
+  receiver_thread_ids?: ReadonlyArray<string>
+  prompt?: string
+  model?: string
 }
 
 interface ItemNotification {
@@ -88,6 +95,12 @@ export interface CodexEventMapperOptions {
 export class CodexEventMapper {
   private lastTotalUsage: TokenCounts | undefined
   private preCompactionTotal: TokenCounts | undefined
+  /**
+   * Subagent map: codex CollabAgentToolCall item id -> Kodizm child UUID.
+   * The map ensures spawn / complete events for the same item carry
+   * the same childId (orchestrator never sees codex thread ids).
+   */
+  private readonly subagents: Map<string, string> = new Map()
 
   public constructor(private readonly options: CodexEventMapperOptions) {}
 
@@ -183,6 +196,19 @@ export class CodexEventMapper {
       })
       return
     }
+    if (item.type === 'CollabAgentToolCall' && item.tool === 'SpawnAgent') {
+      const childId = randomUUID()
+      this.subagents.set(item.id, childId)
+      this.options.emit({
+        sessionId: this.options.sessionId,
+        type: 'subagent_spawn',
+        childId,
+        parentSessionId: this.options.sessionId,
+        model: item.model ?? 'unknown',
+        tools: [],
+      })
+      return
+    }
   }
 
   private handleItemCompleted(params: ItemNotification): void {
@@ -212,6 +238,22 @@ export class CodexEventMapper {
         succeeded: true,
       })
       this.preCompactionTotal = undefined
+      return
+    }
+    if (item.type === 'CollabAgentToolCall') {
+      const childId = this.subagents.get(item.id)
+      if (childId === undefined) return
+      this.options.emit({
+        sessionId: this.options.sessionId,
+        type: 'subagent_complete',
+        childId,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+      })
+      this.subagents.delete(item.id)
       return
     }
   }
