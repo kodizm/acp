@@ -170,6 +170,40 @@ export const CompactionCompletedEventSchema = SessionEnvelope.extend({
 })
 
 /**
+ * `permission_deferred`: emitted on Process A when the orchestrator
+ * leaves a permission_request unanswered past `permissionDeferTimeoutMs`.
+ * The driver writes a synthetic tool_result row to the SDK transcript
+ * carrying the marker `__KODIZM_PERMISSION_DEFERRED__`, persists the
+ * deferred state to the orchestrator side, then exits gracefully.
+ *
+ * The orchestrator's stream-event store rolls this forward so a later
+ * resume container can replay the prior turn with the cached answer.
+ */
+export const PermissionDeferredEventSchema = SessionEnvelope.extend({
+  type: z.literal('permission_deferred'),
+  toolUseId: z.string().min(1),
+  name: z.string().min(1),
+  /**
+   * Subagent attribution: set when the deferred call originated from a
+   * Claude Task-tool subagent. Mirrors permission_request's agentId so
+   * audit rows stamp the same `agent_id`.
+   */
+  agentId: z.string().min(1).optional(),
+})
+
+/**
+ * `permission_resumed`: emitted on Process B when the cached answer is
+ * consumed by the wrapped canUseTool returner. Pairs with an earlier
+ * `permission_deferred` (same `toolUseId`) carried across containers
+ * via the orchestrator-side DeferredPermissionStore.
+ */
+export const PermissionResumedEventSchema = SessionEnvelope.extend({
+  type: z.literal('permission_resumed'),
+  toolUseId: z.string().min(1),
+  decision: z.enum(['allow', 'deny']),
+})
+
+/**
  * `usage`: end-of-turn token + cost rollup. The four token counts
  * mirror Anthropic's SDK usage block. Cost is in USD with up to 6
  * decimals so micro-cost runs do not round to zero.
@@ -263,6 +297,8 @@ export const SessionUpdateEventSchema = z.discriminatedUnion('type', [
   ToolCallProgressEventSchema,
   ToolCallEndEventSchema,
   PermissionRequestEventSchema,
+  PermissionDeferredEventSchema,
+  PermissionResumedEventSchema,
   QuestionRequestEventSchema,
   UsageEventSchema,
   SubagentSpawnEventSchema,

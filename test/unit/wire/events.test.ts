@@ -7,7 +7,9 @@ import {
   KodizmQuestionSchema,
   ModelAdvertisementEventSchema,
   OutputChunkEventSchema,
+  PermissionDeferredEventSchema,
   PermissionRequestEventSchema,
+  PermissionResumedEventSchema,
   ProcessDiedEventSchema,
   QuestionRequestEventSchema,
   SessionUpdateEventSchema,
@@ -314,6 +316,86 @@ describe('Phase 1.5 event extensions', () => {
       error: 'prompt_too_long retry exhausted',
     }
     expect(CompactionCompletedEventSchema.safeParse(event).success).toBe(true)
+  })
+})
+
+describe('Phase 1.6 deferred-permission events', () => {
+  test('permission_deferred carries toolUseId + name (main agent call)', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_deferred' as const,
+      toolUseId: 'tu_1',
+      name: 'Bash',
+    }
+    expect(PermissionDeferredEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('permission_deferred accepts optional agentId for subagent calls', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_deferred' as const,
+      toolUseId: 'tu_1',
+      name: 'Bash',
+      agentId: 'sub_outer',
+    }
+    expect(PermissionDeferredEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('permission_deferred rejects an empty toolUseId', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_deferred' as const,
+      toolUseId: '',
+      name: 'Bash',
+    }
+    expect(PermissionDeferredEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('permission_resumed roundtrips with allow decision', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_resumed' as const,
+      toolUseId: 'tu_1',
+      decision: 'allow' as const,
+    }
+    expect(PermissionResumedEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('permission_resumed roundtrips with deny decision', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_resumed' as const,
+      toolUseId: 'tu_1',
+      decision: 'deny' as const,
+    }
+    expect(PermissionResumedEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('permission_resumed rejects an unknown decision value', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_resumed' as const,
+      toolUseId: 'tu_1',
+      decision: 'magic',
+    }
+    expect(PermissionResumedEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('SessionUpdateEventSchema routes permission_deferred + permission_resumed', () => {
+    const deferred = {
+      ...baseEnvelope,
+      type: 'permission_deferred' as const,
+      toolUseId: 'tu_1',
+      name: 'Bash',
+    }
+    const resumed = {
+      ...baseEnvelope,
+      type: 'permission_resumed' as const,
+      toolUseId: 'tu_1',
+      decision: 'allow' as const,
+    }
+    expect(SessionUpdateEventSchema.safeParse(deferred).success).toBe(true)
+    expect(SessionUpdateEventSchema.safeParse(resumed).success).toBe(true)
   })
 })
 
