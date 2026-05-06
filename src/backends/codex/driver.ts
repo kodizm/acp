@@ -32,6 +32,7 @@ import type {
   NewSessionRequest,
   PromptRequest,
 } from '../../wire/types.ts'
+import type { AcpServerLike } from '../claude/permission-bridge.ts'
 import type {
   BackendDriver,
   DriverCapabilities,
@@ -43,6 +44,7 @@ import type {
 import { CodexAppServerProcess, type CodexDebugSink } from './app-server-spawn.ts'
 import { buildCodexConfigToml } from './config-mapper.ts'
 import { CodexEventMapper } from './event-mapper.ts'
+import { handleCodexApproval } from './permission-bridge.ts'
 import { buildSandboxPolicy, mapPermissionMode } from './policy.ts'
 
 /**
@@ -71,6 +73,13 @@ export interface CodexDriverDeps {
    * fake codex script via `bun run <script>`.
    */
   spawnFactory?: (options: CodexSpawnFactoryOptions) => Promise<CodexAppServerProcess>
+  /**
+   * AcpServer reference used to send outbound permission /
+   * AskUserQuestion RPCs. Optional so unit tests that exercise the
+   * driver without a wire surface (basic newSession + prompt) keep
+   * working. Production + integration smokes always provide it.
+   */
+  server?: AcpServerLike
 }
 
 /**
@@ -335,6 +344,30 @@ export class CodexDriver implements BackendDriver {
         return
       }
     })
+
+    // Wire 3 codex approval RPCs to canonical permission_request flow.
+    // Phase 2 T10. Requires deps.server; absent in pure-driver unit
+    // tests so the handler stays a no-op (defaults to Decline).
+    if (this.deps.server !== undefined) {
+      const server = this.deps.server
+      state.process.onServerRequest(async (method, params) => {
+        if (
+          method === 'item/commandExecution/requestApproval' ||
+          method === 'item/fileChange/requestApproval' ||
+          method === 'item/permissions/requestApproval'
+        ) {
+          return handleCodexApproval({
+            method,
+            params: params as Parameters<typeof handleCodexApproval>[0]['params'],
+            server,
+            sessionId,
+            emit,
+            signal: abortController.signal,
+          })
+        }
+        return undefined
+      })
+    }
 
     // 5. Send turn/start with serialized inputs.
     try {
