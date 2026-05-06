@@ -160,6 +160,97 @@ describe('NewSessionRequestSchema', () => {
   })
 })
 
+describe('NewSessionRequestSchema, toolPolicy + autoCompact + permissionTimeoutMs', () => {
+  test('accepts a full toolPolicy with allow + deny + ask + defaultMode', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      toolPolicy: {
+        allow: ['Read', 'Bash:git commit*', 'mcp:kodizm/*'],
+        deny: ['Bash:git push*'],
+        ask: ['Edit'],
+        defaultMode: 'dontAsk',
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('accepts every documented defaultMode enum value', () => {
+    const modes = ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'] as const
+    for (const defaultMode of modes) {
+      const result = NewSessionRequestSchema.safeParse({
+        cwd: '/workspace',
+        mcpServers: [],
+        toolPolicy: { defaultMode },
+      })
+      expect(result.success).toBe(true)
+    }
+  })
+
+  test('rejects an unknown defaultMode', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      toolPolicy: { defaultMode: 'magic' },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('accepts autoCompact: false', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      autoCompact: false,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('accepts permissionTimeoutMs as a positive integer', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionTimeoutMs: 30_000,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('rejects a non-integer permissionTimeoutMs', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionTimeoutMs: 30.5,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects a non-positive permissionTimeoutMs', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionTimeoutMs: 0,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects toolPolicy smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { toolPolicy: { allow: ['Read'] } },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects autoCompact smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { autoCompact: false },
+    })
+    expect(result.success).toBe(false)
+  })
+})
+
 describe('PromptRequestSchema', () => {
   test('accepts a minimal prompt with sessionId and an empty prompt array', () => {
     const result = PromptRequestSchema.safeParse({

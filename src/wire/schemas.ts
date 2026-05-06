@@ -77,7 +77,35 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'cwd',
   'sessionId',
   'sourceSessionId',
+  'toolPolicy',
+  'autoCompact',
+  'permissionTimeoutMs',
 ] as const
+
+/**
+ * Canonical permissionMode enum mirrors the Claude SDK shape exactly
+ * so a translator-free pass-through is possible. Every backend driver
+ * is responsible for mapping unsupported modes (codex / opencode may
+ * not have all five) to its closest native equivalent.
+ */
+const PermissionModeSchema = z.enum(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'])
+
+/**
+ * Canonical Kodizm tool policy shape. Backend drivers translate the
+ * `<ToolName>:<pattern>` strings to their native CLI grammar. See
+ * `src/wire/policy.ts` for the parser + `src/backends/<name>/policy.ts`
+ * for per-backend translation tables.
+ *
+ * `defaultMode` controls the SDK's blanket gate. When undefined, the
+ * driver applies Kodizm's own default (`bypassPermissions` for the
+ * Claude backend; phases 2-3 set their own).
+ */
+const ToolPolicySchema = z.object({
+  allow: z.array(z.string()).optional(),
+  deny: z.array(z.string()).optional(),
+  ask: z.array(z.string()).optional(),
+  defaultMode: PermissionModeSchema.optional(),
+})
 
 /**
  * Refinement helper that rejects any payload smuggling a canonical
@@ -125,6 +153,9 @@ export const NewSessionRequestSchema = z
     systemPrompt: SystemPromptSchema.optional(),
     model: z.string().optional(),
     skills: z.array(z.string()).optional(),
+    toolPolicy: ToolPolicySchema.optional(),
+    autoCompact: z.boolean().optional(),
+    permissionTimeoutMs: z.number().int().positive().optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
