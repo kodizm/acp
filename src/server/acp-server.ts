@@ -17,6 +17,19 @@
  *   -32603 Internal Error     (handler-thrown anything else)
  */
 
+import type { z } from 'zod'
+
+import type { BackendDriver, EventEmitter } from '../backends/driver.ts'
+import { ensureCapability } from '../backends/driver.ts'
+import {
+  CancelRequestSchema,
+  ForkSessionRequestSchema,
+  InitializeRequestSchema,
+  LoadSessionRequestSchema,
+  NewSessionRequestSchema,
+  PromptRequestSchema,
+} from '../wire/schemas.ts'
+import { InvalidParamsError, JsonRpcError } from './errors.ts'
 import type { NdjsonTransport } from './transport.ts'
 
 /**
@@ -94,6 +107,16 @@ export type MethodHandler = (params: unknown) => unknown | Promise<unknown>
  */
 export interface AcpServerOptions {
   transport: NdjsonTransport
+
+  /**
+   * Optional backend driver. When set, the server auto-registers the
+   * six lifecycle method handlers (initialize, session/new, prompt,
+   * cancel, load, fork) and routes them to the driver. Schema
+   * validation runs at the wire boundary; capability gating runs
+   * before driver invocation. Tests pass a mock driver to assert
+   * dispatch correctness.
+   */
+  backend?: BackendDriver
 }
 
 /**
@@ -138,10 +161,78 @@ function isJsonRpcEnvelope(value: unknown): value is { jsonrpc: '2.0'; method?: 
 }
 
 /**
+ * Validate a request body through a zod schema. On failure, raises
+ * {@link InvalidParamsError} so the wire response carries -32602
+ * with the zod issue list in `data`.
+ */
+function validateOrThrow<TSchema extends z.ZodType>(schema: TSchema, params: unknown): z.infer<TSchema> {
+  const result = schema.safeParse(params)
+  if (!result.success) {
+    throw new InvalidParamsError(result.error.message, { issues: result.error.issues })
+  }
+  return result.data as z.infer<TSchema>
+}
+
+/**
+ * Wire the six lifecycle method handlers from a {@link BackendDriver}
+ * onto the server. Each handler validates the request body, applies
+ * capability gating where required, and forwards the call to the
+ * driver. The prompt handler builds an {@link EventEmitter} that
+ * fans out driver-emitted events as `sessionUpdate` notifications
+ * over the wire.
+ *
+ * @param server - the AcpServer to register handlers on
+ * @param backend - the driver instance providing the implementations
+ */
+function wireBackendHandlers(server: AcpServer, backend: BackendDriver): void {
+  // 1. initialize handshake
+  server.on('initialize', async (params) => {
+    const validated = validateOrThrow(InitializeRequestSchema, params)
+    return await backend.initialize(validated)
+  })
+
+  // 2. session/new: open a fresh session
+  server.on('session/new', async (params) => {
+    const validated = validateOrThrow(NewSessionRequestSchema, params)
+    return await backend.newSession(validated)
+  })
+
+  // 3. session/prompt: stream events back as sessionUpdate notifications
+  server.on('session/prompt', async (params) => {
+    const validated = validateOrThrow(PromptRequestSchema, params)
+    const emit: EventEmitter = {
+      send: (event) => server.notify('sessionUpdate', event),
+    }
+    return await backend.prompt(validated.sessionId, validated, emit)
+  })
+
+  // 4. session/cancel: abort the in-flight prompt for the session id
+  server.on('session/cancel', async (params) => {
+    const validated = validateOrThrow(CancelRequestSchema, params)
+    await backend.cancel(validated)
+    return { ok: true }
+  })
+
+  // 5. session/load: gated on capabilities().resume
+  server.on('session/load', async (params) => {
+    ensureCapability(backend.capabilities(), 'resume', 'session/load')
+    const validated = validateOrThrow(LoadSessionRequestSchema, params)
+    return await backend.loadSession(validated)
+  })
+
+  // 6. session/fork: gated on capabilities().fork
+  server.on('session/fork', async (params) => {
+    ensureCapability(backend.capabilities(), 'fork', 'session/fork')
+    const validated = validateOrThrow(ForkSessionRequestSchema, params)
+    return await backend.forkSession(validated)
+  })
+}
+
+/**
  * Build an {@link AcpServer} bound to the given transport.
  */
 export function createAcpServer(options: AcpServerOptions): AcpServer {
-  const { transport } = options
+  const { transport, backend } = options
 
   const handlers = new Map<string, MethodHandler>()
   const pending = new Map<string | number, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>()
@@ -178,6 +269,12 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
       const result = await handler(frame.params)
       await writeResponse(frame.id, result)
     } catch (error) {
+      // Typed JsonRpcError throws carry their own code + optional data;
+      // plain Error throws fall back to -32603 Internal Error.
+      if (error instanceof JsonRpcError) {
+        await writeError(frame.id, error.code, error.message, error.data)
+        return
+      }
       const message = error instanceof Error ? error.message : 'internal error'
       await writeError(frame.id, JsonRpcErrorCode.InternalError, message)
     }
@@ -242,7 +339,7 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
     return [method]
   }
 
-  return {
+  const serverApi: AcpServer = {
     on(method: string, handler: MethodHandler): void {
       // Bind the handler under every name in the alias group so the
       // dispatcher matches both forms without per-call lookup overhead.
@@ -275,6 +372,13 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
     },
 
     async serve(): Promise<void> {
+      // 0. Auto-wire backend handlers on first serve() call. Done
+      //    here (not in createAcpServer) so the public on() API can
+      //    layer additional handlers before the driver lands.
+      if (backend !== undefined) {
+        wireBackendHandlers(serverApi, backend)
+      }
+
       // 1. Pull frames off the wire and dispatch by shape.
       for await (const raw of transport.readFrames()) {
         // 2. Reject anything that is not a valid JSON-RPC envelope. If
@@ -315,4 +419,6 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
       }
     },
   }
+
+  return serverApi
 }
