@@ -168,6 +168,33 @@ export class BackendDriverError extends JsonRpcError {
 }
 
 /**
+ * -32601 Method Not Supported by the active backend driver. Distinct
+ * from {@link MethodNotFoundError}: that one fires when no handler is
+ * registered at all; this one fires when a handler exists but the
+ * resolved driver advertised that it does not support the feature.
+ *
+ * Example: codex driver receives `session/fork`. The dispatch handler
+ * is registered, but `codexDriver.capabilities().fork === false`, so
+ * the method-supported check raises this error before the driver's
+ * forkSession is called.
+ *
+ * Reuses code -32601 because the wire-side semantics are the same
+ * (caller asked for a method that cannot be served); the data field
+ * carries the supported-methods list for client-side discovery.
+ */
+export class MethodNotSupportedError extends JsonRpcError {
+  public override readonly name = 'MethodNotSupportedError'
+
+  public constructor(method: string, supportedMethods: ReadonlyArray<string>) {
+    super(
+      `method not supported by driver: ${method} (supported: ${supportedMethods.join(', ')})`,
+      JsonRpcErrorCode.MethodNotFound,
+      { data: { method, supportedMethods: [...supportedMethods] } },
+    )
+  }
+}
+
+/**
  * -32004 ACP Timeout. The read loop's deadline expired before a frame
  * arrived. Surfaces as the third lifecycle terminator after process
  * death and cancel. Default deadline lives on the AcpServer per
