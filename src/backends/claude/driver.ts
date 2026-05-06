@@ -46,6 +46,7 @@ import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
 import { buildCanUseTool } from './permission-bridge.ts'
 import { translateToolPolicyToClaude } from './policy.ts'
 import { SubagentTracker } from './subagent.ts'
+import { HeartbeatTimer } from '../../server/heartbeat.ts'
 
 /**
  * Claude SDK Options subset the driver builds + forwards. Defining
@@ -226,6 +227,20 @@ interface SessionState {
    * {@link deferredToolName} instead.
    */
   deferredToolUseId?: string
+  /**
+   * Phase 1.7 heartbeat cadence (ms). When set, the driver instantiates
+   * a HeartbeatTimer at prompt entry and emits canonical heartbeat
+   * sessionUpdate events on each tick.
+   */
+  heartbeatIntervalMs?: number
+  /**
+   * Phase 1.7 inactivity threshold (ms). When set, the driver runs a
+   * timer-based probe; if Date.now() - lastSdkMessageAt exceeds this
+   * value the driver fires session_failed:'sdk_stall' + aborts the
+   * SDK turn. Distinct from {@link permissionTimeoutMs} which gates
+   * the outbound permission RPC.
+   */
+  inactivityThresholdMs?: number
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -271,6 +286,8 @@ export class ClaudeDriver implements BackendDriver {
       ...(params.permissionDeferTimeoutMs === undefined
         ? {}
         : { permissionDeferTimeoutMs: params.permissionDeferTimeoutMs }),
+      ...(params.heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs: params.heartbeatIntervalMs }),
+      ...(params.inactivityThresholdMs === undefined ? {} : { inactivityThresholdMs: params.inactivityThresholdMs }),
     })
     return { sessionId }
   }
@@ -460,6 +477,8 @@ export class ClaudeDriver implements BackendDriver {
     const tracker = new SubagentTracker()
 
     let stopReason: PromptResult['stopReason'] = 'end_turn'
+    let failureReason: PromptResult['failureReason']
+    let failureDetail: PromptResult['failureDetail']
 
     const promptText = this.serializePrompt(params)
     const finalPrompt =
@@ -467,11 +486,54 @@ export class ClaudeDriver implements BackendDriver {
         ? this.injectDeferredResumePrefix(promptText, resumeAnswer.behavior, resumeToolUseId)
         : promptText
 
+    // Phase 1.7 lifecycle timers. Heartbeat fires while prompt runs;
+    // inactivity probe fires when SDK message gap exceeds threshold.
+    const promptStartedAt = Date.now()
+    let lastSdkMessageAt = promptStartedAt
+    const inactivityThresholdMs = state.inactivityThresholdMs
+    const heartbeatIntervalMs = state.heartbeatIntervalMs
+
+    let heartbeat: HeartbeatTimer | undefined
+    if (heartbeatIntervalMs !== undefined) {
+      heartbeat = new HeartbeatTimer({
+        sessionId,
+        intervalMs: heartbeatIntervalMs,
+        emit,
+        getLastSdkMs: () => lastSdkMessageAt,
+      })
+      heartbeat.start(promptStartedAt)
+    }
+
+    let inactivityProbe: ReturnType<typeof setInterval> | undefined
+    let inactivityFired = false
+    if (inactivityThresholdMs !== undefined) {
+      const probeIntervalMs = Math.max(10, Math.min(Math.floor(inactivityThresholdMs / 2), 10_000))
+      inactivityProbe = setInterval(() => {
+        const gap = Date.now() - lastSdkMessageAt
+        if (gap > inactivityThresholdMs && !inactivityFired) {
+          inactivityFired = true
+          const detail = `no SDK message for ${gap}ms (threshold=${inactivityThresholdMs}ms)`
+          emit.send({
+            sessionId,
+            type: 'session_failed',
+            reason: 'sdk_stall',
+            detail,
+            capturedAt: Date.now(),
+          })
+          failureReason = 'sdk_stall'
+          failureDetail = detail
+          stopReason = 'session_failed'
+          abortController.abort()
+        }
+      }, probeIntervalMs)
+    }
+
     try {
       for await (const message of this.deps.sdk.query({
         prompt: finalPrompt,
         options: effectiveOptions,
       })) {
+        lastSdkMessageAt = Date.now()
         // Capture the SDK's own session id from the first system init
         // so loadSession can resume the right JSONL transcript later.
         if (message.type === 'system' && message.subtype === 'init' && state.sdkSessionId === undefined) {
@@ -486,12 +548,14 @@ export class ClaudeDriver implements BackendDriver {
           emit.send(event)
         }
         // Track stop reason: result messages carry the final state.
-        if (message.type === 'result') {
+        if (message.type === 'result' && stopReason !== 'session_failed') {
           stopReason = (message.stop_reason as PromptResult['stopReason']) ?? 'end_turn'
         }
       }
     } catch (error) {
-      if (abortController.signal.aborted) {
+      if (inactivityFired) {
+        // Stall already classified; SDK threw because we aborted it.
+      } else if (abortController.signal.aborted) {
         stopReason = 'cancelled'
         emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
       } else if (deferDidFire.value) {
@@ -504,9 +568,20 @@ export class ClaudeDriver implements BackendDriver {
         throw error
       }
     } finally {
+      heartbeat?.stop()
+      if (inactivityProbe !== undefined) {
+        clearInterval(inactivityProbe)
+      }
       state.abortController = undefined
     }
 
+    if (stopReason === 'session_failed') {
+      return {
+        stopReason,
+        ...(failureReason === undefined ? {} : { failureReason }),
+        ...(failureDetail === undefined ? {} : { failureDetail }),
+      }
+    }
     return { stopReason }
   }
 
