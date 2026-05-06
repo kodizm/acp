@@ -413,7 +413,31 @@ export class CodexDriver implements BackendDriver {
     return { sessionId: params.sessionId }
   }
 
-  public async forkSession(_params: ForkSessionRequest): Promise<NewSessionResult> {
-    throw new MethodNotSupportedError('session/fork', ['initialize', 'session/new', 'session/cancel'])
+  public async forkSession(params: ForkSessionRequest): Promise<NewSessionResult> {
+    const sourceState = this.sessions.get(params.sourceSessionId)
+    if (sourceState === undefined) {
+      throw new SessionNotFoundError(params.sourceSessionId)
+    }
+    if (sourceState.process === undefined || sourceState.codexThreadId === undefined) {
+      throw new SessionNotFoundError(`${params.sourceSessionId} (no codex thread)`)
+    }
+
+    // Reuse the source subprocess: codex app-server hosts both threads.
+    // Fresh ACP sessionId allocated; mapping back to the new
+    // codexThreadId from the fork response.
+    const response = await sourceState.process.request<{ thread: { id: string; path?: string } }>('thread/fork', {
+      thread_id: sourceState.codexThreadId,
+      ephemeral: false,
+    })
+
+    const newSessionId = randomUUID()
+    this.sessions.set(newSessionId, {
+      sessionId: newSessionId,
+      codexThreadId: response.thread.id,
+      ...(response.thread.path === undefined ? {} : { codexJsonlPath: response.thread.path }),
+      process: sourceState.process,
+      configPath: sourceState.configPath,
+    })
+    return { sessionId: newSessionId }
   }
 }
