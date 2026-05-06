@@ -379,8 +379,38 @@ export class CodexDriver implements BackendDriver {
     this.sessions.delete(request.sessionId)
   }
 
-  public async loadSession(_params: LoadSessionRequest): Promise<NewSessionResult> {
-    throw new MethodNotSupportedError('session/load', ['initialize', 'session/new', 'session/cancel'])
+  public async loadSession(params: LoadSessionRequest): Promise<NewSessionResult> {
+    const state = this.sessions.get(params.sessionId)
+    if (state === undefined) {
+      throw new SessionNotFoundError(params.sessionId)
+    }
+    if (state.process === undefined) {
+      throw new SessionNotFoundError(`${params.sessionId} (no codex subprocess)`)
+    }
+
+    // 1. Resume by JSONL path when available (Pattern B handoff sets it
+    //    in T11). Otherwise resume by thread_id (default codex behaviour:
+    //    glob the rollout-*-<thread_id>.jsonl path on its side).
+    const resumeParams: { thread_id?: string; path?: string } = {}
+    if (state.codexJsonlPath !== undefined) {
+      resumeParams.path = state.codexJsonlPath
+    } else if (state.codexThreadId !== undefined) {
+      resumeParams.thread_id = state.codexThreadId
+    } else {
+      throw new SessionNotFoundError(`${params.sessionId} (no codex thread id or path)`)
+    }
+
+    const response = await state.process.request<{ thread: { id: string; path?: string } }>(
+      'thread/resume',
+      resumeParams,
+    )
+
+    // Refresh state in case codex returned an updated path.
+    state.codexThreadId = response.thread.id
+    if (response.thread.path !== undefined) {
+      state.codexJsonlPath = response.thread.path
+    }
+    return { sessionId: params.sessionId }
   }
 
   public async forkSession(_params: ForkSessionRequest): Promise<NewSessionResult> {
