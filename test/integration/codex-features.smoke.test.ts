@@ -59,8 +59,7 @@ const hasChatgptAuth = (() => {
   }
 })()
 
-const HAS_CODEX_AUTH =
-  codexInstalled && (CODEX_API_KEY.length > 0 || OPENAI_API_KEY.length > 0 || hasChatgptAuth)
+const HAS_CODEX_AUTH = codexInstalled && (CODEX_API_KEY.length > 0 || OPENAI_API_KEY.length > 0 || hasChatgptAuth)
 
 interface DriverHandle {
   driver: CodexDriver
@@ -128,11 +127,7 @@ describe.skipIf(!HAS_CODEX_AUTH)('feature 1, token + cost rollup', () => {
         toolPolicy: { defaultMode: 'bypassPermissions' },
       })
       const { emit, events } = recorder()
-      await driver.prompt(
-        sessionId,
-        { sessionId, prompt: [{ type: 'text', text: 'Reply with only OK.' }] },
-        emit,
-      )
+      await driver.prompt(sessionId, { sessionId, prompt: [{ type: 'text', text: 'Reply with only OK.' }] }, emit)
       const usage = events.find((e) => e.type === 'usage')
       expect(usage).toBeDefined()
       if (usage?.type === 'usage') {
@@ -156,11 +151,7 @@ describe.skipIf(!HAS_CODEX_AUTH)('feature 2, model_advertisement at first prompt
         toolPolicy: { defaultMode: 'bypassPermissions' },
       })
       const { emit, events } = recorder()
-      await driver.prompt(
-        sessionId,
-        { sessionId, prompt: [{ type: 'text', text: 'Reply OK.' }] },
-        emit,
-      )
+      await driver.prompt(sessionId, { sessionId, prompt: [{ type: 'text', text: 'Reply OK.' }] }, emit)
       const ad = events.find((e) => e.type === 'model_advertisement')
       expect(ad).toBeDefined()
       if (ad?.type === 'model_advertisement') {
@@ -263,9 +254,9 @@ describe.skipIf(!HAS_CODEX_AUTH)('black case A, prompt on unknown sessionId', ()
     const { driver, cleanup } = await makeDriver()
     try {
       const { emit } = recorder()
-      await expect(
-        driver.prompt('does-not-exist', { sessionId: 'does-not-exist', prompt: [] }, emit),
-      ).rejects.toThrow(SessionNotFoundError)
+      await expect(driver.prompt('does-not-exist', { sessionId: 'does-not-exist', prompt: [] }, emit)).rejects.toThrow(
+        SessionNotFoundError,
+      )
     } finally {
       await cleanup()
     }

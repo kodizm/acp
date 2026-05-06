@@ -723,22 +723,18 @@ export class CodexDriver implements BackendDriver {
       throw new SessionNotFoundError(`${params.sessionId} (no codex subprocess)`)
     }
 
-    // 1. Resume by JSONL path when available (Pattern B handoff sets it
-    //    in T11). Otherwise resume by thread_id (default codex behaviour:
-    //    glob the rollout-*-<thread_id>.jsonl path on its side).
-    const resumeParams: { threadId?: string; path?: string } = {}
-    if (state.codexJsonlPath !== undefined) {
-      resumeParams.path = state.codexJsonlPath
-    } else if (state.codexThreadId !== undefined) {
-      resumeParams.threadId = state.codexThreadId
-    } else {
-      throw new SessionNotFoundError(`${params.sessionId} (no codex thread id or path)`)
+    // Codex `ThreadResumeParams` requires `threadId` (camelCase, non-
+    // optional). Path-based resume is not exposed in the public v2
+    // schema. Phase 2 T11's Pattern B JSONL handoff is captured in
+    // codexJsonlPath but the resume call uses threadId alone; codex
+    // glob-resolves the rollout file from the threadId on its side.
+    if (state.codexThreadId === undefined) {
+      throw new SessionNotFoundError(`${params.sessionId} (no codex thread id)`)
     }
 
-    const response = await state.process.request<{ thread: { id: string; path?: string } }>(
-      'thread/resume',
-      resumeParams,
-    )
+    const response = await state.process.request<{ thread: { id: string; path?: string } }>('thread/resume', {
+      threadId: state.codexThreadId,
+    })
 
     // Refresh state in case codex returned an updated path.
     state.codexThreadId = response.thread.id
