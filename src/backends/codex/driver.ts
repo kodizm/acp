@@ -262,8 +262,8 @@ export class CodexDriver implements BackendDriver {
       model?: string
     }>('thread/start', {
       cwd: params.cwd,
-      approval_policy: approvalPolicy,
-      sandbox_policy: sandboxPolicy,
+      approvalPolicy,
+      sandboxPolicy,
       ...(params.model === undefined ? {} : { model: params.model }),
     })
 
@@ -329,18 +329,21 @@ export class CodexDriver implements BackendDriver {
     // 2. Translate canonical content blocks to codex UserInput[].
     //    Pattern B: when resuming with a cached answer, prepend a retry
     //    prefix so the model re-issues the deferred tool call.
-    const inputs: Array<{ type: string; text?: string }> = []
+    // Codex's UserInput schema requires `text_elements: Array<TextElement>`
+    // even when empty (codex-rs/v2/UserInput.ts: text_elements is non-optional).
+    const inputs: Array<{ type: string; text?: string; text_elements: ReadonlyArray<unknown> }> = []
     if (resumeAnswer !== undefined && resumeToolUseId !== undefined && resumeToolName !== undefined) {
       inputs.push({
         type: 'text',
         text: this.injectDeferredResumePrefix(resumeAnswer, resumeToolUseId, resumeToolName),
+        text_elements: [],
       })
     }
     for (const block of params.prompt) {
       if (typeof block === 'object' && block !== null) {
         const b = block as { type?: string; text?: string }
         if (b.type === 'text' && typeof b.text === 'string') {
-          inputs.push({ type: 'text', text: b.text })
+          inputs.push({ type: 'text', text: b.text, text_elements: [] })
         }
       }
     }
@@ -474,7 +477,7 @@ export class CodexDriver implements BackendDriver {
     // 5. Send turn/start with serialized inputs.
     try {
       const turnStartResult = await state.process.request<{ turn: { id: string } }>('turn/start', {
-        thread_id: state.codexThreadId,
+        threadId: state.codexThreadId,
         input: inputs,
       })
       state.activeTurnId = turnStartResult.turn.id
@@ -491,7 +494,7 @@ export class CodexDriver implements BackendDriver {
           if (state.process !== undefined && state.codexThreadId !== undefined && state.activeTurnId !== undefined) {
             await state.process
               .request('turn/interrupt', {
-                thread_id: state.codexThreadId,
+                threadId: state.codexThreadId,
                 turn_id: state.activeTurnId,
               })
               .catch(() => undefined)
@@ -723,11 +726,11 @@ export class CodexDriver implements BackendDriver {
     // 1. Resume by JSONL path when available (Pattern B handoff sets it
     //    in T11). Otherwise resume by thread_id (default codex behaviour:
     //    glob the rollout-*-<thread_id>.jsonl path on its side).
-    const resumeParams: { thread_id?: string; path?: string } = {}
+    const resumeParams: { threadId?: string; path?: string } = {}
     if (state.codexJsonlPath !== undefined) {
       resumeParams.path = state.codexJsonlPath
     } else if (state.codexThreadId !== undefined) {
-      resumeParams.thread_id = state.codexThreadId
+      resumeParams.threadId = state.codexThreadId
     } else {
       throw new SessionNotFoundError(`${params.sessionId} (no codex thread id or path)`)
     }
@@ -758,7 +761,7 @@ export class CodexDriver implements BackendDriver {
     // Fresh ACP sessionId allocated; mapping back to the new
     // codexThreadId from the fork response.
     const response = await sourceState.process.request<{ thread: { id: string; path?: string } }>('thread/fork', {
-      thread_id: sourceState.codexThreadId,
+      threadId: sourceState.codexThreadId,
       ephemeral: false,
     })
 

@@ -196,9 +196,7 @@ describe.skipIf(!HAS_AUTH)('real Claude API compaction smoke', () => {
     expect(observedEnv?.DISABLE_AUTO_COMPACT).toBe('1')
 
     // No compaction events expected (auto-compact disabled).
-    const compactionEvents = events.filter(
-      (e) => e.type === 'compaction_started' || e.type === 'compaction_completed',
-    )
+    const compactionEvents = events.filter((e) => e.type === 'compaction_started' || e.type === 'compaction_completed')
     expect(compactionEvents.length).toBe(0)
   }, 30_000)
 })

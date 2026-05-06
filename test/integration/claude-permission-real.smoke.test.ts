@@ -207,9 +207,7 @@ describe.skipIf(!HAS_AUTH)('real Claude API canUseTool runtime path', () => {
     if (writeBegins.length > 0) {
       const firstBegin = writeBegins[0]
       if (firstBegin?.type === 'tool_call_begin') {
-        const matchingEnd = events.find(
-          (e) => e.type === 'tool_call_end' && e.toolUseId === firstBegin.toolUseId,
-        )
+        const matchingEnd = events.find((e) => e.type === 'tool_call_end' && e.toolUseId === firstBegin.toolUseId)
         if (matchingEnd?.type === 'tool_call_end') {
           expect(matchingEnd.isError).toBe(true)
         }

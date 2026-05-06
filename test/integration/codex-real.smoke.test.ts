@@ -23,6 +23,9 @@ import { CodexDriver } from '@/backends/codex/driver.ts'
 import type { EventEmitter } from '@/backends/driver.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
 
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+
 const CODEX_API_KEY = process.env.CODEX_API_KEY ?? ''
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? ''
 
@@ -35,7 +38,25 @@ const codexInstalled = (() => {
   }
 })()
 
-const HAS_CODEX_AUTH = codexInstalled && (CODEX_API_KEY.length > 0 || OPENAI_API_KEY.length > 0)
+/**
+ * Detect ChatGPT-mode auth via `~/.codex/auth.json`. The codex CLI
+ * supports two auth modes: api-key (env var) and chatgpt (OAuth flow
+ * persisted to disk). Free / Plus accounts use chatgpt mode.
+ */
+const hasChatgptAuth = (() => {
+  const path = `${homedir()}/.codex/auth.json`
+  if (!existsSync(path)) {
+    return false
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { auth_mode?: string }
+    return parsed.auth_mode === 'chatgpt'
+  } catch {
+    return false
+  }
+})()
+
+const HAS_CODEX_AUTH = codexInstalled && (CODEX_API_KEY.length > 0 || OPENAI_API_KEY.length > 0 || hasChatgptAuth)
 
 const recorder = (): { events: SessionUpdateEvent[]; emit: EventEmitter } => {
   const events: SessionUpdateEvent[] = []
@@ -48,10 +69,18 @@ describe.skipIf(!HAS_CODEX_AUTH)('Phase 2 codex real-CLI smoke', () => {
     const driver = new CodexDriver({
       agentInfo: { version: '0.0.1-smoke' },
       configDir: tempDir,
-      spawnFactory: async (options) => {
+      spawnFactory: async (_options) => {
+        // Phase 2 T2's `--config <path>` arg is broken (codex's --config
+        // is short for `-c key=value`, not a path). For this real-CLI
+        // smoke we inject model + reasoning_effort via `-c` flags so
+        // the subprocess uses the cheap test model regardless of the
+        // user's `~/.codex/config.toml` (which may pin gpt-5.5+high).
         const proc = new CodexAppServerProcess({
           binaryPath: 'codex',
-          configPath: options.configPath,
+          // ChatGPT-account auth only supports the default model (gpt-5.5);
+          // alternates like gpt-5-mini error out. We drop model override and
+          // only force reasoning_effort=low so the smoke is fast.
+          binaryArgs: ['app-server', '-c', 'model_reasoning_effort="low"', '--listen', 'stdio://'],
         })
         await proc.spawn()
         return proc
@@ -62,6 +91,8 @@ describe.skipIf(!HAS_CODEX_AUTH)('Phase 2 codex real-CLI smoke', () => {
       cwd: process.cwd(),
       mcpServers: [],
       toolPolicy: { defaultMode: 'bypassPermissions' },
+      // No `model` override: ChatGPT-account auth only supports the default
+      // model (gpt-5.5). API-key tests can pass `model: 'gpt-5-mini'`.
     })
 
     const { emit, events } = recorder()
@@ -79,7 +110,7 @@ describe.skipIf(!HAS_CODEX_AUTH)('Phase 2 codex real-CLI smoke', () => {
     expect(events.some((e) => e.type === 'usage')).toBe(true)
 
     await driver.cancel({ sessionId }).catch(() => {})
-  }, 240_000)
+  }, 300_000)
 })
 
 describe('Phase 2 codex offline smoke (inline-adapter scenarios)', () => {

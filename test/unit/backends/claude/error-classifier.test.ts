@@ -47,8 +47,8 @@ describe('classifyClaudeError', () => {
   })
 
   test('non-Error thrown values map to sdk_throw with stringified detail', () => {
-    expect(classifyClaudeError('plain string').reason).toBe('sdk_throw')
-    expect(classifyClaudeError({ unstructured: true }).reason).toBe('sdk_throw')
-    expect(classifyClaudeError(undefined).reason).toBe('sdk_throw')
+    expect(classifyClaudeError('plain string')?.reason).toBe('sdk_throw')
+    expect(classifyClaudeError({ unstructured: true })?.reason).toBe('sdk_throw')
+    expect(classifyClaudeError(undefined)?.reason).toBe('sdk_throw')
   })
 })

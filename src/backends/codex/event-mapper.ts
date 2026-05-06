@@ -28,18 +28,27 @@ import { randomUUID } from 'node:crypto'
 
 import type { SessionUpdateEvent } from '../../wire/events.ts'
 
+/**
+ * Codex `TokenUsageBreakdown` (camelCase per `v2/TokenUsageBreakdown.ts`).
+ * Codex doesn't split cached vs cache-creation; we map cached -> cache
+ * read and pin cache creation to zero.
+ */
 interface TokenCounts {
-  input_tokens: number
-  output_tokens: number
-  cache_read_tokens: number
-  cache_creation_tokens: number
+  totalTokens?: number
+  inputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  reasoningOutputTokens?: number
 }
 
+/**
+ * Codex `ThreadTokenUsageUpdatedNotification.params` shape per
+ * `v2/ThreadTokenUsageUpdatedNotification.ts`.
+ */
 interface TokenUsageNotification {
-  thread_id?: string
-  total?: TokenCounts
-  last?: TokenCounts
-  model_context_window?: number
+  threadId?: string
+  turnId?: string
+  tokenUsage?: { total?: TokenCounts; last?: TokenCounts; modelContextWindow?: number | null }
 }
 
 interface CodexItem {
@@ -227,8 +236,8 @@ export class CodexEventMapper {
       return
     }
     if (item.type === 'ContextCompaction') {
-      const preTokens = this.preCompactionTotal?.input_tokens ?? 0
-      const postTokens = this.lastTotalUsage?.input_tokens ?? 0
+      const preTokens = this.preCompactionTotal?.inputTokens ?? 0
+      const postTokens = this.lastTotalUsage?.inputTokens ?? 0
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'compaction_completed',
@@ -259,8 +268,9 @@ export class CodexEventMapper {
   }
 
   private handleTokenUsage(params: TokenUsageNotification): void {
-    if (params.total !== undefined) {
-      this.lastTotalUsage = params.total
+    const total = params.tokenUsage?.total
+    if (total !== undefined) {
+      this.lastTotalUsage = total
     }
   }
 
@@ -269,10 +279,10 @@ export class CodexEventMapper {
     this.options.emit({
       sessionId: this.options.sessionId,
       type: 'usage',
-      inputTokens: this.lastTotalUsage.input_tokens,
-      outputTokens: this.lastTotalUsage.output_tokens,
-      cacheReadTokens: this.lastTotalUsage.cache_read_tokens,
-      cacheCreationTokens: this.lastTotalUsage.cache_creation_tokens,
+      inputTokens: this.lastTotalUsage.inputTokens ?? 0,
+      outputTokens: this.lastTotalUsage.outputTokens ?? 0,
+      cacheReadTokens: this.lastTotalUsage.cachedInputTokens ?? 0,
+      cacheCreationTokens: 0, // codex does not split cache creation
       costUsd: 0,
     })
   }

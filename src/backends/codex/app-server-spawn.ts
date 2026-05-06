@@ -149,10 +149,22 @@ export class CodexAppServerProcess {
    * Send the JSON-RPC `initialize` request, await the response, then
    * send the `initialized` notification.
    *
-   * @param params - the codex InitializeParams (protocolVersion + caps)
+   * @param params - the codex InitializeParams. `clientInfo` is
+   *   required by codex app-server (`Invalid request: missing field
+   *   clientInfo` otherwise); we inject a sane default when caller
+   *   omits.
    */
-  public async initialize<T = Record<string, unknown>>(params: { protocolVersion: number }): Promise<T> {
-    const result = await this.request<T>('initialize', params)
+  public async initialize<T = Record<string, unknown>>(params: {
+    protocolVersion?: number
+    clientInfo?: { name: string; version: string; title?: string }
+  }): Promise<T> {
+    const enriched: Record<string, unknown> = {
+      clientInfo: params.clientInfo ?? { name: 'kodizm-acp', version: '0.0.1' },
+    }
+    if (params.protocolVersion !== undefined) {
+      enriched.protocolVersion = params.protocolVersion
+    }
+    const result = await this.request<T>('initialize', enriched)
     this.notify('initialized', {})
     return result
   }

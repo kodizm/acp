@@ -175,9 +175,7 @@ describe.skipIf(!HAS_AUTH)('real Claude API permission smoke', () => {
     const writeSuccesses = events.filter(
       (e) =>
         e.type === 'tool_call_end' &&
-        events.some(
-          (b) => b.type === 'tool_call_begin' && b.name === 'Write' && b.toolUseId === e.toolUseId,
-        ) &&
+        events.some((b) => b.type === 'tool_call_begin' && b.name === 'Write' && b.toolUseId === e.toolUseId) &&
         e.isError === false,
     )
     expect(writeSuccesses.length).toBe(0)

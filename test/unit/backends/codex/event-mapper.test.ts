@@ -111,10 +111,12 @@ describe('CodexEventMapper.handle (Phase 2 T7)', () => {
     const { events, emit } = collector()
     const mapper = new CodexEventMapper({ sessionId: 's1', emit })
     mapper.handle('thread/tokenUsage/updated', {
-      thread_id: 't1',
-      total: { input_tokens: 78_000, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      last: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model_context_window: 200_000,
+      threadId: 't1',
+      tokenUsage: {
+        total: { totalTokens: 78_000, inputTokens: 78_000, outputTokens: 0, cachedInputTokens: 0 },
+        last: { totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+        modelContextWindow: 200_000,
+      },
     })
     mapper.handle('item/started', {
       thread_id: 't1',
@@ -122,10 +124,12 @@ describe('CodexEventMapper.handle (Phase 2 T7)', () => {
       item: { id: 'cc_1', type: 'ContextCompaction' },
     })
     mapper.handle('thread/tokenUsage/updated', {
-      thread_id: 't1',
-      total: { input_tokens: 12_000, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      last: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model_context_window: 200_000,
+      threadId: 't1',
+      tokenUsage: {
+        total: { totalTokens: 12_000, inputTokens: 12_000, outputTokens: 0, cachedInputTokens: 0 },
+        last: { totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+        modelContextWindow: 200_000,
+      },
     })
     mapper.handle('item/completed', {
       thread_id: 't1',
@@ -147,20 +151,23 @@ describe('CodexEventMapper.handle (Phase 2 T7)', () => {
     const { events, emit } = collector()
     const mapper = new CodexEventMapper({ sessionId: 's1', emit })
     mapper.handle('thread/tokenUsage/updated', {
-      thread_id: 't1',
-      total: {
-        input_tokens: 1_500,
-        output_tokens: 600,
-        cache_read_tokens: 8_000,
-        cache_creation_tokens: 100,
+      threadId: 't1',
+      turnId: 'tu1',
+      tokenUsage: {
+        total: {
+          totalTokens: 2_100,
+          inputTokens: 1_500,
+          outputTokens: 600,
+          cachedInputTokens: 8_000,
+        },
+        last: {
+          totalTokens: 2_100,
+          inputTokens: 1_500,
+          outputTokens: 600,
+          cachedInputTokens: 8_000,
+        },
+        modelContextWindow: 200_000,
       },
-      last: {
-        input_tokens: 1_500,
-        output_tokens: 600,
-        cache_read_tokens: 8_000,
-        cache_creation_tokens: 100,
-      },
-      model_context_window: 200_000,
     })
     mapper.handle('turn/completed', {
       thread_id: 't1',
@@ -173,7 +180,8 @@ describe('CodexEventMapper.handle (Phase 2 T7)', () => {
     expect(usage.inputTokens).toBe(1_500)
     expect(usage.outputTokens).toBe(600)
     expect(usage.cacheReadTokens).toBe(8_000)
-    expect(usage.cacheCreationTokens).toBe(100)
+    // Codex doesn't split cache creation; canonical usage gets 0.
+    expect(usage.cacheCreationTokens).toBe(0)
   })
 
   test('thread/status/changed is not surfaced as a canonical event (driver-internal)', () => {

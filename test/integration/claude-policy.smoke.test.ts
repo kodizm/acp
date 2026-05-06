@@ -95,12 +95,8 @@ describe.skipIf(!HAS_AUTH)('real Claude API tool policy smoke', () => {
     // Either the model declares blocked, OR it fails to write (no
     // tool_call_end with non-error for Write/Edit). Lenient assertion
     // because model phrasing varies.
-    const writeAttempted = events.some(
-      (e) => e.type === 'tool_call_begin' && (e.name === 'Write' || e.name === 'Edit'),
-    )
-    const writeSucceeded = events.some(
-      (e) => e.type === 'tool_call_end' && e.isError === false,
-    )
+    const writeAttempted = events.some((e) => e.type === 'tool_call_begin' && (e.name === 'Write' || e.name === 'Edit'))
+    const writeSucceeded = events.some((e) => e.type === 'tool_call_end' && e.isError === false)
 
     if (writeAttempted) {
       // SDK's dontAsk mode should have denied the Write call before
