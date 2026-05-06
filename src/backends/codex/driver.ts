@@ -120,6 +120,16 @@ interface CodexSessionState {
    * a setInterval probe; gap > threshold -> session_failed:'sdk_stall'.
    */
   inactivityThresholdMs?: number
+  /**
+   * Codex model id captured from `thread/start`. Used to emit
+   * canonical `model_advertisement` at the first prompt entry.
+   */
+  codexModel?: string
+  /**
+   * Latch that flips after the first `model_advertisement` emission;
+   * subsequent prompts skip re-advertising the same model.
+   */
+  modelAdvertised?: boolean
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -213,6 +223,7 @@ export class CodexDriver implements BackendDriver {
       configPath,
       ...(params.heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs: params.heartbeatIntervalMs }),
       ...(params.inactivityThresholdMs === undefined ? {} : { inactivityThresholdMs: params.inactivityThresholdMs }),
+      ...(threadResponse.model === undefined ? {} : { codexModel: threadResponse.model }),
     })
 
     return { sessionId }
@@ -225,6 +236,19 @@ export class CodexDriver implements BackendDriver {
     }
     if (state.process === undefined || state.codexThreadId === undefined) {
       throw new SessionNotFoundError(`${sessionId} (no codex thread)`)
+    }
+
+    // 0. One-shot model advertisement: codex returns the model from
+    //    thread/start; canonical wire's model_advertisement event
+    //    fires on first prompt() so the orchestrator's stream-event
+    //    persister sees it before any output_chunk lands.
+    if (state.modelAdvertised !== true && state.codexModel !== undefined) {
+      state.modelAdvertised = true
+      emit.send({
+        sessionId,
+        type: 'model_advertisement',
+        model: state.codexModel,
+      })
     }
 
     // 1. Allocate per-turn abort controller; cancel() flips it.
