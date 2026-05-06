@@ -12,7 +12,7 @@
  */
 
 import { MethodNotSupportedError } from '../server/errors.ts'
-import type { SessionUpdateEvent } from '../wire/events.ts'
+import type { SessionFailedReason, SessionUpdateEvent } from '../wire/events.ts'
 import type {
   CancelRequest,
   ForkSessionRequest,
@@ -46,6 +46,16 @@ export interface DriverCapabilities {
 
   /** skill_activation events emitted. */
   skillEvents: boolean
+
+  /**
+   * Phase 1.7 debug recorder is wired into the driver. When true, the
+   * driver tees raw backend messages + RPC frames into a
+   * {@link import('../util/debug-recorder.ts').DebugRecorder} when
+   * the orchestrator opts in via `NewSessionRequest.debug` (or the
+   * process-wide `KODIZM_DEBUG=1` env). When false, the driver
+   * ignores debug toggles entirely.
+   */
+  debug: boolean
 }
 
 /**
@@ -69,9 +79,26 @@ export interface NewSessionResult {
 /**
  * Result of a `prompt` call. `stopReason` mirrors Anthropic's SDK
  * stop reasons; codex / opencode normalize to this enum.
+ *
+ * `session_failed` is the Phase 1.7 addition: surfaces a structured
+ * lifecycle failure (sdk_stall, sdk_throw, transport_error, etc.)
+ * to callers that prefer the typed return shape over catching a
+ * thrown error. The matching `failureReason` + `failureDetail`
+ * fields carry the same data the parallel `session_failed`
+ * sessionUpdate event emits.
  */
 export interface PromptResult {
-  stopReason: 'end_turn' | 'cancelled' | 'process_died' | 'max_tokens' | 'tool_use'
+  stopReason: 'end_turn' | 'cancelled' | 'process_died' | 'max_tokens' | 'tool_use' | 'session_failed'
+  /**
+   * Set when stopReason === 'session_failed'. Mirrors the
+   * `session_failed` event's `reason` field.
+   */
+  failureReason?: SessionFailedReason
+  /**
+   * Set when stopReason === 'session_failed'. Human-readable detail
+   * the orchestrator can render in audit / UI.
+   */
+  failureDetail?: string
 }
 
 /**

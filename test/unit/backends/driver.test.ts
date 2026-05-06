@@ -69,6 +69,7 @@ describe('BackendDriver contract', () => {
       thinking: true,
       subagent: true,
       skillEvents: true,
+      debug: true,
     })
 
     const init = await driver.initialize({ protocolVersion: 1 })
@@ -99,9 +100,44 @@ describe('BackendDriver contract', () => {
       thinking: false,
       subagent: false,
       skillEvents: false,
+      debug: true,
     }
     const driver = new StubDriver(caps)
     expect(driver.capabilities()).toEqual(caps)
+  })
+})
+
+describe('Phase 1.7 PromptResult shape', () => {
+  test('PromptResult accepts session_failed stopReason with failure metadata', () => {
+    const result: PromptResult = {
+      stopReason: 'session_failed',
+      failureReason: 'sdk_stall',
+      failureDetail: 'no SDK message for 60s',
+    }
+    expect(result.stopReason).toBe('session_failed')
+    expect(result.failureReason).toBe('sdk_stall')
+    expect(result.failureDetail).toContain('60s')
+  })
+
+  test('PromptResult preserves the legacy stopReason values', () => {
+    const result: PromptResult = { stopReason: 'end_turn' }
+    expect(result.stopReason).toBe('end_turn')
+  })
+})
+
+describe('Phase 1.7 DriverCapabilities.debug flag', () => {
+  test('caps.debug round-trips through capabilities()', () => {
+    const caps: DriverCapabilities = {
+      resume: true,
+      fork: true,
+      fileUpload: true,
+      thinking: true,
+      subagent: true,
+      skillEvents: true,
+      debug: true,
+    }
+    const driver = new StubDriver(caps)
+    expect(driver.capabilities().debug).toBe(true)
   })
 })
 
@@ -113,6 +149,7 @@ describe('ensureCapability', () => {
     thinking: false,
     subagent: false,
     skillEvents: false,
+    debug: false,
   }
 
   test('passes silently when the capability is advertised', () => {
