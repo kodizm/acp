@@ -10,7 +10,7 @@ Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in prog
 |------|-------|--------|
 | 0, bootstrap | T1-T4 | done |
 | 1, ACP server core | T5-T9 | done |
-| 2, canonical wire shape | T10-T12 | pending |
+| 2, canonical wire shape | T10-T12 | done |
 | 3, backend driver + registry | T13-T15 | pending |
 | 4, Claude SDK driver | T16-T20 | pending |
 | 5, feature plumbing | T21-T28 | pending |
@@ -208,6 +208,105 @@ const backend = resolveBackendFromEnv(process.env)  // 'claude'
 // throws UnknownBackendError when value is not in the allowlist
 ```
 
+### `@/wire/schemas`, canonical request schemas
+
+Six request schemas validate every Kodizm-flavored ACP payload at the wire boundary. All canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`) live at the top level; the shared refinement rejects any payload smuggling them through `_meta`.
+
+```ts
+import {
+  InitializeRequestSchema,
+  NewSessionRequestSchema,
+  PromptRequestSchema,
+  CancelRequestSchema,
+  LoadSessionRequestSchema,
+  ForkSessionRequestSchema,
+} from '@/wire/schemas.ts'
+
+const result = NewSessionRequestSchema.safeParse({
+  cwd: '/workspace/auto-mount-test',
+  mcpServers: [{ type: 'http', name: 'kodizm', url: 'https://kodizm.com/mcp/internal' }],
+  additionalDirectories: ['/data/shared'],
+  systemPrompt: { append: 'Always respond in Turkish.' },
+  model: 'claude-sonnet-4-6',
+  skills: ['my-coding'],
+})
+
+if (!result.success) {
+  // result.error.issues carries the validation failures
+}
+```
+
+Type aliases are inferred via `z.infer` and re-exported from `@/wire/types`:
+
+```ts
+import type { NewSessionRequest, PromptRequest } from '@/wire/types.ts'
+```
+
+`systemPrompt` accepts both `string` (full replacement of the SDK preset) and `{ append: string }` (preset + append) shapes.
+
+### `@/wire/events`, sessionUpdate event union
+
+Discriminated union of every stream event a backend driver may emit during a turn. 13 variants keyed on `type`, all carrying the `sessionId` envelope.
+
+```ts
+import { SessionUpdateEventSchema } from '@/wire/events.ts'
+
+const usage = SessionUpdateEventSchema.parse({
+  sessionId: 's1',
+  type: 'usage',
+  inputTokens: 1234,
+  outputTokens: 567,
+  cacheReadTokens: 8000,
+  cacheCreationTokens: 100,
+  costUsd: 0.0152,
+})
+```
+
+| Event type | Carries |
+|------------|---------|
+| `output_chunk` | `text` (assistant text stream) |
+| `thinking_chunk` | `text` (reasoning tokens) |
+| `tool_call_begin` | `toolUseId`, `name`, `input` |
+| `tool_call_progress` | `toolUseId`, `delta` |
+| `tool_call_end` | `toolUseId`, `result`, `isError` |
+| `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]` |
+| `usage` | 4 token counts + `costUsd` |
+| `subagent_spawn` | `childId`, `parentSessionId`, `model`, `tools[]` |
+| `subagent_complete` | `childId`, token slice, cost slice |
+| `skill_activation` | `skillName`, `source` (`auto` \| `invoked`) |
+| `model_advertisement` | `model` |
+| `process_died` | `exitCode`, optional `detail` |
+| `cancelled` | `reason` |
+
+This union is the SOURCE OF TRUTH across all backends. Phases 2-3 normalize codex / opencode native stream events into this shape via per-backend mappers.
+
+### `@/wire/content`, content blocks
+
+Five content block types for `session/prompt` payloads, mirroring Anthropic's SDK content shapes.
+
+```ts
+import { ContentBlockSchema, MAX_INLINE_BASE64_BYTES } from '@/wire/content.ts'
+
+const block = ContentBlockSchema.parse({
+  type: 'image',
+  source: {
+    type: 'base64',
+    mediaType: 'image/png',
+    data: 'iVBORw0KGgo...',  // < 5MB decoded
+  },
+})
+```
+
+| Block type | Carries |
+|------------|---------|
+| `text` | `text` |
+| `image` | `source: {type: 'base64', mediaType, data} \| {type: 'url', url}` |
+| `document` | `source: {...}`, optional `title` |
+| `tool_use` | `id`, `name`, `input` |
+| `tool_result` | `toolUseId`, `content[{type:'text', text}]`, `isError` |
+
+Inline base64 payloads cap at `MAX_INLINE_BASE64_BYTES` (5MB decoded). Beyond that, use a URL-sourced block backed by external storage.
+
 ## Test layering
 
 | Layer | Purpose | Where | Cost |
@@ -229,8 +328,16 @@ Detailed schema lives under `src/wire/` (lands in Wave 2).
 ```
 src/
   index.ts                    # bin entrypoint, env validation, server boot
-  server/                     # ACP server core (transport, dispatch, lifecycle, errors, aliases)
-  wire/                       # canonical request + event shapes (zod, Wave 2)
+  server/                     # ACP server core
+    transport.ts              # NDJSON stdio framing
+    acp-server.ts             # JSON-RPC 2.0 dispatch + RPC alias map
+    errors.ts                 # typed JsonRpcError subclasses
+    lifecycle.ts              # terminator probes + protocol frame validation
+  wire/                       # canonical request + event shapes (zod)
+    schemas.ts                # 6 request schemas (initialize, new, prompt, cancel, load, fork)
+    events.ts                 # 13-variant sessionUpdate event union
+    content.ts                # 5 content block types (text/image/document/tool_use/tool_result)
+    types.ts                  # z.infer re-exports for compile-time consumption
   backends/                   # per-backend driver + event mapper (Wave 3-4)
     claude/                   # phase 1
     codex/                    # phase 2
