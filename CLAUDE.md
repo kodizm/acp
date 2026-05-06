@@ -1,51 +1,32 @@
-# CLAUDE.md (package: kodizm-acp)
+# kodizm-acp
 
-This file is consumed by Claude Code when an agent works inside this submodule. It is package-scoped; the parent `kodizm.com` repo's `CLAUDE.md` still applies on top.
-
-## Stack
-
-- Bun >= 1.1 runtime + bundler + test runner.
-- TypeScript 5.6 with `module: ESNext` + `moduleResolution: Bundler`, strict, verbatimModuleSyntax.
-- Biome 1.9 for lint + format. 120 col, single quotes, semicolons asNeeded, trailing commas everywhere.
-- Zod 3.25 for runtime schemas at the wire boundary.
+Package-scoped overlay. Parent `kodizm.com` CLAUDE.md + `my-coding` skill cover everything else; only project-specific facts live here.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `bun test test/unit` | unit suite, fastest |
-| `bun test test/unit/<path>` | single test file |
-| `bun test test/e2e` | full ACP roundtrip with mocked SDK |
-| `bun test:integration` | real-API smoke, gated on env vars |
-| `bunx tsc --noEmit` | typecheck only (no emit) |
-| `bunx biome check src test` | lint + format check |
-| `bunx biome check --write src test` | apply auto-fixes |
-
-## Code style
-
-The parent repo's `my-coding` rules apply. TypeScript-specific reminders:
-
-- Every public function and class has a JSDoc block with `@param`, `@returns`, `@throws` where relevant.
-- Type everything; no `any`. Use `unknown` at boundaries, narrow inside.
-- Path alias `@/` resolves to `src/`. Use it from `test/`; relative imports inside `src/`.
-- Use `import type { ... }` for type-only imports (verbatimModuleSyntax requires it).
-- Multi-line collections in source code; Biome inlines short JSON arrays in config files (accept).
-- Numbered step comments for any function with 3+ logical phases.
-- Stdout is reserved for ACP wire. NEVER `console.log`. Use the `createLogger` helper from `@/util/logger`.
-
-## TDD
-
-Red-green-refactor mandatory. Every feature, bug fix, or refactor starts with a failing test. Bun's test runner (`bun:test`) is jest-compatible; mocks via `mock(...)`.
+| `bun test test/unit` | unit suite (mocked SDK) |
+| `bun test test/e2e` | full ACP roundtrip, mocked SDK |
+| `bun test test/integration` | real-API smoke, gated on `ANTHROPIC_API_KEY` |
+| `bunx tsc --noEmit` | typecheck (Bundler resolution, `@/` alias) |
+| `bunx biome check --write src test` | lint + format with auto-fix |
 
 ## Architecture invariants
 
-- One process serves the AcpServer; backend selection is process-spawn time via `KODIZM_BACKEND`.
-- Each `BackendDriver` implements the unified contract in `src/backends/driver.ts`. Phase 1 ships `ClaudeDriver`; phases 2-3 add `CodexDriver` and `OpencodeDriver` without touching the AcpServer.
-- The Kodizm canonical wire shape is the SOURCE OF TRUTH for fields the orchestrator passes (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, content blocks). Backends translate down; do not smuggle through `_meta` on the orchestrator-facing edge.
+- One process per `KODIZM_BACKEND` value. Backend selection is spawn-time; not switchable mid-process.
+- All backends implement `BackendDriver` (`src/backends/driver.ts`). Adding codex/opencode (phases 2-3) does not touch `AcpServer`.
+- Kodizm canonical wire shape (`src/wire/`) is authoritative for orchestrator-facing fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, content blocks). Backends translate down. NEVER smuggle Kodizm fields through `_meta` on the orchestrator edge.
 
-## Submodule + workflow
+## Gotchas
 
-- This package lives at `packages/kodizm-acp/` in the `kodizm.com` parent repo as a git submodule (`git@github.com:kodizm/acp.git`).
-- Per-task commits land here and push to the `main` branch of `kodizm/acp`.
-- The parent repo's submodule pointer bumps once per phase end (or sooner if pointer drift causes confusion).
-- Plan file lives in the parent at `.ac/plans/kodizm-acp/phase-01-bootstrap-claude.md`; do not duplicate planning notes inside the submodule.
+- **Stdout is reserved for ACP frames.** A single `console.log` corrupts the JSON-RPC stream and kills the session. Use `createLogger` from `@/util/logger` (stderr-only).
+- Biome inlines short JSON arrays in config files (`package.json`, `biome.json`). My-coding's "always multi-line" rule applies to source code; accept biome's reformat for JSON.
+- Path alias `@/` resolves to `src/` from `test/` only. Inside `src/`, use relative imports with `.ts` extension (`allowImportingTsExtensions: true` in tsconfig).
+- Bun's `bun:test` is jest-compatible. Mocks via `mock(fn)`. No `vitest`, no `jest`.
+
+## Submodule workflow
+
+- Lives at `packages/kodizm-acp/` in parent kodizm.com as git submodule (`git@github.com:kodizm/acp.git`).
+- Per-task commits push to `kodizm/acp` main directly. Parent submodule pointer bumps at phase end.
+- Plans live in parent at `.ac/plans/kodizm-acp/`; don't duplicate planning notes inside the submodule.
