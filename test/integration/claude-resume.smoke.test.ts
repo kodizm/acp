@@ -1,59 +1,30 @@
 /**
- * Real Claude API resume smoke. Skipped when ANTHROPIC_API_KEY is
- * not set so the default `bun test` run stays free of network calls.
- *
- * Run: ANTHROPIC_API_KEY=sk-ant-... bun test test/integration/claude-resume.smoke.test.ts
- *
- * Resume semantics: the SDK persists the session transcript to a
- * JSONL file under ~/.claude/projects/<cwd-encoded>/<sessionId>.jsonl
- * after each turn. loadSession({ sessionId }) sets the SDK's `resume`
- * option which replays that transcript on the next prompt.
+ * Real Claude API resume smoke. The SDK persists session transcripts
+ * to ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl after each
+ * turn; loadSession({ sessionId }) sets the SDK's `resume` option
+ * which replays that transcript on the next prompt.
  */
 
 import { describe, expect, test } from 'bun:test'
 
-import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
-import type { SdkMessage } from '@/backends/claude/event-mapper.ts'
-import type { EventEmitter } from '@/backends/driver.ts'
-import type { SessionUpdateEvent } from '@/wire/events.ts'
+import { HAS_AUTH, TEST_MODEL, buildRealDriver, joinOutputText, makeRecordingEmitter } from './_helpers.ts'
 
-const API_KEY = process.env.ANTHROPIC_API_KEY ?? ''
-const HAS_API_KEY = API_KEY.length > 0
-
-function makeRecordingEmitter(): { emit: EventEmitter; events: SessionUpdateEvent[] } {
-  const events: SessionUpdateEvent[] = []
-  return { events, emit: { send: (event) => events.push(event) } }
-}
-
-async function buildRealAdapter(): Promise<SdkAdapter> {
-  const { query } = await import('@anthropic-ai/claude-agent-sdk')
-  return {
-    async *query(args) {
-      for await (const message of query(args)) {
-        yield message as SdkMessage
-      }
-    },
-  }
-}
-
-describe.skipIf(!HAS_API_KEY)('real Claude API resume smoke', () => {
+describe.skipIf(!HAS_AUTH)('real Claude API resume smoke', () => {
   test('newSession + prompt -> loadSession + new prompt continues the conversation', async () => {
-    const adapter = await buildRealAdapter()
-
-    const driver = new ClaudeDriver({
-      credentials: { type: 'api-key', token: API_KEY },
-      agentInfo: { version: '0.0.1-smoke' },
-      sdk: adapter,
-    })
+    const driver = await buildRealDriver()
 
     // 1. Fresh session with a memorable fact.
-    const fresh = await driver.newSession({ cwd: process.cwd(), mcpServers: [] })
+    const fresh = await driver.newSession({
+      cwd: process.cwd(),
+      mcpServers: [],
+      model: TEST_MODEL,
+    })
     const r1 = makeRecordingEmitter()
     await driver.prompt(
       fresh.sessionId,
       {
         sessionId: fresh.sessionId,
-        prompt: [{ type: 'text', text: 'Remember: my favorite color is teal. Say "got it".' }],
+        prompt: [{ type: 'text', text: 'Remember: my favorite color is teal. Reply with just "got it".' }],
       },
       r1.emit,
     )
@@ -73,23 +44,18 @@ describe.skipIf(!HAS_API_KEY)('real Claude API resume smoke', () => {
       loaded.sessionId,
       {
         sessionId: loaded.sessionId,
-        prompt: [{ type: 'text', text: 'What is my favorite color?' }],
+        prompt: [{ type: 'text', text: 'What is my favorite color? Just the color name.' }],
       },
       r2.emit,
     )
 
-    const r2Text = r2.events
-      .filter((e) => e.type === 'output_chunk')
-      .map((e) => (e.type === 'output_chunk' ? e.text : ''))
-      .join(' ')
-      .toLowerCase()
-
+    const r2Text = joinOutputText(r2.events).toLowerCase()
     expect(r2Text).toContain('teal')
   }, 60_000)
 })
 
-describe.skipIf(HAS_API_KEY)('real Claude API resume smoke (skipped)', () => {
-  test('skipped when ANTHROPIC_API_KEY is not set', () => {
-    expect(HAS_API_KEY).toBe(false)
+describe.skipIf(HAS_AUTH)('real Claude API resume smoke (skipped)', () => {
+  test('skipped when no auth env is set', () => {
+    expect(HAS_AUTH).toBe(false)
   })
 })

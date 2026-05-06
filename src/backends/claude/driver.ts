@@ -53,6 +53,13 @@ export interface ClaudeSdkOptions {
   additionalDirectories?: string[]
   systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string }
   model?: string
+  /**
+   * Skills to pre-load into the session's system prompt. The SDK
+   * filters its skill listing to these names; unlisted skills stay
+   * hidden from the model. Pass `'all'` (the SDK default) to keep
+   * every discovered skill, or omit the field for the SDK default.
+   */
+  skills?: string[] | 'all'
   resume?: string
   forkSessionId?: string
   abortController?: AbortController
@@ -90,6 +97,14 @@ interface SessionState {
   options: ClaudeSdkOptions
   abortController?: AbortController
   parentSessionId?: string
+  /**
+   * SDK's own session identifier, captured from the first
+   * `system init` message in `prompt()`. The SDK persists the
+   * transcript JSONL keyed on this id, so {@link loadSession}
+   * passes it back as the SDK's `resume` option. Stays `undefined`
+   * until the first prompt completes.
+   */
+  sdkSessionId?: string
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -132,13 +147,24 @@ export class ClaudeDriver implements BackendDriver {
   }
 
   public async loadSession(params: LoadSessionRequest): Promise<NewSessionResult> {
-    // The SDK's resume mode replays the prior transcript; we reuse the
-    // canonical newSession shape for the options + tag the resume id.
+    // Resume key is the SDK's own session_id (captured during the
+    // original prompt's first system init). When the orchestrator
+    // already ran prompts in this process, we reuse the stored
+    // SDK id; otherwise we pass the orchestrator's id as a best-effort
+    // (works only if the JSONL was persisted under that id, e.g.
+    // by an earlier run that pinned the SDK session).
+    const existing = this.sessions.get(params.sessionId)
+    const resumeKey = existing?.sdkSessionId ?? params.sessionId
+
     const options: ClaudeSdkOptions = {
       ...this.buildBaseSdkOptions(params),
-      resume: params.sessionId,
+      resume: resumeKey,
     }
-    this.sessions.set(params.sessionId, { sessionId: params.sessionId, options })
+    this.sessions.set(params.sessionId, {
+      sessionId: params.sessionId,
+      options,
+      sdkSessionId: existing?.sdkSessionId,
+    })
     return { sessionId: params.sessionId }
   }
 
@@ -166,8 +192,22 @@ export class ClaudeDriver implements BackendDriver {
 
     // Per-turn model override: spread on top of the session's bound
     // options so the original session model survives later turns.
+    //
+    // Auto-resume: once the SDK has reported a session_id (captured
+    // on the first system init below), subsequent turns must pass
+    // it as `resume` so the SDK continues the same transcript
+    // instead of starting fresh. forkSessionId is dropped on the
+    // second-and-later turns because the fork has already been
+    // created; the fork's own sdkSessionId is what subsequent turns
+    // resume from.
+    const baseOptions: ClaudeSdkOptions = { ...state.options }
+    if (state.sdkSessionId !== undefined) {
+      baseOptions.forkSessionId = undefined
+      baseOptions.resume = state.sdkSessionId
+    }
+
     const effectiveOptions: ClaudeSdkOptions = {
-      ...state.options,
+      ...baseOptions,
       ...(params.model === undefined ? {} : { model: params.model }),
     }
 
@@ -188,6 +228,14 @@ export class ClaudeDriver implements BackendDriver {
         prompt: this.serializePrompt(params),
         options: effectiveOptions,
       })) {
+        // Capture the SDK's own session id from the first system init
+        // so loadSession can resume the right JSONL transcript later.
+        if (message.type === 'system' && message.subtype === 'init' && state.sdkSessionId === undefined) {
+          const sdkId = (message as { session_id?: string }).session_id
+          if (sdkId !== undefined && sdkId.length > 0) {
+            state.sdkSessionId = sdkId
+          }
+        }
         tracker.observe(message)
         const events = tracker.rewrite(mapSdkMessage(sessionId, message))
         for (const event of events) {
@@ -245,10 +293,18 @@ export class ClaudeDriver implements BackendDriver {
         ? { additionalDirectories: [...params.additionalDirectories] }
         : {}
 
+    // Skills only flow on session/new (not load / fork; load reuses
+    // the persisted system prompt and fork inherits the source's).
+    const skills =
+      'skills' in params && params.skills !== undefined && params.skills.length > 0
+        ? { skills: [...params.skills] }
+        : {}
+
     return {
       cwd: params.cwd,
       mcpServers: translateMcpServers(params.mcpServers),
       ...additional,
+      ...skills,
     }
   }
 

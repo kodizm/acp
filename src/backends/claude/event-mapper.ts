@@ -29,6 +29,14 @@ interface SdkSystemInitMessage {
   model?: string
   parent_tool_use_id?: string
   uuid?: string
+  /**
+   * SDK's own session identifier. Distinct from our orchestrator-side
+   * UUID; the SDK persists the transcript JSONL under this id so any
+   * resume call must pass it back as the `resume` option. The driver
+   * captures this on the first system init and stores it on the
+   * session state.
+   */
+  session_id?: string
   skills?: string[]
 }
 
@@ -79,7 +87,12 @@ interface SdkToolUseBlock {
 interface SdkToolResultBlock {
   type: 'tool_result'
   tool_use_id: string
-  content: Array<SdkTextBlock>
+  /**
+   * Tool result payload. The SDK normalises text-only results to a
+   * plain string at the wire; structured results land as an array
+   * of text blocks. Our mapper accepts either.
+   */
+  content: string | Array<SdkTextBlock>
   is_error: boolean
 }
 
@@ -222,7 +235,8 @@ function mapUserMessage(sessionId: string, message: SdkUserMessage): SessionUpda
 
   for (const block of message.message.content) {
     if (block.type === 'tool_result') {
-      const resultText = block.content.map((c) => c.text).join('\n')
+      // SDK can hand us either a plain string or an array of text blocks.
+      const resultText = typeof block.content === 'string' ? block.content : block.content.map((c) => c.text).join('\n')
       events.push({
         sessionId,
         type: 'tool_call_end',

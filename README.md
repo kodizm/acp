@@ -1,26 +1,70 @@
 # kodizm-acp
 
-Custom ACP (Agent Client Protocol) server for the Kodizm runtime. Bridges Claude Code, codex, and opencode CLIs through a single Kodizm-flavored ACP surface, replacing the upstream `claude-agent-acp` and `codex-agent` adapters with one maintained codebase.
+Custom ACP (Agent Client Protocol) server for the Kodizm runtime. One Bun TypeScript binary that drives `@anthropic-ai/claude-agent-sdk` directly, surfaces a Kodizm-flavored canonical wire shape to the orchestrator, and replaces upstream `claude-agent-acp` + `codex-acp` adapters with one maintained codebase.
 
-Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) **complete**. Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
+Status: Phase 1 of 5 complete (bootstrap + Claude backend). Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
 
-## Roadmap
+## Why
 
-| Wave | Tasks | Status |
-|------|-------|--------|
-| 0, bootstrap | T1-T4 | done |
-| 1, ACP server core | T5-T9 | done |
-| 2, canonical wire shape | T10-T12 | done |
-| 3, backend driver + registry | T13-T15 | done |
-| 4, Claude SDK driver | T16-T20 | done |
-| 5, feature plumbing | T21-T28 | done |
-| 6, integration + e2e | T29-T31 | done |
+The orchestrator (Laravel `app/Services/Project/Acp/`) wants ONE wire shape that exposes every session-runtime feature for every CLI backend: token rollup, model selection, system prompt replace + append, additional directories, MCP server injection, skill injection, file upload, thinking + output + tool streaming, subagent observability, resume + fork. The upstream adapters smuggle most of this through `_meta`. kodizm-acp promotes them to top-level fields and routes each session through one canonical pipeline.
 
-Phase 2 (codex backend), 3 (opencode backend), 4 (Laravel cutover), 5 (image bake + smoke) follow.
+## Install + build
+
+```bash
+bun install
+bun build src/index.ts --target=bun --outdir=dist
+```
+
+## Environment
+
+| Variable | When | Description |
+|----------|------|-------------|
+| `KODIZM_BACKEND` | always | One of `claude` (phase 1) / `codex` (phase 2) / `opencode` (phase 3). |
+| `KODIZM_LOG_LEVEL` | optional | `debug` / `info` / `warn` / `error`. Default `info`. Logs land on stderr. |
+| `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CODE_REMOTE=1` | claude, subscription | Wins over API key when both set. |
+| `ANTHROPIC_API_KEY` | claude, api-key fallback | Used when no OAuth token is present. |
+
+Stdout is reserved for ACP frames. Never log to stdout.
+
+## Quick start
+
+The bin reads ACP frames over stdin, drives the chosen backend, and emits `sessionUpdate` notifications for every event.
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+  | KODIZM_BACKEND=claude CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..." CLAUDE_CODE_REMOTE=1 \
+    bun run dist/index.js
+```
+
+Programmatic embedding (used inside the integration smokes):
+
+```ts
+import { ClaudeDriver } from '@/backends/claude/driver.ts'
+import { query } from '@anthropic-ai/claude-agent-sdk'
+
+const driver = new ClaudeDriver({
+  credentials: { type: 'subscription', token: process.env.CLAUDE_CODE_OAUTH_TOKEN! },
+  agentInfo: { version: '0.0.1' },
+  sdk: { query: ({ prompt, options }) => query({ prompt, options }) },
+})
+
+const { sessionId } = await driver.newSession({
+  cwd: process.cwd(),
+  mcpServers: [],
+  model: 'claude-haiku-4-5-20251001',
+})
+
+const events: SessionUpdateEvent[] = []
+const result = await driver.prompt(
+  sessionId,
+  { sessionId, prompt: [{ type: 'text', text: 'Say hi.' }] },
+  { send: (event) => events.push(event) },
+)
+// result.stopReason === 'end_turn'
+// events: [model_advertisement, output_chunk, ..., usage]
+```
 
 ## Architecture
-
-The server is a long-running process inside a Kodizm Project container. It speaks ACP (NDJSON JSON-RPC 2.0 over stdio) to the orchestrator, and internally drives one of three backends per process:
 
 ```
 [ orchestrator ]  ──ACP──>  kodizm-acp (Bun TS)  ──> @anthropic-ai/claude-agent-sdk    (Claude)
@@ -28,159 +72,208 @@ The server is a long-running process inside a Kodizm Project container. It speak
                                                 ──> opencode HTTP server (in-process)  (Opencode)
 ```
 
-The backend is selected at process start via the `KODIZM_BACKEND` env var. One process serves one or more sessions of the chosen backend; backends are not switchable mid-process.
+One process per `KODIZM_BACKEND`. Backends are not switchable mid-process. One process serves N concurrent sessions per ACP spec.
 
-## Environment
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `KODIZM_BACKEND` | yes | One of `claude` (phase 1) / `codex` (phase 2) / `opencode` (phase 3). |
-| `KODIZM_LOG_LEVEL` | no | `debug` / `info` / `warn` / `error`. Default `info`. Logs land on stderr. |
-| `KODIZM_MCP_TOKEN` | per session | Per-session JWT minted by the orchestrator and forwarded inline on `session/new` and via env. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | claude only | Subscription pool token; preferred over API key when both are set. |
-| `ANTHROPIC_API_KEY` | claude only (api-key path) | Falls back when subscription token is absent. |
-| `OPENAI_API_KEY` | codex only | Codex auth. Phase 2. |
-
-stdout is reserved for ACP frames. Never log to stdout.
-
-## Build
-
-```bash
-bun install                                      # resolve deps
-bun build src/index.ts --target=bun --outdir=dist  # standalone bin
+```
+src/
+  index.ts                       # bin entrypoint, env validation, server boot
+  server/                        # ACP server core
+    transport.ts                 # NDJSON stdio framing
+    acp-server.ts                # JSON-RPC 2.0 dispatch, RPC method aliases
+    errors.ts                    # typed JsonRpcError subclasses
+    lifecycle.ts                 # terminator probes
+  wire/                          # Kodizm canonical shapes (zod)
+    schemas.ts                   # 6 request schemas
+    events.ts                    # 13-variant sessionUpdate event union
+    content.ts                   # 5 content block types
+  backends/
+    driver.ts                    # BackendDriver interface
+    registry.ts                  # env-driven driver resolution
+    claude/                      # phase 1
+      auth.ts                    # OAuth + api-key resolver
+      mcp-bridge.ts              # wire -> SDK MCP record
+      driver.ts                  # ClaudeDriver: full BackendDriver impl
+      event-mapper.ts            # SDK message -> SessionUpdateEvent
+      content-mapper.ts          # ContentBlock <-> SDK content block
+      subagent.ts                # parent_tool_use_id -> child uuid
+  session/
+    manager.ts                   # SessionManager
+    state.ts                     # SessionState contract
+test/
+  unit/                          # mocked SDK
+  e2e/                           # full ACP roundtrip, mocked SDK
+  integration/                   # real API, gated on auth env
 ```
 
-## Dev
+## API reference
 
-```bash
-bun run dev                                      # watch + run from src
-bun test                                         # unit + e2e (mocked)
-bun test test/unit                               # unit only
-bun test test/e2e                                # e2e mocked pipeline
-ANTHROPIC_API_KEY=sk-... bun test:integration    # real-API smoke (gated)
-bunx tsc --noEmit                                # typecheck
-bunx biome check src test                        # lint
-bunx biome check --write src test                # format + lint with auto-fix
-```
+### `createAcpServer({ transport, backend? })`
 
-## How to use (current modules)
-
-The bin is not yet runnable end-to-end (backend driver lands in Wave 3-4). The Wave 0 + Wave 1 modules are usable as building blocks today.
-
-### `@/util/logger`, stderr-only structured logger
-
-Stdout is reserved for the ACP wire. Use this helper instead of `console.log`.
+JSON-RPC 2.0 dispatcher over an NDJSON transport. When a backend is passed, the server auto-registers the six lifecycle methods (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/load`, `session/fork`) and routes them to the driver with schema validation + capability gating.
 
 ```ts
-import { createLogger } from '@/util/logger.ts'
-
-const log = createLogger({ env: process.env })
-log.info('boot', { backend: 'claude' })
-// stderr <- {"level":"info","message":"boot","timestamp":"2026-05-06T...","backend":"claude"}
-```
-
-### `@/server/transport`, NDJSON stdio transport
-
-Wraps a `ReadableStream<Uint8Array>` + `WritableStream<Uint8Array>` pair as the wire layer. Handles UTF-8 multi-byte chunks, partial line buffering, and malformed-line skipping via an optional callback.
-
-```ts
+import { createAcpServer } from '@/server/acp-server.ts'
 import { createNdjsonTransport } from '@/server/transport.ts'
 
 const transport = createNdjsonTransport({
   readable: Bun.stdin.stream(),
-  writable: new WritableStream({ /* sink to stdout */ }),
-  onInvalidFrame: (raw, err) => log.warn('drop bad frame', { raw, err }),
+  writable: new WritableStream({ write: (chunk) => Bun.write(Bun.stdout, chunk) }),
 })
 
-for await (const frame of transport.readFrames()) {
-  // frame: parsed JSON value
-}
-
-await transport.writeFrame({ jsonrpc: '2.0', id: 1, result: {} })
+const server = createAcpServer({ transport, backend: driver })
+await server.serve()
 ```
 
-### `@/server/acp-server`, JSON-RPC 2.0 dispatch
+The dispatcher fires inbound requests as `void handleRequest(...)` so a long-running prompt never blocks the read loop. Without this, an inbound `session/cancel` could not reach the dispatcher while a prompt was awaiting the SDK stream.
 
-Layers protocol semantics on top of the transport. Method handlers register via `on(method, handler)`. Outbound requests use `request(method, params)` with automatic id correlation.
+### `RPC_METHOD_ALIASES`
 
-```ts
-import { createAcpServer } from '@/server/acp-server.ts'
-
-const server = createAcpServer({ transport })
-
-server.on('initialize', (params) => ({ protocolVersion: 1 }))
-server.on('session/new', async (params) => ({ sessionId: 's1' }))
-
-// Outbound (e.g., asking the orchestrator for permission):
-const decision = await server.request('session/request_permission', {
-  sessionId: 's1',
-  toolCall: { name: 'kodizm__create_task' },
-})
-
-server.notify('sessionUpdate', { sessionId: 's1', payload: '...' })
-
-await server.serve()  // blocks until transport EOF
-```
-
-### `@/server/acp-server`, RPC method aliases
-
-The permission RPC name drifted between SDK drafts (`requestPermission` vs `session/request_permission`). Handlers registered under either form route to the same handler bidirectionally.
+The permission RPC name drifted between SDK drafts (`requestPermission` ↔ `session/request_permission`). Handlers registered under either form route to the same handler bidirectionally.
 
 ```ts
-import { RPC_METHOD_ALIASES, createAcpServer } from '@/server/acp-server.ts'
+import { RPC_METHOD_ALIASES } from '@/server/acp-server.ts'
 
 server.on('session/request_permission', handler)
-// Both wire forms now hit `handler`:
-//   { jsonrpc: '2.0', id: 1, method: 'session/request_permission', ... }
-//   { jsonrpc: '2.0', id: 2, method: 'requestPermission', ... }
+// Both wire forms hit `handler`.
 ```
 
-### `@/server/lifecycle`, terminator probes
+### `BackendDriver`
 
-Mirrors the Laravel-side `AcpClient::request()` four-probe ladder. Returns the first matching error in priority order: process death > cancel-past-grace > deadline.
+Every backend implements this interface. Adding codex / opencode does not touch the dispatcher.
 
 ```ts
-import { pollTerminators, validateProtocolFrame } from '@/server/lifecycle.ts'
+interface BackendDriver {
+  initialize(params: InitializeRequest): Promise<InitializeResult>
+  newSession(params: NewSessionRequest): Promise<NewSessionResult>
+  prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult>
+  cancel(request: CancelRequest): Promise<void>
+  loadSession(params: LoadSessionRequest): Promise<NewSessionResult>
+  forkSession(params: ForkSessionRequest): Promise<NewSessionResult>
+  capabilities(): DriverCapabilities
+}
+```
 
-const result = pollTerminators({
-  isAlive: () => transport.alive,
-  cancelledAt: state.cancelledAt,        // null until session/cancel arrives
-  sessionId: 's1',
-  graceSeconds: 2,                       // CANCEL_GRACE_SECONDS_DEFAULT
-  deadlineMs: Date.now() + 60_000,
+Capability gating runs before driver invocation. A driver that returns `{ resume: false }` causes `session/load` to fail with `MethodNotSupportedError` (-32601, `data.method`, `data.supportedMethods[]`).
+
+### `ClaudeDriver`
+
+Implements `BackendDriver` against `@anthropic-ai/claude-agent-sdk`. Auto-resumes after the first turn so multi-turn conversations preserve the SDK's transcript.
+
+```ts
+const { sessionId } = await driver.newSession({
+  cwd: '/workspace',
+  mcpServers: [
+    {
+      type: 'http',
+      name: 'kodizm',
+      url: 'https://kodizm.com/mcp/internal',
+      headers: [{ name: 'Authorization', value: 'Bearer kdz-int-jwt.x.y' }],
+    },
+  ],
+  additionalDirectories: ['/data/shared'],
+  systemPrompt: { append: 'Always respond in Turkish.' },
+  model: 'claude-haiku-4-5-20251001',
+  skills: ['my-coding'],
 })
-if (result !== null) throw result        // ProcessDiedError | CancelledError | AcpTimeoutError
-
-// Per-frame protocol validation:
-const frame = await readNext()
-const protoError = validateProtocolFrame(frame)
-if (protoError) throw protoError         // AcpProtocolError
 ```
 
-### `@/server/errors`, typed JsonRpcError subclasses
-
-Wire-shape error responses + startup-only errors.
+Per-turn options layer on top of the session's bound options:
 
 ```ts
-import {
-  AcpProtocolError,
-  AcpTimeoutError,
-  BackendDriverError,
-  CancelledError,
-  InternalError,
-  InvalidParamsError,
-  MethodNotFoundError,
-  ProcessDiedError,
-  SessionNotFoundError,
-  toJsonRpcResponse,
-} from '@/server/errors.ts'
-
-throw new InvalidParamsError('cwd must be absolute', { field: 'cwd' })
-
-// Convert any thrown value to a wire response:
-const response = toJsonRpcResponse(requestId, error)
-// { jsonrpc: '2.0', id: <reqId>, error: { code: <-32xxx>, message, data? } }
+await driver.prompt(
+  sessionId,
+  { sessionId, prompt: [...], model: 'claude-sonnet-4-6' },
+  emit,
+)
 ```
+
+The override applies for one turn; the next turn without override falls back to the session's bound model. Every turn captures the SDK's `session_id` from the first system init message and stores it as `sdkSessionId`; subsequent turns auto-resume from that id.
+
+Cancel propagates through an `AbortController` per turn:
+
+```ts
+await driver.cancel({ sessionId })
+// emits a synthetic `cancelled` SessionUpdateEvent (reason='user_cancel')
+// the prompt() returns with stopReason='cancelled' inside the 5s grace window
+```
+
+### `SessionManager`
+
+Multi-session storage. The dispatcher pulls one of these from any backend driver that wants generic session lifecycle.
+
+```ts
+import { SessionManager } from '@/session/manager.ts'
+
+const manager = new SessionManager()
+const state = manager.create('s1', {
+  backend: 'claude',
+  sdkOptions: { cwd: '/workspace', mcpServers: {} },
+  abortController: new AbortController(),
+  parentChildMap: new Map(),
+})
+
+manager.has('s1')   // true
+manager.get('s1')   // throws SessionNotFoundError on miss
+manager.list()      // session ids in insertion order
+manager.close('s1') // aborts the controller, then deletes the entry
+```
+
+`close()` aborts BEFORE deletion so any in-flight SDK `query()` observes cancellation cleanly.
+
+## Wire shape
+
+### Request schemas (`@/wire/schemas`)
+
+Six zod schemas cover every Kodizm-flavored ACP method. Canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`) are top-level. The shared refinement rejects any payload smuggling them through `_meta`.
+
+```ts
+import { NewSessionRequestSchema } from '@/wire/schemas.ts'
+
+const result = NewSessionRequestSchema.safeParse({
+  cwd: '/workspace',
+  mcpServers: [],
+  systemPrompt: { append: 'Always respond in Turkish.' },
+  model: 'claude-haiku-4-5-20251001',
+  skills: ['my-coding'],
+})
+// result.success === true
+```
+
+`AbsolutePathSchema` enforces `/^\//`. `SystemPromptSchema = z.union([z.string(), z.object({ append: z.string() })])`.
+
+### Event union (`@/wire/events`)
+
+Discriminated on `type`. Every variant carries the `sessionId` envelope.
+
+| Event type | Carries |
+|------------|---------|
+| `output_chunk` | `text` (assistant text stream) |
+| `thinking_chunk` | `text` (reasoning tokens) |
+| `tool_call_begin` | `toolUseId`, `name`, `input` |
+| `tool_call_progress` | `toolUseId`, `delta` |
+| `tool_call_end` | `toolUseId`, `result`, `isError` |
+| `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]` |
+| `usage` | `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `costUsd` |
+| `subagent_spawn` | `childId`, `parentSessionId`, `model`, `tools[]` |
+| `subagent_complete` | `childId`, token slice, cost slice |
+| `skill_activation` | `skillName`, `source` (`auto` \| `invoked`) |
+| `model_advertisement` | `model` |
+| `process_died` | `exitCode`, optional `detail` |
+| `cancelled` | `reason` |
+
+### Content blocks (`@/wire/content`)
+
+Five block types for `session/prompt` payloads. Inline base64 caps at 5MB (`MAX_INLINE_BASE64_BYTES`).
+
+| Block type | Carries |
+|------------|---------|
+| `text` | `text` |
+| `image` | `source: {type: 'base64', mediaType, data} \| {type: 'url', url}` |
+| `document` | `source: {...}`, optional `title` |
+| `tool_use` | `id`, `name`, `input` |
+| `tool_result` | `toolUseId`, `content[{type:'text', text}]`, `isError` |
+
+### Error codes (`@/server/errors`)
 
 | Error | Code | When |
 |-------|------|------|
@@ -195,430 +288,58 @@ const response = toJsonRpcResponse(requestId, error)
 | `AcpTimeoutError` | -32004 | read deadline exceeded |
 | `AcpProtocolError` | -32005 | malformed JSON-RPC envelope |
 
-`BackendNotConfiguredError` and `UnknownBackendError` are startup-only (plain Error subclasses); never serialized to the wire.
+## SDK message → Kodizm event mapping
 
-### `@/index`, env validation entrypoint
+Pure function `mapSdkMessage(sessionId, message)` translates each SDK stream message:
 
-`resolveBackendFromEnv(env)` validates `KODIZM_BACKEND` against the allowlist (currently `claude` only).
-
-```ts
-import { resolveBackendFromEnv } from '@/index.ts'
-
-const backend = resolveBackendFromEnv(process.env)  // 'claude'
-// throws BackendNotConfiguredError when env is missing
-// throws UnknownBackendError when value is not in the allowlist
-```
-
-### `@/wire/schemas`, canonical request schemas
-
-Six request schemas validate every Kodizm-flavored ACP payload at the wire boundary. All canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`) live at the top level; the shared refinement rejects any payload smuggling them through `_meta`.
-
-```ts
-import {
-  InitializeRequestSchema,
-  NewSessionRequestSchema,
-  PromptRequestSchema,
-  CancelRequestSchema,
-  LoadSessionRequestSchema,
-  ForkSessionRequestSchema,
-} from '@/wire/schemas.ts'
-
-const result = NewSessionRequestSchema.safeParse({
-  cwd: '/workspace/auto-mount-test',
-  mcpServers: [{ type: 'http', name: 'kodizm', url: 'https://kodizm.com/mcp/internal' }],
-  additionalDirectories: ['/data/shared'],
-  systemPrompt: { append: 'Always respond in Turkish.' },
-  model: 'claude-sonnet-4-6',
-  skills: ['my-coding'],
-})
-
-if (!result.success) {
-  // result.error.issues carries the validation failures
-}
-```
-
-Type aliases are inferred via `z.infer` and re-exported from `@/wire/types`:
-
-```ts
-import type { NewSessionRequest, PromptRequest } from '@/wire/types.ts'
-```
-
-`systemPrompt` accepts both `string` (full replacement of the SDK preset) and `{ append: string }` (preset + append) shapes.
-
-### `@/wire/events`, sessionUpdate event union
-
-Discriminated union of every stream event a backend driver may emit during a turn. 13 variants keyed on `type`, all carrying the `sessionId` envelope.
-
-```ts
-import { SessionUpdateEventSchema } from '@/wire/events.ts'
-
-const usage = SessionUpdateEventSchema.parse({
-  sessionId: 's1',
-  type: 'usage',
-  inputTokens: 1234,
-  outputTokens: 567,
-  cacheReadTokens: 8000,
-  cacheCreationTokens: 100,
-  costUsd: 0.0152,
-})
-```
-
-| Event type | Carries |
-|------------|---------|
-| `output_chunk` | `text` (assistant text stream) |
-| `thinking_chunk` | `text` (reasoning tokens) |
-| `tool_call_begin` | `toolUseId`, `name`, `input` |
-| `tool_call_progress` | `toolUseId`, `delta` |
-| `tool_call_end` | `toolUseId`, `result`, `isError` |
-| `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]` |
-| `usage` | 4 token counts + `costUsd` |
-| `subagent_spawn` | `childId`, `parentSessionId`, `model`, `tools[]` |
-| `subagent_complete` | `childId`, token slice, cost slice |
-| `skill_activation` | `skillName`, `source` (`auto` \| `invoked`) |
-| `model_advertisement` | `model` |
-| `process_died` | `exitCode`, optional `detail` |
-| `cancelled` | `reason` |
-
-This union is the SOURCE OF TRUTH across all backends. Phases 2-3 normalize codex / opencode native stream events into this shape via per-backend mappers.
-
-### `@/wire/content`, content blocks
-
-Five content block types for `session/prompt` payloads, mirroring Anthropic's SDK content shapes.
-
-```ts
-import { ContentBlockSchema, MAX_INLINE_BASE64_BYTES } from '@/wire/content.ts'
-
-const block = ContentBlockSchema.parse({
-  type: 'image',
-  source: {
-    type: 'base64',
-    mediaType: 'image/png',
-    data: 'iVBORw0KGgo...',  // < 5MB decoded
-  },
-})
-```
-
-| Block type | Carries |
-|------------|---------|
-| `text` | `text` |
-| `image` | `source: {type: 'base64', mediaType, data} \| {type: 'url', url}` |
-| `document` | `source: {...}`, optional `title` |
-| `tool_use` | `id`, `name`, `input` |
-| `tool_result` | `toolUseId`, `content[{type:'text', text}]`, `isError` |
-
-Inline base64 payloads cap at `MAX_INLINE_BASE64_BYTES` (5MB decoded). Beyond that, use a URL-sourced block backed by external storage.
-
-### `@/backends/driver`, BackendDriver contract
-
-Every backend (Claude phase 1, codex phase 2, opencode phase 3) implements this interface. The dispatcher routes every JSON-RPC method into the matching driver method; capability gating runs before invocation.
-
-```ts
-import { type BackendDriver, ensureCapability } from '@/backends/driver.ts'
-
-class MyDriver implements BackendDriver {
-  capabilities() {
-    return {
-      resume: true,
-      fork: false,
-      fileUpload: true,
-      thinking: true,
-      subagent: false,
-      skillEvents: false,
-    }
-  }
-
-  async initialize(params) { /* ... */ }
-  async newSession(params) { /* ... */ }
-  async prompt(sessionId, params, emit) {
-    emit.send({ sessionId, type: 'output_chunk', text: 'Hello' })
-    return { stopReason: 'end_turn' }
-  }
-  async cancel(request) { /* ... */ }
-  async loadSession(params) { /* ... */ }
-  async forkSession(params) { /* ... */ }
-}
-```
-
-`ensureCapability(caps, required, method)` is the dispatch-layer guard that throws `MethodNotSupportedError` when a driver lacks a feature.
-
-### `@/backends/registry`, env-driven backend registry
-
-`createBackendRegistry()` returns a name -> driver map with env-aware resolution. Phase 1 binds `claude`; phases 2 + 3 add `codex` + `opencode`.
-
-```ts
-import { createBackendRegistry } from '@/backends/registry.ts'
-import { ClaudeDriver } from '@/backends/claude/driver.ts'
-
-const registry = createBackendRegistry()
-registry.register('claude', new ClaudeDriver({ /* ... */ }))
-
-const driver = registry.resolveFromEnv(process.env)
-// reads KODIZM_BACKEND, returns the bound driver
-// throws BackendNotConfiguredError when env is missing
-// throws UnknownBackendError when value is not registered
-```
-
-### `@/server/acp-server` with backend wiring
-
-When a backend is passed to `createAcpServer`, the server auto-registers handlers for `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/load`, `session/fork`. Each handler validates the request through the matching wire schema, applies capability gating, and forwards to the driver.
-
-```ts
-import { createAcpServer } from '@/server/acp-server.ts'
-
-const server = createAcpServer({ transport, backend })
-await server.serve()
-// initialize + 5 session/* methods auto-routed to backend
-// schema validation failures emit -32602 InvalidParams responses
-// capability mismatches emit -32601 with supportedMethods in data
-```
-
-The prompt handler wraps `server.notify` into an `EventEmitter`, so driver-emitted `SessionUpdateEvent` values fan out as `sessionUpdate` notifications.
-
-### `@/backends/claude/auth`, credential resolution
-
-`resolveClaudeCredentials(env)` returns a discriminated union of the active credential. Subscription wins over api-key when both are set with `CLAUDE_CODE_REMOTE=1`.
-
-```ts
-import { resolveClaudeCredentials } from '@/backends/claude/auth.ts'
-
-const creds = resolveClaudeCredentials(process.env)
-// { type: 'subscription' | 'api-key', token: string }
-// throws AuthMissingError when neither path is configured
-```
-
-### `@/backends/claude/mcp-bridge`, wire -> SDK MCP shape
-
-`translateMcpServers(list)` converts the canonical MCP server array (with explicit `[{name, value}]` headers) into the Claude SDK's name-keyed record (`Record<string, McpHttpServerConfig>`).
-
-```ts
-import { translateMcpServers } from '@/backends/claude/mcp-bridge.ts'
-
-const sdkServers = translateMcpServers([
-  {
-    type: 'http',
-    name: 'kodizm',
-    url: 'https://kodizm.com/mcp/internal',
-    headers: [{ name: 'Authorization', value: 'Bearer kdz-int-jwt.x.y' }],
-  },
-])
-// { kodizm: { type: 'http', url: '...', headers: { Authorization: 'Bearer ...' } } }
-```
-
-### `@/backends/claude/driver`, ClaudeDriver class
-
-Implements the full `BackendDriver` contract against an injectable `SdkAdapter`. Production wires `@anthropic-ai/claude-agent-sdk`; tests pass a mock generator.
-
-```ts
-import { ClaudeDriver } from '@/backends/claude/driver.ts'
-import { resolveClaudeCredentials } from '@/backends/claude/auth.ts'
-import { query } from '@anthropic-ai/claude-agent-sdk'
-
-const driver = new ClaudeDriver({
-  credentials: resolveClaudeCredentials(process.env),
-  agentInfo: { version: '0.0.1' },
-  sdk: {
-    query: ({ prompt, options }) => query({ prompt, options }),
-  },
-})
-
-// Plug into AcpServer:
-const server = createAcpServer({ transport, backend: driver })
-await server.serve()
-```
-
-Per-turn model override on `prompt()` does not mutate the stored session options; the next turn without override falls back to the session's bound model.
-
-`cancel({ sessionId })` aborts the in-flight SDK `query()` via the per-turn AbortController. The unwinding `prompt()` emits a synthetic `cancelled` `SessionUpdateEvent` (`reason: 'user_cancel'`) and returns `{ stopReason: 'cancelled' }` within the 2s ACP grace window.
-
-### `@/backends/claude/event-mapper`, SDK message -> Kodizm event
-
-`mapSdkMessage(sessionId, message)` is a pure function the driver calls per SDK message. It produces zero-or-more Kodizm `SessionUpdateEvent` values:
-
-| SDK message | Emitted Kodizm event(s) |
-|-------------|--------------------------|
-| `system.init` (with model) | `model_advertisement` |
-| `system.init` (with skills[]) | `skill_activation` per name (`source: 'auto'`) |
-| `system.init` (with parent_tool_use_id + uuid) | `subagent_spawn` |
+| SDK message | Emits |
+|-------------|-------|
+| `system.init` (with `model`) | `model_advertisement` |
+| `system.init` (with `skills[]`) | `skill_activation` per name (`source: 'auto'`) |
+| `system.init` (with `parent_tool_use_id` + `uuid`) | `subagent_spawn` |
 | `assistant` text block | `output_chunk` |
 | `assistant` thinking block | `thinking_chunk` |
-| `assistant` tool_use block (`name: 'Skill'`) | `skill_activation` (`source: 'invoked'`) + `tool_call_begin` |
-| `assistant` tool_use block (other) | `tool_call_begin` |
+| `assistant` tool_use (`name: 'Skill'`) | `skill_activation` (`source: 'invoked'`) + `tool_call_begin` |
+| `assistant` tool_use (other) | `tool_call_begin` |
 | `user` tool_result block | `tool_call_end` |
-| `result` (with usage) | `usage` |
-| `result` (with parent_tool_use_id) | `subagent_complete` (childId remapped via `SubagentTracker`) |
+| `result` (with `usage`) | `usage` |
+| `result` (with `parent_tool_use_id`) | `subagent_complete` (childId remapped via `SubagentTracker`) |
 
-Unknown SDK message types fail soft (empty event list) so future SDK extensions do not break the dispatcher.
-
-### `@/backends/claude/content-mapper`, content block translation
-
-Bidirectional mapping between Kodizm canonical `ContentBlock` (camelCase) and Claude SDK content blocks (snake_case). The wire schema enforces the 5MB inline base64 cap; this layer re-enforces it as defense-in-depth.
-
-```ts
-import {
-  contentBlockToSdk,
-  promptBlocksToSdk,
-  sdkContentBlockToKodizm,
-} from '@/backends/claude/content-mapper.ts'
-
-const sdkBlock = contentBlockToSdk({
-  type: 'tool_result',
-  toolUseId: 'tu_1',
-  content: [{ type: 'text', text: 'ok' }],
-  isError: false,
-})
-// { type: 'tool_result', tool_use_id: 'tu_1', content: [...], is_error: false }
-
-const sdkBlocks = promptBlocksToSdk([
-  { type: 'text', text: 'Look at this:' },
-  { type: 'image', source: { type: 'url', url: 'https://kodizm.com/logo.png' } },
-])
-
-// Inverse for inbound assistant tool_use echoes:
-const kodizm = sdkContentBlockToKodizm(sdkBlock)
-```
-
-| Kodizm key | SDK key |
-|------------|---------|
-| `mediaType` | `media_type` |
-| `toolUseId` | `tool_use_id` |
-| `isError` | `is_error` |
-
-### `@/backends/claude/subagent`, subagent observability tracker
-
-Cross-message tracker that maps the SDK's `parent_tool_use_id` to the spawned subagent's session uuid. The pure event-mapper emits `subagent_complete` with the tool_use id (the only id available on a result message); the tracker rewrites that to the stable child uuid before the event leaves the driver.
-
-```ts
-import { SubagentTracker } from '@/backends/claude/subagent.ts'
-
-const tracker = new SubagentTracker()
-
-// 1. Observe each raw SDK message:
-tracker.observe({
-  type: 'system',
-  subtype: 'init',
-  model: 'claude-haiku-4-5-20251001',
-  parent_tool_use_id: 'tu_outer',
-  uuid: 'sub_outer',
-})
-
-// 2. Rewrite events emitted by mapSdkMessage(...):
-const rewritten = tracker.rewrite([
-  { sessionId: 's1', type: 'subagent_complete', childId: 'tu_outer', /* tokens */ },
-])
-// rewritten[0].childId === 'sub_outer'
-```
-
-Per-turn lifecycle: a fresh tracker is constructed at the start of every `prompt()` and discarded at turn end so cross-turn leaks are impossible.
-
-### `@/session/manager`, multi-session storage
-
-The ACP spec allows one process to host N concurrent sessions. `SessionManager` is the single source of truth for sessionId -> `SessionState` across backends.
-
-```ts
-import { SessionManager } from '@/session/manager.ts'
-import type { SessionState } from '@/session/state.ts'
-
-const manager = new SessionManager()
-
-const state = manager.create('s1', {
-  backend: 'claude',
-  sdkOptions: { cwd: '/workspace', mcpServers: {} },
-  abortController: new AbortController(),
-  parentChildMap: new Map(),
-})
-// state.createdAt + state.sessionId stamped by the manager
-
-manager.has('s1')          // true
-manager.get('s1')          // SessionState; throws SessionNotFoundError on miss
-manager.list()             // session ids in insertion order
-manager.size()             // active session count
-manager.close('s1')        // aborts the controller, removes the entry
-```
-
-`close()` aborts the AbortController BEFORE deletion so any in-flight SDK `query()` observes cancellation cleanly. `create()` rejects duplicate ids and `get()` / `close()` throw `SessionNotFoundError` on miss so JSON-RPC dispatch surfaces typed errors.
-
-`SessionState.sdkOptions` is `unknown` at the manager seam; each backend driver lays its own typed shape into the field.
+Unknown SDK message types fail soft (empty event list).
 
 ## Test layering
 
-| Layer | Purpose | Where | Cost |
-|-------|---------|-------|------|
-| Unit | Per-module contract; SDK mocked | `test/unit/` | free, instant |
-| E2E (mocked) | Full ACP roundtrip with fake SDK | `test/e2e/` | free, < 5s |
-| Integration (real) | Real Claude / Codex / Opencode API | `test/integration/` | per-run cost; gated on env var presence |
+```bash
+bun test                                    # unit + e2e (no auth needed)
+bun test test/unit                          # unit only
+bun test test/e2e                           # full ACP roundtrip, mocked SDK
+bun test test/integration                   # real API, gated on auth env
+```
 
-Real-API tests `describe.skipIf(!HAS_API_KEY)` themselves when their auth env is missing, so `bun test` stays green without credentials.
+| Layer | Where | Cost | Asserts |
+|-------|-------|------|---------|
+| Unit | `test/unit/` | free | per-module contract |
+| E2E (mocked) | `test/e2e/mocked-pipeline.test.ts` | free | full ACP roundtrip with fake SDK (5 scenarios) |
+| Integration (real) | `test/integration/*.smoke.test.ts` | per-run | real API behavior (~5 files) |
 
-Phase 1 close-out: 248 unit + e2e tests passing (4 integration smokes skip without `ANTHROPIC_API_KEY`).
-
-### Integration smokes (gated)
-
-| File | Asserts |
-|------|---------|
-| `claude-real.smoke.test.ts` | `say "hi"` -> output_chunk + usage with positive tokens + `costUsd > 0`, `stopReason='end_turn'` |
-| `claude-cancel.smoke.test.ts` | mid-stream cancel emits `cancelled` event + `stopReason='cancelled'` within 5s |
-| `claude-resume.smoke.test.ts` | `newSession` + memory fact -> `loadSession` continues conversation, model recalls the fact |
-| `claude-tool-dispatch.smoke.test.ts` | prompting `echo` triggers Bash tool, `tool_call_begin` + `tool_call_end` events fire, output surfaces in final text |
-
-Run all four when an API key is available:
+Real-API smokes `describe.skipIf(!HAS_AUTH)` themselves when no auth env is configured. Run with subscription:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... bun test test/integration/
+CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..." CLAUDE_CODE_REMOTE=1 \
+  bun test test/integration
 ```
 
-Tool dispatch uses `permissionMode: 'bypassPermissions'` to keep the smoke non-interactive; in production the orchestrator gates this through the ACP `session/request_permission` round-trip.
+Or with API key:
 
-## ACP wire shape
-
-The server speaks a Kodizm-flavored ACP. The shape stays compatible with ACP v1 for `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/load`, `session/fork` but promotes Kodizm-canonical fields (system prompt replace + append, additional directories, MCP servers, model, skills, content blocks for file upload) to top-level instead of `_meta` smuggling. The orchestrator side (Laravel) sends Kodizm-flavored payloads directly; the bridge dispatches to the chosen backend.
-
-Detailed schema lives under `src/wire/` (lands in Wave 2).
-
-## Layout
-
-```
-src/
-  index.ts                    # bin entrypoint, env validation, server boot
-  server/                     # ACP server core
-    transport.ts              # NDJSON stdio framing
-    acp-server.ts             # JSON-RPC 2.0 dispatch + RPC alias map
-    errors.ts                 # typed JsonRpcError subclasses
-    lifecycle.ts              # terminator probes + protocol frame validation
-  wire/                       # canonical request + event shapes (zod)
-    schemas.ts                # 6 request schemas (initialize, new, prompt, cancel, load, fork)
-    events.ts                 # 13-variant sessionUpdate event union
-    content.ts                # 5 content block types (text/image/document/tool_use/tool_result)
-    types.ts                  # z.infer re-exports for compile-time consumption
-  backends/                   # per-backend driver + event mapper
-    driver.ts                 # BackendDriver contract + ensureCapability gate
-    registry.ts               # env-driven name -> driver map
-    claude/                   # phase 1
-      auth.ts                 # credential resolver (subscription | api-key)
-      mcp-bridge.ts           # wire -> SDK MCP record shape
-      driver.ts               # ClaudeDriver: BackendDriver implementation
-      event-mapper.ts         # SDK message -> Kodizm SessionUpdateEvent
-      content-mapper.ts       # Kodizm ContentBlock <-> SDK content block
-      subagent.ts             # parent_tool_use_id -> child uuid tracker
-    codex/                    # phase 2
-    opencode/                 # phase 3
-  session/                    # multi-session manager
-    manager.ts                # SessionManager: create/get/has/close/list
-    state.ts                  # SessionState contract (cross-backend)
-  util/                       # logger, helpers
-test/
-  unit/                       # mocked SDK (per-module contract)
-  e2e/                        # full ACP roundtrip with fake SDK
-    mocked-pipeline.test.ts   # 5 scenarios: happy, cancel, resume, tool, schema
-  integration/                # real API, gated on ANTHROPIC_API_KEY
-    claude-real.smoke.test.ts
-    claude-cancel.smoke.test.ts
-    claude-resume.smoke.test.ts
-    claude-tool-dispatch.smoke.test.ts
+```bash
+ANTHROPIC_API_KEY="sk-ant-..." bun test test/integration
 ```
 
-## Concurrency note
+Phase 1 close-out: 246 unit + e2e tests passing, 14 integration smokes green against real Claude API (Haiku 4.5 by default).
 
-`AcpServer` dispatches inbound requests as fire-and-forget microtasks (`void handleRequest(...)`) so a long-running `session/prompt` does not block the read loop. Without this, an inbound `session/cancel` could never reach the dispatcher while a prompt is awaiting the SDK stream (chicken-and-egg deadlock because cancel is what fires the abort that unwinds the prompt).
+## Concurrency invariant
+
+`AcpServer` dispatches inbound requests as fire-and-forget microtasks (`void handleRequest(...)`) so a long-running `session/prompt` does not block the read loop. Without this, an inbound `session/cancel` could never reach the dispatcher while a prompt was awaiting the SDK stream — chicken-and-egg deadlock because cancel is what fires the abort that unwinds the prompt.
 
 ## License
 

@@ -1,67 +1,32 @@
 /**
- * Real Claude API tool dispatch smoke. Skipped when ANTHROPIC_API_KEY
- * is not set so the default `bun test` run stays free of network calls.
+ * Real Claude API tool dispatch smoke. Asserts the SDK's built-in
+ * `Bash` tool fires when prompted to run a command, surfaces as a
+ * `tool_call_begin` -> `tool_call_end` pair through the event-mapper,
+ * and the assistant's final answer cites the command output.
  *
- * Run: ANTHROPIC_API_KEY=sk-ant-... bun test test/integration/claude-tool-dispatch.smoke.test.ts
- *
- * Asserts that the SDK's built-in `Bash` tool fires when prompted to
- * run a command, surfaces as a tool_call_begin -> tool_call_end pair
- * through the event-mapper, and the assistant's final answer cites
- * the command output. The SDK auto-permits Bash via permissionMode
- * 'bypassPermissions' to keep the smoke non-interactive; in
- * production the orchestrator gates this through the ACP
- * `session/request_permission` round-trip instead.
+ * The smoke flips permissionMode to 'bypassPermissions' to keep the
+ * run non-interactive; in production the orchestrator gates this
+ * through the ACP `session/request_permission` round-trip.
  */
 
 import { describe, expect, test } from 'bun:test'
 
-import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
-import type { SdkMessage } from '@/backends/claude/event-mapper.ts'
-import type { EventEmitter } from '@/backends/driver.ts'
-import type { SessionUpdateEvent } from '@/wire/events.ts'
+import { HAS_AUTH, TEST_MODEL, buildRealDriver, joinOutputText, makeRecordingEmitter } from './_helpers.ts'
 
-const API_KEY = process.env.ANTHROPIC_API_KEY ?? ''
-const HAS_API_KEY = API_KEY.length > 0
-
-function makeRecordingEmitter(): { emit: EventEmitter; events: SessionUpdateEvent[] } {
-  const events: SessionUpdateEvent[] = []
-  return { events, emit: { send: (event) => events.push(event) } }
-}
-
-async function buildBypassAdapter(): Promise<SdkAdapter> {
-  const sdk = await import('@anthropic-ai/claude-agent-sdk')
-  return {
-    async *query(args) {
-      // Force bypassPermissions so the Bash tool runs without an
-      // interactive prompt (would otherwise hang the smoke).
-      const enriched = {
-        ...args,
-        options: {
-          ...args.options,
-          permissionMode: 'bypassPermissions' as const,
-          allowDangerouslySkipPermissions: true,
-        },
-      }
-      for await (const message of sdk.query(enriched as never)) {
-        yield message as SdkMessage
-      }
-    },
-  }
-}
-
-describe.skipIf(!HAS_API_KEY)('real Claude API tool dispatch smoke', () => {
+describe.skipIf(!HAS_AUTH)('real Claude API tool dispatch smoke', () => {
   test('asking Claude to run a shell command surfaces tool_call_begin + tool_call_end', async () => {
-    const adapter = await buildBypassAdapter()
-
-    const driver = new ClaudeDriver({
-      credentials: { type: 'api-key', token: API_KEY },
-      agentInfo: { version: '0.0.1-smoke' },
-      sdk: adapter,
-    })
+    const driver = await buildRealDriver((args) => ({
+      ...args,
+      options: {
+        ...(args.options as Record<string, unknown>),
+        permissionMode: 'bypassPermissions',
+      },
+    }))
 
     const { sessionId } = await driver.newSession({
       cwd: process.cwd(),
       mcpServers: [],
+      model: TEST_MODEL,
     })
 
     const { emit, events } = makeRecordingEmitter()
@@ -72,7 +37,7 @@ describe.skipIf(!HAS_API_KEY)('real Claude API tool dispatch smoke', () => {
         prompt: [
           {
             type: 'text',
-            text: 'Run `echo kodizm-smoke` and tell me the output verbatim.',
+            text: 'Run `echo kodizm-smoke-output` using the Bash tool and tell me the exact output.',
           },
         ],
       },
@@ -85,17 +50,13 @@ describe.skipIf(!HAS_API_KEY)('real Claude API tool dispatch smoke', () => {
     expect(beginEvents.length).toBeGreaterThan(0)
     expect(endEvents.length).toBeGreaterThan(0)
 
-    const finalText = events
-      .filter((e) => e.type === 'output_chunk')
-      .map((e) => (e.type === 'output_chunk' ? e.text : ''))
-      .join(' ')
-      .toLowerCase()
-    expect(finalText).toContain('kodizm-smoke')
+    const finalText = joinOutputText(events).toLowerCase()
+    expect(finalText).toContain('kodizm-smoke-output')
   }, 60_000)
 })
 
-describe.skipIf(HAS_API_KEY)('real Claude API tool dispatch smoke (skipped)', () => {
-  test('skipped when ANTHROPIC_API_KEY is not set', () => {
-    expect(HAS_API_KEY).toBe(false)
+describe.skipIf(HAS_AUTH)('real Claude API tool dispatch smoke (skipped)', () => {
+  test('skipped when no auth env is set', () => {
+    expect(HAS_AUTH).toBe(false)
   })
 })

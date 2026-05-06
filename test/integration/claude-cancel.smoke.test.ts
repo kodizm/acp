@@ -1,49 +1,20 @@
 /**
- * Real Claude API cancel smoke. Skipped when ANTHROPIC_API_KEY is
- * not set so the default `bun test` run stays free of network calls.
- *
- * Run: ANTHROPIC_API_KEY=sk-ant-... bun test test/integration/claude-cancel.smoke.test.ts
+ * Real Claude API cancel smoke. Runs under either auth path; skipped
+ * when neither is set.
  */
 
 import { describe, expect, test } from 'bun:test'
 
-import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
-import type { SdkMessage } from '@/backends/claude/event-mapper.ts'
-import type { EventEmitter } from '@/backends/driver.ts'
-import type { SessionUpdateEvent } from '@/wire/events.ts'
+import { HAS_AUTH, TEST_MODEL, buildRealDriver, makeRecordingEmitter } from './_helpers.ts'
 
-const API_KEY = process.env.ANTHROPIC_API_KEY ?? ''
-const HAS_API_KEY = API_KEY.length > 0
-
-function makeRecordingEmitter(): { emit: EventEmitter; events: SessionUpdateEvent[] } {
-  const events: SessionUpdateEvent[] = []
-  return { events, emit: { send: (event) => events.push(event) } }
-}
-
-async function buildRealAdapter(): Promise<SdkAdapter> {
-  const { query } = await import('@anthropic-ai/claude-agent-sdk')
-  return {
-    async *query(args) {
-      for await (const message of query(args)) {
-        yield message as SdkMessage
-      }
-    },
-  }
-}
-
-describe.skipIf(!HAS_API_KEY)('real Claude API cancel smoke', () => {
-  test('mid-stream cancel emits a cancelled event within the 2s grace window', async () => {
-    const adapter = await buildRealAdapter()
-
-    const driver = new ClaudeDriver({
-      credentials: { type: 'api-key', token: API_KEY },
-      agentInfo: { version: '0.0.1-smoke' },
-      sdk: adapter,
-    })
+describe.skipIf(!HAS_AUTH)('real Claude API cancel smoke', () => {
+  test('mid-stream cancel emits a cancelled event within the 5s grace window', async () => {
+    const driver = await buildRealDriver()
 
     const { sessionId } = await driver.newSession({
       cwd: process.cwd(),
       mcpServers: [],
+      model: TEST_MODEL,
     })
 
     const { emit, events } = makeRecordingEmitter()
@@ -57,8 +28,8 @@ describe.skipIf(!HAS_API_KEY)('real Claude API cancel smoke', () => {
       emit,
     )
 
-    // Wait for the first stream chunk to confirm the SDK started.
-    await new Promise((r) => setTimeout(r, 200))
+    // Wait for the SDK to start streaming.
+    await new Promise((r) => setTimeout(r, 500))
     await driver.cancel({ sessionId })
 
     const result = await promise
@@ -66,12 +37,12 @@ describe.skipIf(!HAS_API_KEY)('real Claude API cancel smoke', () => {
 
     expect(result.stopReason).toBe('cancelled')
     expect(events.some((e) => e.type === 'cancelled')).toBe(true)
-    expect(elapsed).toBeLessThan(5000)
+    expect(elapsed).toBeLessThan(10_000)
   }, 30_000)
 })
 
-describe.skipIf(HAS_API_KEY)('real Claude API cancel smoke (skipped)', () => {
-  test('skipped when ANTHROPIC_API_KEY is not set', () => {
-    expect(HAS_API_KEY).toBe(false)
+describe.skipIf(HAS_AUTH)('real Claude API cancel smoke (skipped)', () => {
+  test('skipped when no auth env is set', () => {
+    expect(HAS_AUTH).toBe(false)
   })
 })

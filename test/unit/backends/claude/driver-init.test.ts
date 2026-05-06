@@ -85,6 +85,28 @@ describe('ClaudeDriver.newSession + buildSdkOptions', () => {
     expect(options.additionalDirectories).toEqual(['/data/shared', '/mnt/repo'])
   })
 
+  test('skills array flows through to SDK options', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      skills: ['my-coding', 'my-language'],
+    })
+
+    expect(options.skills).toEqual(['my-coding', 'my-language'])
+  })
+
+  test('empty skills array is dropped (SDK default behavior preserved)', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      skills: [],
+    })
+
+    expect(options.skills).toBeUndefined()
+  })
+
   test('systemPrompt as a string => full replacement', () => {
     const driver = makeDriver()
     const options = driver.buildSdkOptions({
