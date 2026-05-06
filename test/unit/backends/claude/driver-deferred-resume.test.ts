@@ -57,7 +57,7 @@ const cachedDeferredState = (): DeferredState => ({
 })
 
 describe('ClaudeDriver Process B auto-detect on first prompt (T8)', () => {
-  test('checks deferredStore.get(sessionId) on first prompt and populates session-level cached answer', async () => {
+  test('checks deferredStore.get(sessionId) on first prompt and consumes the cached answer (T8+T9)', async () => {
     const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
     const store = new InMemoryDeferredStore()
     await store.set('sess_under_test', cachedDeferredState())
@@ -78,11 +78,11 @@ describe('ClaudeDriver Process B auto-detect on first prompt (T8)', () => {
     const { emit } = recorder()
     await driver.prompt('sess_under_test', { sessionId: 'sess_under_test', prompt: [] }, emit)
 
-    // The driver must have read the cached state at least once.
-    // Re-read store: state should still be present until T9 wires the
-    // consume-and-clear path.
+    // canUseTool returned the cached answer (T9 short-circuit).
+    expect(harness.capturedResults[0]).toEqual({ behavior: 'allow', updatedInput: { command: 'pwd' } })
+    // Store cleared after consumption (one-shot semantics).
     const after = await store.get('sess_under_test')
-    expect(after?.cachedAnswer).toEqual({ behavior: 'allow', updatedInput: { command: 'pwd' } })
+    expect(after).toBeNull()
   })
 
   test('no-op when the store has no record for the sessionId', async () => {
@@ -170,5 +170,152 @@ describe('ClaudeDriver Process B auto-detect on first prompt (T8)', () => {
 
     const stateChecks = calls.filter((c) => c.method === 'session/permission_deferred_state')
     expect(stateChecks.length).toBe(1)
+  })
+})
+
+describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)', () => {
+  test('cached answer fires for matching toolUseId; emits permission_resumed; clears state', async () => {
+    const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
+    const store = new InMemoryDeferredStore()
+    await store.set('sess_match', cachedDeferredState())
+
+    const calls: CapturedCall[] = []
+    const server = {
+      async request<T>(method: string, params: unknown): Promise<T> {
+        calls.push({ method, params })
+        return { outcome: { outcome: 'selected', optionId: 'allow' } } as T
+      },
+    }
+
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: makeRecordingAdapter('Bash', { command: 'pwd' }, 'tu_def_1', 'sdk_resume', harness),
+      server,
+      deferredStore: store,
+    })
+
+    await driver.loadSession({ sessionId: 'sess_match', cwd: '/tmp/kodizm-test', mcpServers: [] })
+    const { emit, events } = recorder()
+    await driver.prompt('sess_match', { sessionId: 'sess_match', prompt: [{ type: 'text', text: 'continue' }] }, emit)
+
+    // 1. canUseTool returned the cached answer (no roundtrip to server).
+    expect(harness.capturedResults[0]).toEqual({ behavior: 'allow', updatedInput: { command: 'pwd' } })
+    expect(calls.some((c) => c.method === 'session/request_permission')).toBe(false)
+
+    // 2. permission_resumed event emitted with the matching toolUseId + decision.
+    const resumed = events.find((e) => e.type === 'permission_resumed')
+    expect(resumed).toBeDefined()
+    if (resumed?.type === 'permission_resumed') {
+      expect(resumed.toolUseId).toBe('tu_def_1')
+      expect(resumed.decision).toBe('allow')
+    }
+
+    // 3. Cached answer cleared after consumption (one-shot).
+    const after = await store.get('sess_match')
+    expect(after).toBeNull()
+  })
+
+  test('different toolUseId falls through to normal canUseTool (cached answer not consumed)', async () => {
+    const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
+    const store = new InMemoryDeferredStore()
+    await store.set('sess_mismatch', cachedDeferredState())
+
+    const calls: CapturedCall[] = []
+    const server = {
+      async request<T>(method: string, params: unknown): Promise<T> {
+        calls.push({ method, params })
+        return { outcome: { outcome: 'selected', optionId: 'allow' } } as T
+      },
+    }
+
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      // Different toolUseId than the cached one (tu_def_1 in fixture).
+      sdk: makeRecordingAdapter('Bash', { command: 'ls' }, 'tu_other', 'sdk_resume_2', harness),
+      server,
+      deferredStore: store,
+    })
+
+    await driver.loadSession({ sessionId: 'sess_mismatch', cwd: '/tmp/kodizm-test', mcpServers: [] })
+    const { emit, events } = recorder()
+    await driver.prompt('sess_mismatch', { sessionId: 'sess_mismatch', prompt: [] }, emit)
+
+    // Normal canUseTool flow ran (server saw the permission request).
+    expect(calls.some((c) => c.method === 'session/request_permission')).toBe(true)
+    // No permission_resumed event since we never matched.
+    expect(events.some((e) => e.type === 'permission_resumed')).toBe(false)
+  })
+
+  test('retry prefix injected into the user prompt on the first prompt after resume', async () => {
+    const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
+    const store = new InMemoryDeferredStore()
+    await store.set('sess_inject', cachedDeferredState())
+
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: makeRecordingAdapter('Bash', { command: 'pwd' }, 'tu_def_1', 'sdk_inject', harness),
+      server: undefined,
+      deferredStore: store,
+    })
+
+    await driver.loadSession({ sessionId: 'sess_inject', cwd: '/tmp/kodizm-test', mcpServers: [] })
+    const { emit } = recorder()
+    await driver.prompt(
+      'sess_inject',
+      { sessionId: 'sess_inject', prompt: [{ type: 'text', text: 'list files please' }] },
+      emit,
+    )
+
+    expect(harness.capturedPrompt).toContain('User has answered the deferred permission')
+    expect(harness.capturedPrompt).toContain('allow')
+    expect(harness.capturedPrompt).toContain('tu_def_1')
+    expect(harness.capturedPrompt).toContain('list files please')
+  })
+
+  test('second prompt after resume does NOT re-inject the retry prefix', async () => {
+    const harness1 = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
+    const harness2 = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
+    const store = new InMemoryDeferredStore()
+    await store.set('sess_second', cachedDeferredState())
+
+    // Adapter that switches between harness records on each query call.
+    let callIdx = 0
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: {
+        async *query(args) {
+          const target = callIdx++ === 0 ? harness1 : harness2
+          target.capturedPrompt = args.prompt
+          yield { type: 'system', subtype: 'init', session_id: 'sdk_second' } satisfies SdkMessage
+          const canUseTool = (args.options as { canUseTool?: unknown }).canUseTool as
+            | ((t: string, i: Record<string, unknown>, o: CanUseToolOptions) => Promise<PermissionResult>)
+            | undefined
+          if (canUseTool !== undefined) {
+            const result = await canUseTool(
+              'Bash',
+              { command: 'pwd' },
+              { signal: new AbortController().signal, toolUseID: callIdx === 1 ? 'tu_def_1' : 'tu_other' },
+            )
+            target.capturedResults.push(result)
+          }
+          yield { type: 'result', subtype: 'success' } satisfies SdkMessage
+        },
+      },
+      server: undefined,
+      deferredStore: store,
+    })
+
+    await driver.loadSession({ sessionId: 'sess_second', cwd: '/tmp/kodizm-test', mcpServers: [] })
+    const { emit } = recorder()
+    await driver.prompt('sess_second', { sessionId: 'sess_second', prompt: [{ type: 'text', text: 'first' }] }, emit)
+    await driver.prompt('sess_second', { sessionId: 'sess_second', prompt: [{ type: 'text', text: 'second' }] }, emit)
+
+    expect(harness1.capturedPrompt).toContain('User has answered the deferred permission')
+    expect(harness2.capturedPrompt).not.toContain('User has answered the deferred permission')
+    expect(harness2.capturedPrompt).toContain('second')
   })
 })

@@ -319,6 +319,17 @@ export class ClaudeDriver implements BackendDriver {
       await this.consumeDeferredAnswerOnResume(state)
     }
 
+    // Snapshot the resume payload to closure-local scope, then clear
+    // session-level fields so this prompt is the ONLY one that gets
+    // the retry prefix injected and the canUseTool wrap. Subsequent
+    // prompts in the same process behave as plain follow-up turns.
+    const resumeAnswer = state.cachedDeferredAnswer
+    const resumeToolUseId = state.deferredToolUseId
+    if (resumeAnswer !== undefined) {
+      state.cachedDeferredAnswer = undefined
+      state.deferredToolUseId = undefined
+    }
+
     // Per-turn model override: spread on top of the session's bound
     // options so the original session model survives later turns.
     //
@@ -353,6 +364,10 @@ export class ClaudeDriver implements BackendDriver {
     // Composition: AskUserQuestion branch first (returns null for
     // other tools), generic permission-bridge fallback. Two closures
     // chained in one outer canUseTool so the SDK sees a single hook.
+    // Capture the cached-answer one-shot fire so the wrap below can
+    // close over the local state and then null it out after consumption.
+    let cachedAnswerSlot = resumeAnswer
+
     if (this.deps.server !== undefined) {
       const ask = askUserQuestionBranch({
         server: this.deps.server,
@@ -375,11 +390,49 @@ export class ClaudeDriver implements BackendDriver {
             }),
       })
       effectiveOptions.canUseTool = async (toolName, input, options) => {
+        // Resume short-circuit: cached answer fires once for the
+        // matching tool_use_id, then drops through.
+        if (cachedAnswerSlot !== undefined && options.toolUseID === resumeToolUseId) {
+          const answer = cachedAnswerSlot
+          cachedAnswerSlot = undefined
+          emit.send({
+            sessionId,
+            type: 'permission_resumed',
+            toolUseId: options.toolUseID,
+            decision: answer.behavior,
+          })
+          if (this.deps.deferredStore !== undefined) {
+            await this.deps.deferredStore.delete(sessionId)
+          }
+          return this.materializeCachedAnswer(answer, input)
+        }
         const askResult = await ask(toolName, input, options)
         if (askResult !== null) {
           return askResult
         }
         return await gate(toolName, input, options)
+      }
+    } else if (cachedAnswerSlot !== undefined) {
+      // No AcpServer in deps but we still have a cached answer to fire
+      // (test setup or local dev). Provide a minimal canUseTool that
+      // only short-circuits the resume id; everything else throws as
+      // un-gated, mirroring the SDK default.
+      effectiveOptions.canUseTool = async (_toolName, input, options) => {
+        if (cachedAnswerSlot !== undefined && options.toolUseID === resumeToolUseId) {
+          const answer = cachedAnswerSlot
+          cachedAnswerSlot = undefined
+          emit.send({
+            sessionId,
+            type: 'permission_resumed',
+            toolUseId: options.toolUseID,
+            decision: answer.behavior,
+          })
+          if (this.deps.deferredStore !== undefined) {
+            await this.deps.deferredStore.delete(sessionId)
+          }
+          return this.materializeCachedAnswer(answer, input)
+        }
+        return { behavior: 'deny', message: 'No permission gate wired' }
       }
     }
 
@@ -390,9 +443,15 @@ export class ClaudeDriver implements BackendDriver {
 
     let stopReason: PromptResult['stopReason'] = 'end_turn'
 
+    const promptText = this.serializePrompt(params)
+    const finalPrompt =
+      resumeAnswer !== undefined && resumeToolUseId !== undefined
+        ? this.injectDeferredResumePrefix(promptText, resumeAnswer.behavior, resumeToolUseId)
+        : promptText
+
     try {
       for await (const message of this.deps.sdk.query({
-        prompt: this.serializePrompt(params),
+        prompt: finalPrompt,
         options: effectiveOptions,
       })) {
         // Capture the SDK's own session id from the first system init
@@ -433,6 +492,43 @@ export class ClaudeDriver implements BackendDriver {
       throw new SessionNotFoundError(request.sessionId)
     }
     state.abortController?.abort()
+  }
+
+  /**
+   * Map the orchestrator-cached PermissionAnswer to the SDK's
+   * PermissionResult shape. Allow paths default to passing the
+   * SDK's input through unchanged when no `updatedInput` was cached.
+   */
+  private materializeCachedAnswer(
+    answer: NonNullable<SessionState['cachedDeferredAnswer']>,
+    input: Record<string, unknown>,
+  ): import('./permission-bridge.ts').PermissionResult {
+    if (answer.behavior === 'allow') {
+      return {
+        behavior: 'allow',
+        updatedInput: answer.updatedInput ?? input,
+      }
+    }
+    return {
+      behavior: 'deny',
+      message: answer.message ?? 'User denied the deferred permission',
+      ...(answer.interrupt === undefined ? {} : { interrupt: answer.interrupt }),
+    }
+  }
+
+  /**
+   * Build the retry prefix injected into the user's first prompt
+   * after a Pattern B resume. The model reads its own context
+   * (which includes the synthetic deferred tool_result row) plus
+   * this prefix and re-issues the deferred tool call with the
+   * same arguments; the wrapped canUseTool then short-circuits
+   * with the cached answer.
+   *
+   * Locked decision 2 from `phase-01c-deferred-permission.md`.
+   */
+  private injectDeferredResumePrefix(originalPrompt: string, decision: 'allow' | 'deny', toolUseId: string): string {
+    const prefix = `User has answered the deferred permission: ${decision}. Please re-issue the deferred tool call (id: ${toolUseId}) with the same arguments. Original user request: `
+    return `${prefix}${originalPrompt}`
   }
 
   /**
