@@ -30,13 +30,8 @@ describe('CodexDriver.initialize', () => {
   })
 })
 
-describe('CodexDriver.newSession', () => {
-  test('returns a UUID-shaped sessionId without spawning subprocess yet (T2 wires spawn)', async () => {
-    const driver = new CodexDriver({ agentInfo: { version: '0.0.1-test' } })
-    const result = await driver.newSession({
-      cwd: '/workspace',
-      mcpServers: [],
-    })
-    expect(result.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-  })
-})
+// CodexDriver.newSession spawns a subprocess + sends initialize +
+// thread/start (Phase 2 T3). The full lifecycle is covered in
+// `driver-newsession.test.ts` via spawnFactory injection; T1 stays
+// scoped to capabilities + initialize so the scaffold concern is
+// preserved separately.
