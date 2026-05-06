@@ -2,7 +2,7 @@
 
 Custom ACP (Agent Client Protocol) server for the Kodizm runtime. One Bun TypeScript binary that drives `@anthropic-ai/claude-agent-sdk` directly, surfaces a Kodizm-flavored canonical wire shape to the orchestrator, and replaces upstream `claude-agent-acp` + `codex-acp` adapters with one maintained codebase.
 
-Status: Phase 1 + 1.5 complete (bootstrap + Claude backend + permission/policy/AskUserQuestion/compaction). Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
+Status: Phase 1 + 1.5 + 1.6 complete (bootstrap + Claude backend + permission/policy/AskUserQuestion/compaction + Pattern B deferred-permission lifecycle). Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
 
 ## Why
 
@@ -224,7 +224,7 @@ manager.close('s1') // aborts the controller, then deletes the entry
 
 ### Request schemas (`@/wire/schemas`)
 
-Six zod schemas cover every Kodizm-flavored ACP method. Canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`, `toolPolicy`, `autoCompact`, `permissionTimeoutMs`) are top-level. The shared refinement rejects any payload smuggling them through `_meta`.
+Six zod schemas cover every Kodizm-flavored ACP method. Canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`, `toolPolicy`, `autoCompact`, `permissionTimeoutMs`, `permissionDeferTimeoutMs`) are top-level. The shared refinement rejects any payload smuggling them through `_meta`. `permissionTimeoutMs` and `permissionDeferTimeoutMs` are mutually exclusive (hard-deny mode vs. soft-defer mode).
 
 ```ts
 import { NewSessionRequestSchema } from '@/wire/schemas.ts'
@@ -294,6 +294,61 @@ Outcomes:
 
 Subagent calls carry `agentId` + `parentSessionId` on both the RPC payload and the stream event.
 
+### Deferred permission, Pattern B (`@/backends/claude/deferred-permission`)
+
+When the orchestrator cannot answer a permission within seconds (10-day-class operator workflow), the driver writes a synthetic tool_result row to the SDK transcript, persists deferred state to the orchestrator side, emits `permission_deferred`, then exits gracefully. Hours later, a fresh container resumes the session, replays the JSONL, and continues with the cached answer.
+
+Opt in per session via `permissionDeferTimeoutMs`. Mutually exclusive with `permissionTimeoutMs` (hard-deny mode). When neither is set, the driver waits forever on the abort signal (legacy Phase 1.5 behavior).
+
+```ts
+const { sessionId } = await driver.newSession({
+  cwd: '/workspace',
+  mcpServers: [],
+  toolPolicy: { defaultMode: 'default' },
+  permissionDeferTimeoutMs: 1_800_000, // 30 min before defer fires
+})
+```
+
+Process A (defer cycle):
+
+```ts
+// Inside the driver, on defer-racer winning:
+//   1. writeDeferredToolResult(jsonlPath, toolUseId)        // synthetic JSONL row
+//   2. deferredStore.set(sessionId, { toolUseId, ...input }) // state persistence
+//   3. emit { type: 'permission_deferred', sessionId, toolUseId, name }
+//   4. canUseTool returns { behavior: 'deny', interrupt: true } (SDK unwinds)
+```
+
+Process B (resume cycle):
+
+```ts
+// On the resume container's first prompt:
+//   1. one-shot deferredStore.get(sessionId) lookup
+//   2. retry prefix injected: "User has answered the deferred permission: <decision>. ..."
+//   3. canUseTool wrap fires the cached answer for the matching toolUseId
+//   4. emit { type: 'permission_resumed', sessionId, toolUseId, decision }
+//   5. deferredStore.delete(sessionId) (one-shot consumption)
+```
+
+Marker `__KODIZM_PERMISSION_DEFERRED__` flags rows the orchestrator's audit pipeline must filter or relabel as "deferred placeholder".
+
+State store contract (in-memory binding ships in Phase 1.6; production Laravel-DB binding lands in Phase 4):
+
+```ts
+import { type DeferredPermissionStore, InMemoryDeferredStore } from '@/session/deferred-store.ts'
+
+const store = new InMemoryDeferredStore()
+const driver = new ClaudeDriver({
+  credentials,
+  agentInfo: { version: '0.0.1' },
+  sdk,
+  server,
+  deferredStore: store, // optional; outbound RPC fallback fires when omitted
+})
+```
+
+When `deferredStore` is omitted, the driver issues outbound `session/permission_deferred_persist` RPC on Process A and `session/permission_deferred_state` RPC on Process B (the production path: orchestrator handles persistence).
+
 ### AskUserQuestion (`@/backends/claude/ask-user-question`)
 
 Dedicated outbound `session/ask_user_question` RPC for the SDK's `AskUserQuestion` tool. Driver chains it BEFORE the generic permission flow:
@@ -361,6 +416,8 @@ Discriminated on `type`. Every variant carries the `sessionId` envelope.
 | `tool_call_progress` | `toolUseId`, `delta` |
 | `tool_call_end` | `toolUseId`, `result`, `isError` |
 | `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]`, `agentId?`, `parentSessionId?` |
+| `permission_deferred` | `toolUseId`, `name`, `agentId?` |
+| `permission_resumed` | `toolUseId`, `decision: 'allow' \| 'deny'` |
 | `question_request` | `toolUseId`, `questions: KodizmQuestion[]`, `agentId?`, `parentSessionId?` |
 | `usage` | `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `costUsd` |
 | `subagent_spawn` | `childId`, `parentSessionId`, `model`, `tools[]` |
@@ -446,7 +503,7 @@ Or with API key:
 ANTHROPIC_API_KEY="sk-ant-..." bun test test/integration
 ```
 
-Phase 1 + 1.5 close-out: 335+ unit + e2e tests passing, 23 integration smokes green against real Claude API (Sonnet 4.6 + Haiku 4.5 mix). Total suite: ~358 tests across ~41 files.
+Phase 1 + 1.5 + 1.6 close-out: 361 unit + e2e tests passing, 24 integration smokes green against real Claude API (Sonnet 4.6 + Haiku 4.5 mix). Total suite: ~365 tests across ~46 files.
 
 ## Concurrency invariant
 
