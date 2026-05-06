@@ -29,6 +29,8 @@ export const JsonRpcErrorCode = {
   ProcessDied: -32001,
   Cancelled: -32002,
   BackendDriverError: -32003,
+  AcpTimeout: -32004,
+  AcpProtocol: -32005,
 } as const
 
 export type JsonRpcErrorCode = (typeof JsonRpcErrorCode)[keyof typeof JsonRpcErrorCode]
@@ -162,6 +164,35 @@ export class BackendDriverError extends JsonRpcError {
 
   public constructor(message: string, options?: JsonRpcErrorOptions) {
     super(message, JsonRpcErrorCode.BackendDriverError, options)
+  }
+}
+
+/**
+ * -32004 ACP Timeout. The read loop's deadline expired before a frame
+ * arrived. Surfaces as the third lifecycle terminator after process
+ * death and cancel. Default deadline lives on the AcpServer per
+ * request (60s for session/prompt; configurable).
+ */
+export class AcpTimeoutError extends JsonRpcError {
+  public override readonly name = 'AcpTimeoutError'
+
+  public constructor(message = 'ACP read deadline exceeded', options?: JsonRpcErrorOptions) {
+    super(message, JsonRpcErrorCode.AcpTimeout, options)
+  }
+}
+
+/**
+ * -32005 ACP Protocol Violation. A frame arrived that is not a valid
+ * JSON-RPC v2 envelope (missing jsonrpc field, malformed shape) or a
+ * JSON-RPC envelope that breaks ACP-specific invariants. Distinct
+ * from -32600 InvalidRequest because protocol-level violations may
+ * indicate adapter-version drift, not just bad client behavior.
+ */
+export class AcpProtocolError extends JsonRpcError {
+  public override readonly name = 'AcpProtocolError'
+
+  public constructor(message: string, options?: JsonRpcErrorOptions) {
+    super(message, JsonRpcErrorCode.AcpProtocol, options)
   }
 }
 
