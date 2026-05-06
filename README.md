@@ -2,7 +2,7 @@
 
 Custom ACP (Agent Client Protocol) server for the Kodizm runtime. Bridges Claude Code, codex, and opencode CLIs through a single Kodizm-flavored ACP surface, replacing the upstream `claude-agent-acp` and `codex-agent` adapters with one maintained codebase.
 
-Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in progress.
+Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) **complete**. Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
 
 ## Roadmap
 
@@ -14,7 +14,7 @@ Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in prog
 | 3, backend driver + registry | T13-T15 | done |
 | 4, Claude SDK driver | T16-T20 | done |
 | 5, feature plumbing | T21-T28 | done |
-| 6, integration + e2e | T29-T31 | pending |
+| 6, integration + e2e | T29-T31 | done |
 
 Phase 2 (codex backend), 3 (opencode backend), 4 (Laravel cutover), 5 (image bake + smoke) follow.
 
@@ -547,7 +547,26 @@ manager.close('s1')        // aborts the controller, removes the entry
 | E2E (mocked) | Full ACP roundtrip with fake SDK | `test/e2e/` | free, < 5s |
 | Integration (real) | Real Claude / Codex / Opencode API | `test/integration/` | per-run cost; gated on env var presence |
 
-Real-API tests `test.skip(...)` themselves when their auth env is missing, so `bun test` stays green without credentials.
+Real-API tests `describe.skipIf(!HAS_API_KEY)` themselves when their auth env is missing, so `bun test` stays green without credentials.
+
+Phase 1 close-out: 248 unit + e2e tests passing (4 integration smokes skip without `ANTHROPIC_API_KEY`).
+
+### Integration smokes (gated)
+
+| File | Asserts |
+|------|---------|
+| `claude-real.smoke.test.ts` | `say "hi"` -> output_chunk + usage with positive tokens + `costUsd > 0`, `stopReason='end_turn'` |
+| `claude-cancel.smoke.test.ts` | mid-stream cancel emits `cancelled` event + `stopReason='cancelled'` within 5s |
+| `claude-resume.smoke.test.ts` | `newSession` + memory fact -> `loadSession` continues conversation, model recalls the fact |
+| `claude-tool-dispatch.smoke.test.ts` | prompting `echo` triggers Bash tool, `tool_call_begin` + `tool_call_end` events fire, output surfaces in final text |
+
+Run all four when an API key is available:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... bun test test/integration/
+```
+
+Tool dispatch uses `permissionMode: 'bypassPermissions'` to keep the smoke non-interactive; in production the orchestrator gates this through the ACP `session/request_permission` round-trip.
 
 ## ACP wire shape
 
@@ -587,10 +606,19 @@ src/
     state.ts                  # SessionState contract (cross-backend)
   util/                       # logger, helpers
 test/
-  unit/                       # mocked SDK
-  integration/                # real API, env-gated
-  e2e/                        # full pipeline, mocked SDK
+  unit/                       # mocked SDK (per-module contract)
+  e2e/                        # full ACP roundtrip with fake SDK
+    mocked-pipeline.test.ts   # 5 scenarios: happy, cancel, resume, tool, schema
+  integration/                # real API, gated on ANTHROPIC_API_KEY
+    claude-real.smoke.test.ts
+    claude-cancel.smoke.test.ts
+    claude-resume.smoke.test.ts
+    claude-tool-dispatch.smoke.test.ts
 ```
+
+## Concurrency note
+
+`AcpServer` dispatches inbound requests as fire-and-forget microtasks (`void handleRequest(...)`) so a long-running `session/prompt` does not block the read loop. Without this, an inbound `session/cancel` could never reach the dispatcher while a prompt is awaiting the SDK stream (chicken-and-egg deadlock because cancel is what fires the abort that unwinds the prompt).
 
 ## License
 
