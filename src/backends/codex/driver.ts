@@ -43,6 +43,7 @@ import type {
 } from '../driver.ts'
 import { CodexAppServerProcess, type CodexDebugSink } from './app-server-spawn.ts'
 import { buildCodexConfigToml } from './config-mapper.ts'
+import { classifyCodexError } from './error-classifier.ts'
 import { CodexEventMapper } from './event-mapper.ts'
 import { handleCodexApproval } from './permission-bridge.ts'
 import { buildSandboxPolicy, mapPermissionMode } from './policy.ts'
@@ -402,6 +403,42 @@ export class CodexDriver implements BackendDriver {
           }
         }
       })
+    } catch (error) {
+      // Phase 2 T13: classify codex throw + emit canonical session_failed.
+      if (inactivityFired) {
+        // Stall already classified; skip re-classification.
+      } else if (abortController.signal.aborted) {
+        if (stopReason !== 'cancelled') {
+          stopReason = 'cancelled'
+          emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
+        }
+      } else {
+        const classified = classifyCodexError(error)
+        if (classified === null) {
+          // Tool-use-aborted on non-defer path: re-throw legacy.
+          throw error
+        }
+        const errAsErr = error instanceof Error ? error : undefined
+        emit.send({
+          sessionId,
+          type: 'session_failed',
+          reason: classified.reason,
+          detail: classified.detail,
+          capturedAt: Date.now(),
+          ...(errAsErr === undefined
+            ? {}
+            : {
+                cause: {
+                  name: errAsErr.name,
+                  message: errAsErr.message,
+                  ...(errAsErr.stack === undefined ? {} : { stack: errAsErr.stack.slice(0, 4000) }),
+                },
+              }),
+        })
+        failureReason = classified.reason
+        failureDetail = classified.detail
+        stopReason = 'session_failed'
+      }
     } finally {
       heartbeat?.stop()
       if (inactivityProbe !== undefined) {
