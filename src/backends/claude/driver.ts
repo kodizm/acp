@@ -40,6 +40,8 @@ import type {
 import type { ClaudeCredentials } from './auth.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
+import { buildCanUseTool } from './permission-bridge.ts'
+import { translateToolPolicyToClaude } from './policy.ts'
 import { SubagentTracker } from './subagent.ts'
 
 /**
@@ -63,6 +65,43 @@ export interface ClaudeSdkOptions {
   resume?: string
   forkSessionId?: string
   abortController?: AbortController
+  /**
+   * Tool gate. When `defaultMode` is set on the wire, the driver
+   * threads it here; otherwise the policy translator defaults to
+   * 'bypassPermissions' (Kodizm runs sandboxed).
+   */
+  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'dontAsk' | 'bypassPermissions'
+  allowedTools?: string[]
+  disallowedTools?: string[]
+  /**
+   * Optional canUseTool gate. When set, the SDK calls it before every
+   * tool_use turn and awaits a PermissionResult. The driver builds
+   * this via permission-bridge from the per-session toolPolicy +
+   * permissionTimeoutMs.
+   */
+  canUseTool?: (
+    toolName: string,
+    input: Record<string, unknown>,
+    options: import('./permission-bridge.ts').CanUseToolOptions,
+  ) => Promise<import('./permission-bridge.ts').PermissionResult>
+  /**
+   * Per-call env injection. Used to disable auto-compaction
+   * (`DISABLE_AUTO_COMPACT=1`) when `params.autoCompact === false`.
+   */
+  env?: Record<string, string>
+  /**
+   * Subset of SDK rule machinery. ToolPolicy.ask becomes a session-scope
+   * `addRules` PermissionUpdate; the driver assembles + spreads here.
+   */
+  permissions?: {
+    additionalDirectories?: string[]
+    rules?: Array<{
+      type: 'addRules'
+      rules: Array<{ toolName: string; ruleContent?: string }>
+      behavior: 'allow' | 'deny' | 'ask'
+      destination: 'session'
+    }>
+  }
 }
 
 /**
@@ -86,6 +125,14 @@ export interface ClaudeDriverDeps {
   credentials: ClaudeCredentials
   agentInfo: { version: string }
   sdk: SdkAdapter
+  /**
+   * AcpServer reference used by the driver to issue outbound RPCs
+   * (`session/request_permission`, `session/ask_user_question`).
+   * Optional so unit tests that exercise the driver without a wire
+   * surface (e.g., basic newSession + prompt smoke) keep working.
+   * The integration tests + production bin always provide it.
+   */
+  server?: import('./permission-bridge.ts').AcpServerLike
 }
 
 /**
@@ -105,6 +152,12 @@ interface SessionState {
    * until the first prompt completes.
    */
   sdkSessionId?: string
+  /**
+   * Opt-in deadline for outbound permission / question RPC awaits.
+   * Set from `NewSessionRequest.permissionTimeoutMs`; absent means
+   * no timeout (only abort signal unhooks).
+   */
+  permissionTimeoutMs?: number
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -142,7 +195,11 @@ export class ClaudeDriver implements BackendDriver {
   public async newSession(params: NewSessionRequest): Promise<NewSessionResult> {
     const sessionId = randomUUID()
     const options = this.buildSdkOptions(params)
-    this.sessions.set(sessionId, { sessionId, options })
+    this.sessions.set(sessionId, {
+      sessionId,
+      options,
+      ...(params.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: params.permissionTimeoutMs }),
+    })
     return { sessionId }
   }
 
@@ -215,6 +272,20 @@ export class ClaudeDriver implements BackendDriver {
     const abortController = new AbortController()
     state.abortController = abortController
     effectiveOptions.abortController = abortController
+
+    // Wire canUseTool when an AcpServer reference is available. Driver
+    // can run without one (legacy unit tests mock the SDK directly),
+    // but production + real-API smokes always provide it so tool-use
+    // gating + AskUserQuestion + ExitPlanMode flow through the wire.
+    if (this.deps.server !== undefined) {
+      effectiveOptions.canUseTool = buildCanUseTool({
+        server: this.deps.server,
+        sessionId,
+        emit,
+        signal: abortController.signal,
+        ...(state.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: state.permissionTimeoutMs }),
+      })
+    }
 
     // Per-turn subagent tracker: cross-message link from parent
     // tool_use_id to child session uuid. Cleared between turns so
@@ -300,11 +371,50 @@ export class ClaudeDriver implements BackendDriver {
         ? { skills: [...params.skills] }
         : {}
 
+    // Tool policy: translate canonical pattern strings to SDK's
+    // allowedTools / disallowedTools / permissionMode. Defaults to
+    // bypassPermissions when no defaultMode is set (Kodizm sandboxed
+    // Project containers self-approve every tool unless the
+    // orchestrator explicitly downgrades).
+    const policyTranslation =
+      'toolPolicy' in params && params.toolPolicy !== undefined ? translateToolPolicyToClaude(params.toolPolicy) : {}
+
+    const policyOptions: Pick<ClaudeSdkOptions, 'allowedTools' | 'disallowedTools' | 'permissionMode' | 'permissions'> =
+      {
+        ...(policyTranslation.allowedTools !== undefined ? { allowedTools: policyTranslation.allowedTools } : {}),
+        ...(policyTranslation.disallowedTools !== undefined
+          ? { disallowedTools: policyTranslation.disallowedTools }
+          : {}),
+        permissionMode: policyTranslation.permissionMode ?? 'bypassPermissions',
+        ...(policyTranslation.askRules !== undefined && policyTranslation.askRules.length > 0
+          ? {
+              permissions: {
+                rules: [
+                  {
+                    type: 'addRules' as const,
+                    rules: policyTranslation.askRules.map((toolName) => ({ toolName })),
+                    behavior: 'ask' as const,
+                    destination: 'session' as const,
+                  },
+                ],
+              },
+            }
+          : {}),
+      }
+
+    // Auto-compact opt-out via env. SDK default is on; when the
+    // orchestrator passes autoCompact:false the driver injects the
+    // SDK's documented disable env var.
+    const compactEnv =
+      'autoCompact' in params && params.autoCompact === false ? { env: { DISABLE_AUTO_COMPACT: '1' } } : {}
+
     return {
       cwd: params.cwd,
       mcpServers: translateMcpServers(params.mcpServers),
       ...additional,
       ...skills,
+      ...policyOptions,
+      ...compactEnv,
     }
   }
 
