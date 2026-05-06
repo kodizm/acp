@@ -11,7 +11,7 @@ Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in prog
 | 0, bootstrap | T1-T4 | done |
 | 1, ACP server core | T5-T9 | done |
 | 2, canonical wire shape | T10-T12 | done |
-| 3, backend driver + registry | T13-T15 | pending |
+| 3, backend driver + registry | T13-T15 | done |
 | 4, Claude SDK driver | T16-T20 | pending |
 | 5, feature plumbing | T21-T28 | pending |
 | 6, integration + e2e | T29-T31 | pending |
@@ -185,6 +185,7 @@ const response = toJsonRpcResponse(requestId, error)
 | Error | Code | When |
 |-------|------|------|
 | `MethodNotFoundError` | -32601 | unregistered method |
+| `MethodNotSupportedError` | -32601 | driver lacks capability for method |
 | `InvalidParamsError` | -32602 | handler validation rejection |
 | `InternalError` | -32603 | catch-all for unexpected throws |
 | `SessionNotFoundError` | -32602 | sessionId not in manager |
@@ -307,6 +308,72 @@ const block = ContentBlockSchema.parse({
 
 Inline base64 payloads cap at `MAX_INLINE_BASE64_BYTES` (5MB decoded). Beyond that, use a URL-sourced block backed by external storage.
 
+### `@/backends/driver`, BackendDriver contract
+
+Every backend (Claude phase 1, codex phase 2, opencode phase 3) implements this interface. The dispatcher routes every JSON-RPC method into the matching driver method; capability gating runs before invocation.
+
+```ts
+import { type BackendDriver, ensureCapability } from '@/backends/driver.ts'
+
+class MyDriver implements BackendDriver {
+  capabilities() {
+    return {
+      resume: true,
+      fork: false,
+      fileUpload: true,
+      thinking: true,
+      subagent: false,
+      skillEvents: false,
+    }
+  }
+
+  async initialize(params) { /* ... */ }
+  async newSession(params) { /* ... */ }
+  async prompt(sessionId, params, emit) {
+    emit.send({ sessionId, type: 'output_chunk', text: 'Hello' })
+    return { stopReason: 'end_turn' }
+  }
+  async cancel(request) { /* ... */ }
+  async loadSession(params) { /* ... */ }
+  async forkSession(params) { /* ... */ }
+}
+```
+
+`ensureCapability(caps, required, method)` is the dispatch-layer guard that throws `MethodNotSupportedError` when a driver lacks a feature.
+
+### `@/backends/registry`, env-driven backend registry
+
+`createBackendRegistry()` returns a name -> driver map with env-aware resolution. Phase 1 binds `claude`; phases 2 + 3 add `codex` + `opencode`.
+
+```ts
+import { createBackendRegistry } from '@/backends/registry.ts'
+import { ClaudeDriver } from '@/backends/claude/driver.ts'
+
+const registry = createBackendRegistry()
+registry.register('claude', new ClaudeDriver({ /* ... */ }))
+
+const driver = registry.resolveFromEnv(process.env)
+// reads KODIZM_BACKEND, returns the bound driver
+// throws BackendNotConfiguredError when env is missing
+// throws UnknownBackendError when value is not registered
+```
+
+### `@/server/acp-server` with backend wiring
+
+When a backend is passed to `createAcpServer`, the server auto-registers handlers for `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/load`, `session/fork`. Each handler validates the request through the matching wire schema, applies capability gating, and forwards to the driver.
+
+```ts
+import { createAcpServer } from '@/server/acp-server.ts'
+
+const server = createAcpServer({ transport, backend })
+await server.serve()
+// initialize + 5 session/* methods auto-routed to backend
+// schema validation failures emit -32602 InvalidParams responses
+// capability mismatches emit -32601 with supportedMethods in data
+```
+
+The prompt handler wraps `server.notify` into an `EventEmitter`, so driver-emitted `SessionUpdateEvent` values fan out as `sessionUpdate` notifications.
+
 ## Test layering
 
 | Layer | Purpose | Where | Cost |
@@ -338,8 +405,10 @@ src/
     events.ts                 # 13-variant sessionUpdate event union
     content.ts                # 5 content block types (text/image/document/tool_use/tool_result)
     types.ts                  # z.infer re-exports for compile-time consumption
-  backends/                   # per-backend driver + event mapper (Wave 3-4)
-    claude/                   # phase 1
+  backends/                   # per-backend driver + event mapper
+    driver.ts                 # BackendDriver contract + ensureCapability gate
+    registry.ts               # env-driven name -> driver map
+    claude/                   # phase 1 (Wave 4-5)
     codex/                    # phase 2
     opencode/                 # phase 3
   session/                    # multi-session manager (Wave 4)
