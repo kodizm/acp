@@ -26,9 +26,9 @@ import type { DebugRecorder } from './util/debug-recorder.ts'
  * `codex` and `opencode` arrive in phases 2 and 3 and slot in via
  * {@link resolveBackendFromEnv} pattern matching.
  */
-export type SupportedBackend = 'claude'
+export type SupportedBackend = 'claude' | 'codex'
 
-const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude']
+const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'codex']
 
 export { BackendNotConfiguredError, UnknownBackendError }
 

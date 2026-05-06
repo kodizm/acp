@@ -16,6 +16,11 @@ describe('resolveBackendFromEnv', () => {
     expect(result).toBe('claude')
   })
 
+  test('accepts codex as a valid backend value', () => {
+    const result = resolveBackendFromEnv({ KODIZM_BACKEND: 'codex' })
+    expect(result).toBe('codex')
+  })
+
   test('rejects unknown backend values', () => {
     expect(() => resolveBackendFromEnv({ KODIZM_BACKEND: 'gemini' })).toThrow(/unknown backend/i)
   })
