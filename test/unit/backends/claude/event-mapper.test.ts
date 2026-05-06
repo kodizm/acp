@@ -247,6 +247,101 @@ describe('mapSdkMessage, result', () => {
   })
 })
 
+describe('mapSdkMessage, compaction lifecycle', () => {
+  test('system status:compacting -> compaction_started (trigger=auto default)', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+    } as unknown as SdkMessage)
+
+    expect(events).toEqual([{ sessionId: SESSION_ID, type: 'compaction_started', trigger: 'auto' }])
+  })
+
+  test('compact_boundary -> compaction_completed with full metadata', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: {
+        trigger: 'manual',
+        pre_tokens: 78_000,
+        post_tokens: 12_000,
+        duration_ms: 1500,
+      },
+    } as unknown as SdkMessage)
+
+    expect(events).toEqual([
+      {
+        sessionId: SESSION_ID,
+        type: 'compaction_completed',
+        trigger: 'manual',
+        preTokens: 78_000,
+        postTokens: 12_000,
+        durationMs: 1500,
+        succeeded: true,
+      },
+    ])
+  })
+
+  test('compact_boundary minimal payload', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: {
+        trigger: 'auto',
+        pre_tokens: 50_000,
+      },
+    } as unknown as SdkMessage)
+
+    expect(events).toEqual([
+      {
+        sessionId: SESSION_ID,
+        type: 'compaction_completed',
+        trigger: 'auto',
+        preTokens: 50_000,
+        succeeded: true,
+      },
+    ])
+  })
+
+  test('status:null + compact_result:failed -> compaction_completed (succeeded:false + error)', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      compact_result: 'failed',
+      compact_error: 'prompt_too_long retry exhausted',
+    } as unknown as SdkMessage)
+
+    expect(events).toHaveLength(1)
+    if (events[0]?.type === 'compaction_completed') {
+      expect(events[0].succeeded).toBe(false)
+      expect(events[0].error).toContain('prompt_too_long')
+    }
+  })
+
+  test('status:null + compact_result:success -> no event (boundary already fired)', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      compact_result: 'success',
+    } as unknown as SdkMessage)
+
+    expect(events).toEqual([])
+  })
+
+  test('status:requesting -> no event', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'status',
+      status: 'requesting',
+    } as unknown as SdkMessage)
+
+    expect(events).toEqual([])
+  })
+})
+
 describe('mapSdkMessage, unknown variants', () => {
   test('returns empty for an unknown message type', () => {
     const events = mapSdkMessage(SESSION_ID, { type: 'mystery' } as unknown as SdkMessage)

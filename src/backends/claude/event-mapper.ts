@@ -21,7 +21,32 @@ import type { SessionUpdateEvent } from '../../wire/events.ts'
  * The SDK actually emits a wider union than this; unknown variants
  * fall through {@link mapSdkMessage} and produce no events.
  */
-export type SdkMessage = SdkSystemInitMessage | SdkAssistantMessage | SdkUserMessage | SdkResultMessage
+export type SdkMessage =
+  | SdkSystemInitMessage
+  | SdkSystemStatusMessage
+  | SdkSystemCompactBoundaryMessage
+  | SdkAssistantMessage
+  | SdkUserMessage
+  | SdkResultMessage
+
+interface SdkSystemStatusMessage {
+  type: 'system'
+  subtype: 'status'
+  status: 'compacting' | 'requesting' | null
+  compact_result?: 'success' | 'failed'
+  compact_error?: string
+}
+
+interface SdkSystemCompactBoundaryMessage {
+  type: 'system'
+  subtype: 'compact_boundary'
+  compact_metadata: {
+    trigger: 'manual' | 'auto'
+    pre_tokens: number
+    post_tokens?: number
+    duration_ms?: number
+  }
+}
 
 interface SdkSystemInitMessage {
   type: 'system'
@@ -118,7 +143,18 @@ interface SdkUsage {
 export function mapSdkMessage(sessionId: string, message: SdkMessage): SessionUpdateEvent[] {
   switch (message.type) {
     case 'system':
-      return mapSystemInit(sessionId, message)
+      // Three system subtypes flow through this branch: init, status,
+      // and compact_boundary. Each gets its own mapper.
+      if (message.subtype === 'init') {
+        return mapSystemInit(sessionId, message)
+      }
+      if (message.subtype === 'status') {
+        return mapSystemStatus(sessionId, message)
+      }
+      if (message.subtype === 'compact_boundary') {
+        return mapCompactBoundary(sessionId, message)
+      }
+      return []
     case 'assistant':
       return mapAssistantMessage(sessionId, message)
     case 'user':
@@ -128,6 +164,66 @@ export function mapSdkMessage(sessionId: string, message: SdkMessage): SessionUp
     default:
       return []
   }
+}
+
+/**
+ * SDK `system status` -> compaction lifecycle events. The SDK emits
+ * status:'compacting' when summarisation begins and status:null with
+ * compact_result on success or failure. We surface:
+ *
+ *   - status:'compacting'                      -> compaction_started
+ *   - status:null + compact_result:'success'   -> (no event; the
+ *                                                 preceding compact_boundary
+ *                                                 already emitted
+ *                                                 compaction_completed)
+ *   - status:null + compact_result:'failed'    -> compaction_completed
+ *                                                 (succeeded:false)
+ *
+ * Trigger is unknown at status:'compacting' (boundary carries it), so
+ * we default to 'auto' on the started event; the completed event
+ * carries the authoritative trigger from compact_metadata.
+ */
+function mapSystemStatus(sessionId: string, message: SdkSystemStatusMessage): SessionUpdateEvent[] {
+  if (message.status === 'compacting') {
+    return [{ sessionId, type: 'compaction_started', trigger: 'auto' }]
+  }
+  if (message.status === null && message.compact_result === 'failed') {
+    return [
+      {
+        sessionId,
+        type: 'compaction_completed',
+        trigger: 'auto',
+        preTokens: 0,
+        succeeded: false,
+        ...(message.compact_error === undefined ? {} : { error: message.compact_error }),
+      },
+    ]
+  }
+  return []
+}
+
+/**
+ * SDK `compact_boundary` -> compaction_completed event. Carries the
+ * authoritative metadata (trigger, pre_tokens, post_tokens?,
+ * duration_ms?). Always succeeded:true (boundary fires only on
+ * success).
+ */
+function mapCompactBoundary(sessionId: string, message: SdkSystemCompactBoundaryMessage): SessionUpdateEvent[] {
+  return [
+    {
+      sessionId,
+      type: 'compaction_completed',
+      trigger: message.compact_metadata.trigger,
+      preTokens: message.compact_metadata.pre_tokens,
+      ...(message.compact_metadata.post_tokens === undefined
+        ? {}
+        : { postTokens: message.compact_metadata.post_tokens }),
+      ...(message.compact_metadata.duration_ms === undefined
+        ? {}
+        : { durationMs: message.compact_metadata.duration_ms }),
+      succeeded: true,
+    },
+  ]
 }
 
 /**
