@@ -5,12 +5,21 @@
  * and boots the ACP server over stdio. The bin is the only public
  * surface; everything else is internal to the package.
  *
+ * Phase 1.7 (T14): graceful SIGTERM / SIGINT handler installs at boot.
+ * The handler runs `runShutdown` with a 3s grace window and tears down
+ * the registered DebugRecorders + transport before exiting. Active
+ * recorders register via {@link registerActiveRecorder}; the bin's
+ * future server-boot code attaches the transport flush helper via
+ * {@link registerShutdownFlusher}.
+ *
  * Subsequent tasks layer the ACP server (T5+), the Kodizm canonical
  * wire shape (T10+), the backend driver registry (T13+), and the
  * Claude SDK driver (T16+) on top of this entrypoint.
  */
 
 import { BackendNotConfiguredError, UnknownBackendError } from './server/errors.ts'
+import { runShutdown } from './server/shutdown.ts'
+import type { DebugRecorder } from './util/debug-recorder.ts'
 
 /**
  * Backend identifier accepted at runtime. Phase 1 only ships `claude`;
@@ -22,6 +31,84 @@ export type SupportedBackend = 'claude'
 const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude']
 
 export { BackendNotConfiguredError, UnknownBackendError }
+
+/**
+ * Default budget the SIGTERM / SIGINT handler races against. Locked
+ * by Phase 1.7 decision 7.
+ */
+export const SHUTDOWN_GRACE_MS = 3_000
+
+/**
+ * Module-scope registry of active recorders. The bin tracks every
+ * DebugRecorder it constructs so the shutdown handler can call
+ * `flushPending()` on each in parallel.
+ */
+const activeRecorders = new Set<DebugRecorder>()
+
+/**
+ * Optional transport-flush callback. The future server boot path
+ * registers a flusher pointing to the AcpServer's transport.
+ */
+let transportFlusher: (() => Promise<void>) | undefined
+
+/**
+ * Register a recorder so the shutdown handler can flush it.
+ *
+ * @param recorder - the recorder to track
+ * @returns a deregister callback the recorder's owner calls when the
+ *          session ends (so closed recorders do not pin memory)
+ */
+export function registerActiveRecorder(recorder: DebugRecorder): () => void {
+  activeRecorders.add(recorder)
+  return () => activeRecorders.delete(recorder)
+}
+
+/**
+ * Register the transport flush callback the shutdown handler invokes
+ * after recorders have flushed.
+ */
+export function registerShutdownFlusher(flusher: () => Promise<void>): void {
+  transportFlusher = flusher
+}
+
+/**
+ * Internal helper: orchestrate the shutdown side-effects with the
+ * supplied grace budget. Exposed for the SIGTERM / SIGINT handler
+ * + tests.
+ */
+export async function performShutdown(graceMs: number = SHUTDOWN_GRACE_MS): Promise<void> {
+  await runShutdown({
+    graceMs,
+    flushRecorders: async () => {
+      const recorders = [...activeRecorders]
+      await Promise.all(recorders.map((r) => r.flushPending()))
+      for (const recorder of recorders) {
+        recorder.close()
+      }
+    },
+    flushTransport: async () => {
+      if (transportFlusher !== undefined) {
+        await transportFlusher()
+      }
+    },
+  })
+}
+
+/**
+ * Install SIGTERM + SIGINT handlers that run the graceful shutdown
+ * cycle then exit. Idempotent: re-installing replaces prior handlers.
+ */
+export function installShutdownHook(): void {
+  const handler = async (signal: string): Promise<void> => {
+    process.stderr.write(`${JSON.stringify({ level: 'info', message: 'kodizm-acp shutdown', signal })}\n`)
+    await performShutdown()
+    process.exit(0)
+  }
+  process.removeAllListeners('SIGTERM')
+  process.removeAllListeners('SIGINT')
+  process.on('SIGTERM', () => void handler('SIGTERM'))
+  process.on('SIGINT', () => void handler('SIGINT'))
+}
 
 /**
  * Resolve the backend identifier from a captured environment.
@@ -58,6 +145,7 @@ export function resolveBackendFromEnv(env: Record<string, string | undefined>): 
  * resolved backend driver + attach stdin/stdout streams.
  */
 export async function main(): Promise<void> {
+  installShutdownHook()
   const backend = resolveBackendFromEnv(process.env as Record<string, string | undefined>)
 
   // 1. Phase 1 placeholder: real boot path lands in T15 (wire AcpServer
