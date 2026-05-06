@@ -25,7 +25,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit, events } = collector()
     const result = await handleCodexApproval({
       method: 'item/commandExecution/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'item_1', command: 'pwd' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'item_1', command: 'pwd' },
       server: makeServer('allow'),
       sessionId: 's1',
       emit,
@@ -39,7 +39,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/commandExecution/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'item_2' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'item_2' },
       server: makeServer('allow_always'),
       sessionId: 's1',
       emit,
@@ -52,7 +52,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/commandExecution/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'item_3' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'item_3' },
       server: makeServer('reject'),
       sessionId: 's1',
       emit,
@@ -65,7 +65,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit, events } = collector()
     const result = await handleCodexApproval({
       method: 'item/fileChange/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'fc_1', reason: 'edit /x.ts' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'fc_1', reason: 'edit /x.ts' },
       server: makeServer('allow'),
       sessionId: 's1',
       emit,
@@ -79,7 +79,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/fileChange/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'fc_2' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'fc_2' },
       server: makeServer('allow_always'),
       sessionId: 's1',
       emit,
@@ -92,7 +92,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/fileChange/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'fc_3' },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'fc_3' },
       server: makeServer('reject'),
       sessionId: 's1',
       emit,
@@ -105,7 +105,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit, events } = collector()
     const result = await handleCodexApproval({
       method: 'item/permissions/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'p_1', cwd: '/x', permissions: { type: 'managed' } },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'p_1', cwd: '/x', permissions: { type: 'managed' } },
       server: makeServer('allow'),
       sessionId: 's1',
       emit,
@@ -119,7 +119,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/permissions/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'p_2', permissions: { type: 'managed' } },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'p_2', permissions: { type: 'managed' } },
       server: makeServer('allow_always'),
       sessionId: 's1',
       emit,
@@ -132,7 +132,7 @@ describe('handleCodexApproval (Phase 2 T10)', () => {
     const { emit } = collector()
     const result = await handleCodexApproval({
       method: 'item/permissions/requestApproval',
-      params: { thread_id: 't1', turn_id: 'tu1', item_id: 'p_3', permissions: { type: 'managed' } },
+      params: { threadId: 't1', turnId: 'tu1', itemId: 'p_3', permissions: { type: 'managed' } },
       server: makeServer('reject'),
       sessionId: 's1',
       emit,

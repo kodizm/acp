@@ -257,6 +257,21 @@ export class CodexDriver implements BackendDriver {
       additionalDirectories: params.additionalDirectories,
     })
 
+    // Map canonical systemPrompt to codex baseInstructions /
+    // developerInstructions per `v2/ThreadStartParams.ts`:
+    //   string                -> baseInstructions (full replacement)
+    //   { append: string }    -> developerInstructions (append on top)
+    const systemPromptFields: { baseInstructions?: string; developerInstructions?: string } = {}
+    if (typeof params.systemPrompt === 'string') {
+      systemPromptFields.baseInstructions = params.systemPrompt
+    } else if (
+      params.systemPrompt !== undefined &&
+      typeof params.systemPrompt === 'object' &&
+      typeof params.systemPrompt.append === 'string'
+    ) {
+      systemPromptFields.developerInstructions = params.systemPrompt.append
+    }
+
     const threadResponse = await proc.request<{
       thread: { id: string; path?: string }
       model?: string
@@ -265,6 +280,7 @@ export class CodexDriver implements BackendDriver {
       approvalPolicy,
       sandboxPolicy,
       ...(params.model === undefined ? {} : { model: params.model }),
+      ...systemPromptFields,
     })
 
     // 5. Persist driver-internal state. Orchestrator only sees sessionId.
@@ -351,7 +367,7 @@ export class CodexDriver implements BackendDriver {
     // 3. Phase 1.7 lifecycle timers.
     const promptStartedAt = Date.now()
     let lastEventAt = promptStartedAt
-    let stopReason: PromptResult['stopReason'] = 'end_turn'
+    let stopReason: PromptResult['stopReason'] = 'end_turn' as PromptResult['stopReason']
     let failureReason: PromptResult['failureReason']
     let failureDetail: PromptResult['failureDetail']
     let inactivityFired = false
@@ -630,7 +646,7 @@ export class CodexDriver implements BackendDriver {
         await this.deps.deferredStore.set(sessionId, {
           toolUseId: params.itemId,
           toolName: this.approvalMethodToName(method),
-          rawInput: params,
+          rawInput: params as unknown as Record<string, unknown>,
           deferredAt: Date.now(),
         })
       } else if (this.deps.server !== undefined) {

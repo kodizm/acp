@@ -95,7 +95,7 @@ async function makeDriver(): Promise<DriverHandle> {
     cleanup: async () => {
       if (lastProc !== null) {
         try {
-          await lastProc.close()
+          await lastProc.kill()
         } catch {
           // best-effort
         }

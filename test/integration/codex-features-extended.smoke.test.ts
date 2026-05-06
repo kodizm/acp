@@ -99,10 +99,8 @@ async function makeDriver(server?: AcpServerLike, debug?: boolean): Promise<Driv
                       params?: { item?: { type?: string } }
                     }
                     if (f.method === 'item/started' || f.method === 'item/completed') {
-                      // biome-ignore lint/suspicious/noConsole: smoke debug
                       console.error(`[codex.in] ${f.method} item.type=${f.params?.item?.type}`)
                     } else if (f.method !== undefined) {
-                      // biome-ignore lint/suspicious/noConsole: smoke debug
                       console.error(`[codex.in] ${f.method}${f.id !== undefined ? ` (id=${f.id})` : ''}`)
                     }
                   }
@@ -122,7 +120,7 @@ async function makeDriver(server?: AcpServerLike, debug?: boolean): Promise<Driv
     cleanup: async () => {
       if (lastProc !== null) {
         try {
-          await lastProc.close()
+          await lastProc.kill()
         } catch {
           // best-effort
         }
