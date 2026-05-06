@@ -34,6 +34,26 @@ export const JsonRpcErrorCode = {
 export type JsonRpcErrorCode = (typeof JsonRpcErrorCode)[keyof typeof JsonRpcErrorCode]
 
 /**
+ * RPC method aliases. Registering a handler for any name in a group
+ * routes ALL names in that group to the same handler.
+ *
+ * The permission request RPC has drifted between drafts:
+ *   - Older `@anthropic-ai/claude-agent-sdk` builds emit `requestPermission`
+ *   - Current builds (0.32.0+) emit `session/request_permission`
+ *
+ * Accepting both forms guards against version drift; the canary is
+ * the permission_request stream event count after a smoke run. Zero
+ * rows means the dispatcher silently dropped the namespaced form
+ * because only the legacy alias was registered.
+ *
+ * Future ACP RPCs that move into the `session/*` namespace can be
+ * added here without changing dispatch logic.
+ */
+export const RPC_METHOD_ALIASES: Readonly<Record<string, ReadonlyArray<string>>> = {
+  'session/request_permission': ['requestPermission'],
+}
+
+/**
  * Wire-side request envelope.
  */
 interface JsonRpcRequest {
@@ -200,9 +220,35 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
     entry.resolve(frame.result)
   }
 
+  /**
+   * Resolve every name in the alias group for a given method. The
+   * canonical name is also returned, so the same handler binds under
+   * every name in the group.
+   */
+  const resolveAliasGroup = (method: string): ReadonlyArray<string> => {
+    // 1. Method is itself a canonical (alias-group key)?
+    if (method in RPC_METHOD_ALIASES) {
+      return [method, ...(RPC_METHOD_ALIASES[method] ?? [])]
+    }
+
+    // 2. Method appears as an alias of some canonical?
+    for (const [canonical, aliases] of Object.entries(RPC_METHOD_ALIASES)) {
+      if (aliases.includes(method)) {
+        return [canonical, ...aliases]
+      }
+    }
+
+    // 3. Method has no aliases; bind under just its own name.
+    return [method]
+  }
+
   return {
     on(method: string, handler: MethodHandler): void {
-      handlers.set(method, handler)
+      // Bind the handler under every name in the alias group so the
+      // dispatcher matches both forms without per-call lookup overhead.
+      for (const name of resolveAliasGroup(method)) {
+        handlers.set(name, handler)
+      }
     },
 
     request<T = unknown>(method: string, params: unknown): Promise<T> {
