@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 
 import { MethodNotSupportedError, SessionNotFoundError } from '../../server/errors.ts'
+import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type {
   CancelRequest,
   ForkSessionRequest,
@@ -100,9 +101,24 @@ interface CodexSessionState {
    */
   configPath?: string
   /**
-   * Per-turn abort controller; flipped by cancel(). T4 wires this.
+   * Per-turn abort controller; flipped by cancel().
    */
   abortController?: AbortController
+  /**
+   * Active turn id during prompt(); set after `turn/start` response,
+   * used by `cancel()` to dispatch `turn/interrupt`.
+   */
+  activeTurnId?: string
+  /**
+   * Phase 1.7 heartbeat cadence (ms). When set, the driver runs a
+   * HeartbeatTimer at prompt entry.
+   */
+  heartbeatIntervalMs?: number
+  /**
+   * Phase 1.7 inactivity threshold (ms). When set, the driver fires
+   * a setInterval probe; gap > threshold -> session_failed:'sdk_stall'.
+   */
+  inactivityThresholdMs?: number
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -194,13 +210,157 @@ export class CodexDriver implements BackendDriver {
       ...(threadResponse.thread.path === undefined ? {} : { codexJsonlPath: threadResponse.thread.path }),
       process: proc,
       configPath,
+      ...(params.heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs: params.heartbeatIntervalMs }),
+      ...(params.inactivityThresholdMs === undefined ? {} : { inactivityThresholdMs: params.inactivityThresholdMs }),
     })
 
     return { sessionId }
   }
 
-  public async prompt(_sessionId: string, _params: PromptRequest, _emit: EventEmitter): Promise<PromptResult> {
-    throw new MethodNotSupportedError('session/prompt', ['initialize', 'session/new'])
+  public async prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult> {
+    const state = this.sessions.get(sessionId)
+    if (state === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    if (state.process === undefined || state.codexThreadId === undefined) {
+      throw new SessionNotFoundError(`${sessionId} (no codex thread)`)
+    }
+
+    // 1. Allocate per-turn abort controller; cancel() flips it.
+    const abortController = new AbortController()
+    state.abortController = abortController
+
+    // 2. Translate canonical content blocks to codex UserInput[].
+    const inputs: Array<{ type: string; text?: string }> = []
+    for (const block of params.prompt) {
+      if (typeof block === 'object' && block !== null) {
+        const b = block as { type?: string; text?: string }
+        if (b.type === 'text' && typeof b.text === 'string') {
+          inputs.push({ type: 'text', text: b.text })
+        }
+      }
+    }
+
+    // 3. Phase 1.7 lifecycle timers.
+    const promptStartedAt = Date.now()
+    let lastEventAt = promptStartedAt
+    let stopReason: PromptResult['stopReason'] = 'end_turn'
+    let failureReason: PromptResult['failureReason']
+    let failureDetail: PromptResult['failureDetail']
+    let inactivityFired = false
+
+    let heartbeat: HeartbeatTimer | undefined
+    if (state.heartbeatIntervalMs !== undefined) {
+      heartbeat = new HeartbeatTimer({
+        sessionId,
+        intervalMs: state.heartbeatIntervalMs,
+        emit,
+        getLastSdkMs: () => lastEventAt,
+      })
+      heartbeat.start(promptStartedAt)
+    }
+
+    let inactivityProbe: ReturnType<typeof setInterval> | undefined
+    const inactivityThresholdMs = state.inactivityThresholdMs
+    if (inactivityThresholdMs !== undefined) {
+      const probeIntervalMs = Math.max(10, Math.min(Math.floor(inactivityThresholdMs / 2), 10_000))
+      inactivityProbe = setInterval(() => {
+        const gap = Date.now() - lastEventAt
+        if (gap > inactivityThresholdMs && !inactivityFired) {
+          inactivityFired = true
+          const detail = `no codex event for ${gap}ms (threshold=${inactivityThresholdMs}ms)`
+          emit.send({
+            sessionId,
+            type: 'session_failed',
+            reason: 'sdk_stall',
+            detail,
+            capturedAt: Date.now(),
+          })
+          failureReason = 'sdk_stall'
+          failureDetail = detail
+          stopReason = 'session_failed'
+          abortController.abort()
+        }
+      }, probeIntervalMs)
+    }
+
+    // 4. Wire codex notification listener; resolve on turn/completed.
+    let resolveTurn!: () => void
+    const turnDone = new Promise<void>((resolve) => {
+      resolveTurn = resolve
+    })
+
+    const off = state.process.onNotification((method, _notifParams) => {
+      lastEventAt = Date.now()
+      if (method === 'turn/started') {
+        return
+      }
+      if (method === 'turn/completed') {
+        // T7 will read params.turn.status to set stopReason; for now,
+        // assume end_turn unless cancel was already in flight.
+        if (stopReason !== 'session_failed' && stopReason !== 'cancelled') {
+          stopReason = 'end_turn'
+        }
+        resolveTurn()
+        return
+      }
+      // T7 wires the full event-mapper. For T4 we don't emit any
+      // canonical events for output_chunk / tool_call_*; that lands
+      // in T7. Tests for T4 only assert lifecycle (heartbeat, cancel,
+      // stall, end_turn).
+    })
+    void off // returned by onNotification when we extend it; T2 didn't return one yet
+
+    // 5. Send turn/start with serialized inputs.
+    try {
+      const turnStartResult = await state.process.request<{ turn: { id: string } }>('turn/start', {
+        thread_id: state.codexThreadId,
+        input: inputs,
+      })
+      state.activeTurnId = turnStartResult.turn.id
+
+      // 6. Race the turn-completion against the abort signal.
+      await Promise.race([
+        turnDone,
+        new Promise<void>((_resolve, reject) => {
+          abortController.signal.addEventListener('abort', () => reject(new Error('cancel')), { once: true })
+        }),
+      ]).catch(async (err) => {
+        if (err instanceof Error && err.message === 'cancel') {
+          // Send turn/interrupt; await turn/completed (status: cancelled).
+          if (state.process !== undefined && state.codexThreadId !== undefined && state.activeTurnId !== undefined) {
+            await state.process
+              .request('turn/interrupt', {
+                thread_id: state.codexThreadId,
+                turn_id: state.activeTurnId,
+              })
+              .catch(() => undefined)
+            // Wait for the synthesized turn/completed (with 1s budget).
+            await Promise.race([turnDone, new Promise<void>((resolve) => setTimeout(resolve, 1_000))])
+          }
+          if (!inactivityFired) {
+            stopReason = 'cancelled'
+            emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
+          }
+        }
+      })
+    } finally {
+      heartbeat?.stop()
+      if (inactivityProbe !== undefined) {
+        clearInterval(inactivityProbe)
+      }
+      state.abortController = undefined
+      state.activeTurnId = undefined
+    }
+
+    if (stopReason === 'session_failed') {
+      return {
+        stopReason,
+        ...(failureReason === undefined ? {} : { failureReason }),
+        ...(failureDetail === undefined ? {} : { failureDetail }),
+      }
+    }
+    return { stopReason }
   }
 
   public async cancel(request: CancelRequest): Promise<void> {
@@ -208,8 +368,11 @@ export class CodexDriver implements BackendDriver {
     if (state === undefined) {
       throw new SessionNotFoundError(request.sessionId)
     }
-    // Phase 2 T4 wires turn/interrupt; for T3 we just kill the subprocess
-    // so tests can clean up after assertion.
+    if (state.abortController !== undefined) {
+      state.abortController.abort()
+      return
+    }
+    // No active prompt; tear down subprocess (used by tests for cleanup).
     if (state.process !== undefined) {
       await state.process.kill()
     }
