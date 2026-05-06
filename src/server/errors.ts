@@ -31,6 +31,7 @@ export const JsonRpcErrorCode = {
   BackendDriverError: -32003,
   AcpTimeout: -32004,
   AcpProtocol: -32005,
+  BackendStall: -32006,
 } as const
 
 export type JsonRpcErrorCode = (typeof JsonRpcErrorCode)[keyof typeof JsonRpcErrorCode]
@@ -150,6 +151,23 @@ export class CancelledError extends JsonRpcError {
     super(`session cancelled: ${sessionId}`, JsonRpcErrorCode.Cancelled, {
       data: { sessionId },
     })
+  }
+}
+
+/**
+ * -32006 Backend Stall. Phase 1.7. The orchestrator-side heartbeat
+ * watchdog (or the lifecycle terminator probe) detected that no
+ * heartbeat has arrived from the kodizm-acp container for longer
+ * than `heartbeatTimeoutMs` (typically 3x the configured cadence).
+ * Distinct from {@link AcpTimeoutError} (which fires when a single
+ * RPC await deadline is exceeded) and from {@link ProcessDiedError}
+ * (which fires when the subprocess actually exits).
+ */
+export class BackendStallError extends JsonRpcError {
+  public override readonly name = 'BackendStallError'
+
+  public constructor(detail = 'heartbeat lost') {
+    super(detail, JsonRpcErrorCode.BackendStall, { data: { detail } })
   }
 }
 

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   AcpProtocolError,
   AcpTimeoutError,
+  BackendStallError,
   CancelledError,
   type JsonRpcError,
   ProcessDiedError,
@@ -145,5 +146,38 @@ describe('validateProtocolFrame', () => {
   test('emits AcpProtocolError for a request without a method', () => {
     const result = validateProtocolFrame({ jsonrpc: '2.0', id: 1 })
     expect(result).toBeInstanceOf(AcpProtocolError)
+  })
+})
+
+describe('Phase 1.7 heartbeat-aware terminator probe', () => {
+  test('fires BackendStallError when last heartbeat is older than heartbeatTimeoutMs', () => {
+    const result = pollTerminators({
+      isAlive: () => true,
+      cancelledAt: null,
+      sessionId: 's1',
+      lastHeartbeatAt: Date.now() - 35_000,
+      heartbeatTimeoutMs: 30_000,
+    })
+    expect(result).toBeInstanceOf(BackendStallError)
+  })
+
+  test('returns null when last heartbeat is recent (within window)', () => {
+    const result = pollTerminators({
+      isAlive: () => true,
+      cancelledAt: null,
+      sessionId: 's1',
+      lastHeartbeatAt: Date.now() - 5_000,
+      heartbeatTimeoutMs: 30_000,
+    })
+    expect(result).toBeNull()
+  })
+
+  test('legacy callers (no heartbeat fields) preserve prior behaviour', () => {
+    const result = pollTerminators({
+      isAlive: () => true,
+      cancelledAt: null,
+      sessionId: 's1',
+    })
+    expect(result).toBeNull()
   })
 })

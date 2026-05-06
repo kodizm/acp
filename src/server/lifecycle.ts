@@ -17,7 +17,14 @@
  * check still rejects malformed input.
  */
 
-import { AcpProtocolError, AcpTimeoutError, CancelledError, type JsonRpcError, ProcessDiedError } from './errors.ts'
+import {
+  AcpProtocolError,
+  AcpTimeoutError,
+  BackendStallError,
+  CancelledError,
+  type JsonRpcError,
+  ProcessDiedError,
+} from './errors.ts'
 
 /**
  * Default grace window after a cancel signal during which the loop
@@ -51,6 +58,19 @@ export interface LifecycleState {
   sessionId: string
   graceSeconds?: number
   deadlineMs?: number
+  /**
+   * Phase 1.7: wall-clock timestamp (ms since epoch) of the last
+   * heartbeat the loop observed from the backend. When set together
+   * with {@link heartbeatTimeoutMs}, the probe fires
+   * {@link BackendStallError} if the gap exceeds the timeout.
+   */
+  lastHeartbeatAt?: number
+  /**
+   * Phase 1.7: ms gap between `Date.now()` and `lastHeartbeatAt` past
+   * which the probe raises {@link BackendStallError}. Typically 3x
+   * the heartbeat cadence (default 30_000 for a 10s cadence).
+   */
+  heartbeatTimeoutMs?: number
 }
 
 /**
@@ -84,7 +104,18 @@ export function pollTerminators(state: LifecycleState): JsonRpcError | null {
     }
   }
 
-  // 3. Deadline: the absolute timestamp past which the loop is no
+  // 3. Phase 1.7 heartbeat watchdog: when both lastHeartbeatAt and
+  //    heartbeatTimeoutMs are set, fire BackendStallError once the
+  //    gap exceeds the timeout. Priority above deadline so a stalled
+  //    backend surfaces a more specific error than a generic timeout.
+  if (state.lastHeartbeatAt !== undefined && state.heartbeatTimeoutMs !== undefined) {
+    const gapMs = Date.now() - state.lastHeartbeatAt
+    if (gapMs > state.heartbeatTimeoutMs) {
+      return new BackendStallError(`heartbeat lost (${gapMs}ms since last heartbeat)`)
+    }
+  }
+
+  // 4. Deadline: the absolute timestamp past which the loop is no
   //    longer allowed to wait for a frame.
   if (state.deadlineMs !== undefined && Date.now() >= state.deadlineMs) {
     return new AcpTimeoutError()
