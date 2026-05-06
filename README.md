@@ -12,7 +12,7 @@ Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in prog
 | 1, ACP server core | T5-T9 | done |
 | 2, canonical wire shape | T10-T12 | done |
 | 3, backend driver + registry | T13-T15 | done |
-| 4, Claude SDK driver | T16-T20 | pending |
+| 4, Claude SDK driver | T16-T20 | done |
 | 5, feature plumbing | T21-T28 | pending |
 | 6, integration + e2e | T29-T31 | pending |
 
@@ -374,6 +374,77 @@ await server.serve()
 
 The prompt handler wraps `server.notify` into an `EventEmitter`, so driver-emitted `SessionUpdateEvent` values fan out as `sessionUpdate` notifications.
 
+### `@/backends/claude/auth`, credential resolution
+
+`resolveClaudeCredentials(env)` returns a discriminated union of the active credential. Subscription wins over api-key when both are set with `CLAUDE_CODE_REMOTE=1`.
+
+```ts
+import { resolveClaudeCredentials } from '@/backends/claude/auth.ts'
+
+const creds = resolveClaudeCredentials(process.env)
+// { type: 'subscription' | 'api-key', token: string }
+// throws AuthMissingError when neither path is configured
+```
+
+### `@/backends/claude/mcp-bridge`, wire -> SDK MCP shape
+
+`translateMcpServers(list)` converts the canonical MCP server array (with explicit `[{name, value}]` headers) into the Claude SDK's name-keyed record (`Record<string, McpHttpServerConfig>`).
+
+```ts
+import { translateMcpServers } from '@/backends/claude/mcp-bridge.ts'
+
+const sdkServers = translateMcpServers([
+  {
+    type: 'http',
+    name: 'kodizm',
+    url: 'https://kodizm.com/mcp/internal',
+    headers: [{ name: 'Authorization', value: 'Bearer kdz-int-jwt.x.y' }],
+  },
+])
+// { kodizm: { type: 'http', url: '...', headers: { Authorization: 'Bearer ...' } } }
+```
+
+### `@/backends/claude/driver`, ClaudeDriver class
+
+Implements the full `BackendDriver` contract against an injectable `SdkAdapter`. Production wires `@anthropic-ai/claude-agent-sdk`; tests pass a mock generator.
+
+```ts
+import { ClaudeDriver } from '@/backends/claude/driver.ts'
+import { resolveClaudeCredentials } from '@/backends/claude/auth.ts'
+import { query } from '@anthropic-ai/claude-agent-sdk'
+
+const driver = new ClaudeDriver({
+  credentials: resolveClaudeCredentials(process.env),
+  agentInfo: { version: '0.0.1' },
+  sdk: {
+    query: ({ prompt, options }) => query({ prompt, options }),
+  },
+})
+
+// Plug into AcpServer:
+const server = createAcpServer({ transport, backend: driver })
+await server.serve()
+```
+
+Per-turn model override on `prompt()` does not mutate the stored session options; the next turn without override falls back to the session's bound model.
+
+### `@/backends/claude/event-mapper`, SDK message -> Kodizm event
+
+`mapSdkMessage(sessionId, message)` is a pure function the driver calls per SDK message. It produces zero-or-more Kodizm `SessionUpdateEvent` values:
+
+| SDK message | Emitted Kodizm event(s) |
+|-------------|--------------------------|
+| `system.init` (with model) | `model_advertisement` |
+| `system.init` (with parent_tool_use_id + uuid) | `subagent_spawn` |
+| `assistant` text block | `output_chunk` |
+| `assistant` thinking block | `thinking_chunk` |
+| `assistant` tool_use block | `tool_call_begin` |
+| `user` tool_result block | `tool_call_end` |
+| `result` (with usage) | `usage` |
+| `result` (with parent_tool_use_id) | `subagent_complete` |
+
+Unknown SDK message types fail soft (empty event list) so future SDK extensions do not break the dispatcher.
+
 ## Test layering
 
 | Layer | Purpose | Where | Cost |
@@ -408,7 +479,11 @@ src/
   backends/                   # per-backend driver + event mapper
     driver.ts                 # BackendDriver contract + ensureCapability gate
     registry.ts               # env-driven name -> driver map
-    claude/                   # phase 1 (Wave 4-5)
+    claude/                   # phase 1
+      auth.ts                 # credential resolver (subscription | api-key)
+      mcp-bridge.ts           # wire -> SDK MCP record shape
+      driver.ts               # ClaudeDriver: BackendDriver implementation
+      event-mapper.ts         # SDK message -> Kodizm SessionUpdateEvent
     codex/                    # phase 2
     opencode/                 # phase 3
   session/                    # multi-session manager (Wave 4)
