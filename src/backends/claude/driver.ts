@@ -40,6 +40,7 @@ import type {
 import type { ClaudeCredentials } from './auth.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
+import { SubagentTracker } from './subagent.ts'
 
 /**
  * Claude SDK Options subset the driver builds + forwards. Defining
@@ -175,6 +176,11 @@ export class ClaudeDriver implements BackendDriver {
     state.abortController = abortController
     effectiveOptions.abortController = abortController
 
+    // Per-turn subagent tracker: cross-message link from parent
+    // tool_use_id to child session uuid. Cleared between turns so
+    // stale mappings cannot leak.
+    const tracker = new SubagentTracker()
+
     let stopReason: PromptResult['stopReason'] = 'end_turn'
 
     try {
@@ -182,7 +188,8 @@ export class ClaudeDriver implements BackendDriver {
         prompt: this.serializePrompt(params),
         options: effectiveOptions,
       })) {
-        const events = mapSdkMessage(sessionId, message)
+        tracker.observe(message)
+        const events = tracker.rewrite(mapSdkMessage(sessionId, message))
         for (const event of events) {
           emit.send(event)
         }
