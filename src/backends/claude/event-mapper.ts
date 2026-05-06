@@ -29,6 +29,7 @@ interface SdkSystemInitMessage {
   model?: string
   parent_tool_use_id?: string
   uuid?: string
+  skills?: string[]
 }
 
 interface SdkAssistantMessage {
@@ -118,14 +119,21 @@ export function mapSdkMessage(sessionId: string, message: SdkMessage): SessionUp
 
 /**
  * `system` init: emits a model_advertisement event when the SDK
- * announces the active model + a subagent_spawn when the message
- * carries `parent_tool_use_id` (subagent kicked off).
+ * announces the active model, a skill_activation per pre-loaded skill
+ * (source=auto), and a subagent_spawn when the message carries
+ * `parent_tool_use_id` (subagent kicked off).
  */
 function mapSystemInit(sessionId: string, message: SdkSystemInitMessage): SessionUpdateEvent[] {
   const events: SessionUpdateEvent[] = []
 
   if (message.model !== undefined && message.model !== '') {
     events.push({ sessionId, type: 'model_advertisement', model: message.model })
+  }
+
+  if (message.skills !== undefined) {
+    for (const skillName of message.skills) {
+      events.push({ sessionId, type: 'skill_activation', skillName, source: 'auto' })
+    }
   }
 
   if (message.parent_tool_use_id !== undefined && message.uuid !== undefined && message.model !== undefined) {
@@ -161,6 +169,13 @@ function mapAssistantMessage(sessionId: string, message: SdkAssistantMessage): S
       continue
     }
     if (block.type === 'tool_use') {
+      // Surface skill invocations as a dedicated activation event
+      // before the generic tool_call_begin. The Skill tool is the
+      // SDK's contract for "load this skill mid-session".
+      const skillName = extractSkillName(block)
+      if (skillName !== undefined) {
+        events.push({ sessionId, type: 'skill_activation', skillName, source: 'invoked' })
+      }
       events.push({
         sessionId,
         type: 'tool_call_begin',
@@ -172,6 +187,28 @@ function mapAssistantMessage(sessionId: string, message: SdkAssistantMessage): S
   }
 
   return events
+}
+
+/**
+ * If the tool_use block represents a Skill tool invocation with a
+ * non-empty `skill` argument, return the skill name; else undefined.
+ *
+ * The SDK's Skill tool input shape is `{ skill: string, args?: string }`
+ * (see Claude Code SkillTool/SkillTool.ts inputSchema).
+ */
+function extractSkillName(block: SdkToolUseBlock): string | undefined {
+  if (block.name !== 'Skill') {
+    return undefined
+  }
+  const input = block.input
+  if (typeof input !== 'object' || input === null) {
+    return undefined
+  }
+  const skill = (input as { skill?: unknown }).skill
+  if (typeof skill !== 'string' || skill.length === 0) {
+    return undefined
+  }
+  return skill
 }
 
 /**
