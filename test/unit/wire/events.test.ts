@@ -4,6 +4,8 @@ import {
   CancelledEventSchema,
   CompactionCompletedEventSchema,
   CompactionStartedEventSchema,
+  DebugLogEventSchema,
+  HeartbeatEventSchema,
   KodizmQuestionSchema,
   ModelAdvertisementEventSchema,
   OutputChunkEventSchema,
@@ -12,6 +14,7 @@ import {
   PermissionResumedEventSchema,
   ProcessDiedEventSchema,
   QuestionRequestEventSchema,
+  SessionFailedEventSchema,
   SessionUpdateEventSchema,
   SkillActivationEventSchema,
   SubagentCompleteEventSchema,
@@ -396,6 +399,167 @@ describe('Phase 1.6 deferred-permission events', () => {
     }
     expect(SessionUpdateEventSchema.safeParse(deferred).success).toBe(true)
     expect(SessionUpdateEventSchema.safeParse(resumed).success).toBe(true)
+  })
+})
+
+describe('Phase 1.7 debug + lifecycle events', () => {
+  test('debug_log accepts a minimal entry (debug level + sdk.message stage)', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'debug_log' as const,
+      level: 'debug' as const,
+      stage: 'sdk.message' as const,
+      capturedAt: 1_700_000_000_000,
+      payload: { type: 'assistant', text: 'hi' },
+    }
+    expect(DebugLogEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('debug_log accepts redacted flag + every documented stage', () => {
+    const stages = [
+      'rpc.in',
+      'rpc.out',
+      'sdk.message',
+      'sdk.error',
+      'tool.permission_request',
+      'tool.permission_response',
+      'session.config',
+      'driver.state_change',
+      'transport.spawn',
+      'transport.exit',
+    ] as const
+    for (const stage of stages) {
+      const result = DebugLogEventSchema.safeParse({
+        ...baseEnvelope,
+        type: 'debug_log',
+        level: 'info',
+        stage,
+        capturedAt: 1_700_000_000_000,
+        payload: { foo: 'bar' },
+        redacted: true,
+      })
+      expect(result.success).toBe(true)
+    }
+  })
+
+  test('debug_log rejects an unknown level', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'debug_log' as const,
+      level: 'critical',
+      stage: 'sdk.message' as const,
+      capturedAt: 1_700_000_000_000,
+      payload: {},
+    }
+    expect(DebugLogEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('debug_log rejects an unknown stage', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'debug_log' as const,
+      level: 'debug' as const,
+      stage: 'mystery.stage',
+      capturedAt: 1_700_000_000_000,
+      payload: {},
+    }
+    expect(DebugLogEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('heartbeat carries uptimeMs + lastSdkMs (both non-negative ints)', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'heartbeat' as const,
+      uptimeMs: 12_345,
+      lastSdkMs: 42,
+    }
+    expect(HeartbeatEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('heartbeat rejects negative ms values', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'heartbeat' as const,
+      uptimeMs: -1,
+      lastSdkMs: 0,
+    }
+    expect(HeartbeatEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('session_failed accepts every documented reason value', () => {
+    const reasons = [
+      'sdk_stall',
+      'sdk_throw',
+      'transport_error',
+      'auth_error',
+      'rate_limit',
+      'protocol_violation',
+      'internal_panic',
+    ] as const
+    for (const reason of reasons) {
+      const event = {
+        ...baseEnvelope,
+        type: 'session_failed' as const,
+        reason,
+        detail: `simulated ${reason}`,
+        capturedAt: 1_700_000_000_000,
+      }
+      expect(SessionFailedEventSchema.safeParse(event).success).toBe(true)
+    }
+  })
+
+  test('session_failed accepts optional cause stack', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'session_failed' as const,
+      reason: 'sdk_throw' as const,
+      detail: 'unhandled SDK error',
+      capturedAt: 1_700_000_000_000,
+      cause: {
+        name: 'TypeError',
+        message: 'undefined is not a function',
+        stack: 'TypeError: ...\n    at fn (file:1:1)',
+      },
+    }
+    expect(SessionFailedEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('session_failed rejects unknown reason value', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'session_failed' as const,
+      reason: 'unknown_failure',
+      detail: 'x',
+      capturedAt: 1_700_000_000_000,
+    }
+    expect(SessionFailedEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('SessionUpdateEventSchema routes all 3 new variants', () => {
+    const debugLog = {
+      ...baseEnvelope,
+      type: 'debug_log' as const,
+      level: 'debug' as const,
+      stage: 'sdk.message' as const,
+      capturedAt: 1,
+      payload: {},
+    }
+    const heartbeat = {
+      ...baseEnvelope,
+      type: 'heartbeat' as const,
+      uptimeMs: 1,
+      lastSdkMs: 0,
+    }
+    const sessionFailed = {
+      ...baseEnvelope,
+      type: 'session_failed' as const,
+      reason: 'sdk_stall' as const,
+      detail: 'no SDK message for 60s',
+      capturedAt: 1,
+    }
+    expect(SessionUpdateEventSchema.safeParse(debugLog).success).toBe(true)
+    expect(SessionUpdateEventSchema.safeParse(heartbeat).success).toBe(true)
+    expect(SessionUpdateEventSchema.safeParse(sessionFailed).success).toBe(true)
   })
 })
 

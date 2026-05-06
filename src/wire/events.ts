@@ -204,6 +204,97 @@ export const PermissionResumedEventSchema = SessionEnvelope.extend({
 })
 
 /**
+ * Stages captured by the debug recorder. Each stage tags one
+ * structured payload kind in the canonical capture trace.
+ */
+export const DebugStageSchema = z.enum([
+  'rpc.in',
+  'rpc.out',
+  'sdk.message',
+  'sdk.error',
+  'tool.permission_request',
+  'tool.permission_response',
+  'session.config',
+  'driver.state_change',
+  'transport.spawn',
+  'transport.exit',
+])
+
+/**
+ * Debug log levels mirror the logger's runtime levels. Capture-side
+ * info / debug carry trace data; warn / error surface bridge-side
+ * problems (file write failure, ring buffer overflow notification).
+ */
+export const DebugLogLevelSchema = z.enum(['debug', 'info', 'warn', 'error'])
+
+/**
+ * `debug_log`: per-session capture entry. Streamed live to the
+ * orchestrator on the wire AND appended to the forensic JSONL file
+ * at `<KODIZM_DEBUG_DIR>/<sessionId>.jsonl` (default `/tmp/kodizm-debug`).
+ *
+ * `redacted` flips true when the recorder applied secret redaction
+ * to `payload` (default behaviour; `KODIZM_DEBUG_RAW_SECRETS=1`
+ * override flips it false).
+ */
+export const DebugLogEventSchema = SessionEnvelope.extend({
+  type: z.literal('debug_log'),
+  level: DebugLogLevelSchema,
+  stage: DebugStageSchema,
+  capturedAt: z.number().int().nonnegative(),
+  payload: z.unknown(),
+  redacted: z.boolean().optional(),
+})
+
+/**
+ * `heartbeat`: liveness ping emitted while a prompt is in flight.
+ * Cadence is configurable per-session via `heartbeatIntervalMs`
+ * (default 10_000ms). Orchestrator uses absence of heartbeats as a
+ * pipe-broken signal (typically 3x the cadence).
+ */
+export const HeartbeatEventSchema = SessionEnvelope.extend({
+  type: z.literal('heartbeat'),
+  uptimeMs: z.number().int().nonnegative(),
+  lastSdkMs: z.number().int().nonnegative(),
+})
+
+/**
+ * Failure reason enum surfaced via `session_failed`. The wide enum
+ * lets the orchestrator render distinct UI / runbook hints per
+ * cause; per-reason exit policy in `src/util/exit-policy.ts` decides
+ * whether the container exits or stays alive.
+ */
+export const SessionFailedReasonSchema = z.enum([
+  'sdk_stall',
+  'sdk_throw',
+  'transport_error',
+  'auth_error',
+  'rate_limit',
+  'protocol_violation',
+  'internal_panic',
+])
+
+/**
+ * `session_failed`: structured failure event. Distinct from the
+ * synthetic `process_died` (which only fires when the subprocess
+ * exits) and from `cancelled` (which fires on `session/cancel`).
+ * Carries the classified `reason`, the human-readable `detail`, and
+ * an optional `cause` stack for forensic inspection.
+ */
+export const SessionFailedEventSchema = SessionEnvelope.extend({
+  type: z.literal('session_failed'),
+  reason: SessionFailedReasonSchema,
+  detail: z.string(),
+  capturedAt: z.number().int().nonnegative(),
+  cause: z
+    .object({
+      name: z.string(),
+      message: z.string(),
+      stack: z.string().optional(),
+    })
+    .optional(),
+})
+
+/**
  * `usage`: end-of-turn token + cost rollup. The four token counts
  * mirror Anthropic's SDK usage block. Cost is in USD with up to 6
  * decimals so micro-cost runs do not round to zero.
@@ -309,8 +400,17 @@ export const SessionUpdateEventSchema = z.discriminatedUnion('type', [
   CancelledEventSchema,
   CompactionStartedEventSchema,
   CompactionCompletedEventSchema,
+  DebugLogEventSchema,
+  HeartbeatEventSchema,
+  SessionFailedEventSchema,
 ])
 
 export type KodizmQuestion = z.infer<typeof KodizmQuestionSchema>
 
 export type SessionUpdateEvent = z.infer<typeof SessionUpdateEventSchema>
+
+export type DebugStage = z.infer<typeof DebugStageSchema>
+
+export type DebugLogLevel = z.infer<typeof DebugLogLevelSchema>
+
+export type SessionFailedReason = z.infer<typeof SessionFailedReasonSchema>
