@@ -37,6 +37,7 @@ import type {
   NewSessionResult,
   PromptResult,
 } from '../driver.ts'
+import { askUserQuestionBranch } from './ask-user-question.ts'
 import type { ClaudeCredentials } from './auth.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
@@ -277,14 +278,32 @@ export class ClaudeDriver implements BackendDriver {
     // can run without one (legacy unit tests mock the SDK directly),
     // but production + real-API smokes always provide it so tool-use
     // gating + AskUserQuestion + ExitPlanMode flow through the wire.
+    //
+    // Composition: AskUserQuestion branch first (returns null for
+    // other tools), generic permission-bridge fallback. Two closures
+    // chained in one outer canUseTool so the SDK sees a single hook.
     if (this.deps.server !== undefined) {
-      effectiveOptions.canUseTool = buildCanUseTool({
+      const ask = askUserQuestionBranch({
         server: this.deps.server,
         sessionId,
         emit,
         signal: abortController.signal,
         ...(state.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: state.permissionTimeoutMs }),
       })
+      const gate = buildCanUseTool({
+        server: this.deps.server,
+        sessionId,
+        emit,
+        signal: abortController.signal,
+        ...(state.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: state.permissionTimeoutMs }),
+      })
+      effectiveOptions.canUseTool = async (toolName, input, options) => {
+        const askResult = await ask(toolName, input, options)
+        if (askResult !== null) {
+          return askResult
+        }
+        return await gate(toolName, input, options)
+      }
     }
 
     // Per-turn subagent tracker: cross-message link from parent
