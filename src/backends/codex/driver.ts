@@ -42,6 +42,7 @@ import type {
 } from '../driver.ts'
 import { CodexAppServerProcess, type CodexDebugSink } from './app-server-spawn.ts'
 import { buildCodexConfigToml } from './config-mapper.ts'
+import { CodexEventMapper } from './event-mapper.ts'
 import { buildSandboxPolicy, mapPermissionMode } from './policy.ts'
 
 /**
@@ -290,26 +291,26 @@ export class CodexDriver implements BackendDriver {
       resolveTurn = resolve
     })
 
-    const off = state.process.onNotification((method, _notifParams) => {
+    // Wire event-mapper: codex notifications -> canonical sessionUpdate.
+    const eventMapper = new CodexEventMapper({
+      sessionId,
+      emit: (event) => emit.send(event),
+    })
+
+    state.process.onNotification((method, notifParams) => {
       lastEventAt = Date.now()
+      eventMapper.handle(method, notifParams)
       if (method === 'turn/started') {
         return
       }
       if (method === 'turn/completed') {
-        // T7 will read params.turn.status to set stopReason; for now,
-        // assume end_turn unless cancel was already in flight.
         if (stopReason !== 'session_failed' && stopReason !== 'cancelled') {
           stopReason = 'end_turn'
         }
         resolveTurn()
         return
       }
-      // T7 wires the full event-mapper. For T4 we don't emit any
-      // canonical events for output_chunk / tool_call_*; that lands
-      // in T7. Tests for T4 only assert lifecycle (heartbeat, cancel,
-      // stall, end_turn).
     })
-    void off // returned by onNotification when we extend it; T2 didn't return one yet
 
     // 5. Send turn/start with serialized inputs.
     try {
