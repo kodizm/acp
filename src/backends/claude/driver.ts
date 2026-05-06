@@ -201,6 +201,7 @@ export class ClaudeDriver implements BackendDriver {
     } catch (error) {
       if (abortController.signal.aborted) {
         stopReason = 'cancelled'
+        emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
       } else {
         throw error
       }
