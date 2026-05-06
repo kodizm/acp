@@ -287,3 +287,91 @@ describe('createAcpServer.notify', () => {
     await serving
   })
 })
+
+describe('createAcpServer with debugSink (Phase 1.7 T7)', () => {
+  test('captures inbound request frames as rpc.in via debugSink.record', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const captured: Array<{ stage: string; payload: unknown }> = []
+    const debugSink = {
+      record: (stage: string, payload: unknown) => {
+        captured.push({ stage, payload })
+      },
+    }
+
+    const server = createAcpServer({ transport, debugSink })
+    server.on('initialize', () => ({ protocolVersion: 1 }))
+
+    const serving = server.serve()
+    injectFrame({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    const inFrames = captured.filter((c) => c.stage === 'rpc.in')
+    expect(inFrames.length).toBeGreaterThanOrEqual(1)
+    expect((inFrames[0]?.payload as { method: string }).method).toBe('initialize')
+  })
+
+  test('captures outbound response frames as rpc.out via debugSink.record', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const captured: Array<{ stage: string; payload: unknown }> = []
+    const debugSink = {
+      record: (stage: string, payload: unknown) => {
+        captured.push({ stage, payload })
+      },
+    }
+
+    const server = createAcpServer({ transport, debugSink })
+    server.on('initialize', () => ({ protocolVersion: 1 }))
+
+    const serving = server.serve()
+    injectFrame({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    const outFrames = captured.filter((c) => c.stage === 'rpc.out')
+    expect(outFrames.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('captures outbound request + inbound response when server.request is used', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const captured: Array<{ stage: string; payload: unknown }> = []
+    const debugSink = {
+      record: (stage: string, payload: unknown) => {
+        captured.push({ stage, payload })
+      },
+    }
+
+    const server = createAcpServer({ transport, debugSink })
+    const serving = server.serve()
+
+    const promise = server.request('session/request_permission', { sessionId: 's1' })
+    await waitForOutbound(outbound, 1)
+    const sentId = (outbound[0] as { id: number }).id
+    injectFrame({ jsonrpc: '2.0', id: sentId, result: 'ok' })
+
+    await promise
+    injectClose()
+    await serving
+
+    expect(captured.some((c) => c.stage === 'rpc.out')).toBe(true)
+    expect(captured.some((c) => c.stage === 'rpc.in')).toBe(true)
+  })
+
+  test('no-op when debugSink is undefined', async () => {
+    // Already covered by the legacy tests; this case re-confirms that
+    // capture is opt-in. Just assert that the server still works.
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const server = createAcpServer({ transport })
+    server.on('initialize', () => ({ protocolVersion: 1 }))
+
+    const serving = server.serve()
+    injectFrame({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    expect(outbound.length).toBeGreaterThanOrEqual(1)
+  })
+})

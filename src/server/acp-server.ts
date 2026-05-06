@@ -104,6 +104,17 @@ interface JsonRpcResponse {
 export type MethodHandler = (params: unknown) => unknown | Promise<unknown>
 
 /**
+ * Minimal sink the server tees rpc.in / rpc.out frames into when
+ * Phase 1.7 debug capture is enabled. Mirrors the public surface of
+ * {@link import('../util/debug-recorder.ts').DebugRecorder.record}
+ * but defined locally so the server stays import-free of the util
+ * module (the bin entrypoint wires the real DebugRecorder).
+ */
+export interface AcpDebugSink {
+  record(stage: 'rpc.in' | 'rpc.out', payload: unknown): void
+}
+
+/**
  * Construction options.
  */
 export interface AcpServerOptions {
@@ -118,6 +129,14 @@ export interface AcpServerOptions {
    * dispatch correctness.
    */
   backend?: BackendDriver
+
+  /**
+   * Optional Phase 1.7 debug sink. When provided, the dispatcher tees
+   * every inbound frame (rpc.in) + every outbound response / request
+   * frame (rpc.out) through the sink so the orchestrator's debug
+   * stream + forensic JSONL file see the full RPC trace.
+   */
+  debugSink?: AcpDebugSink
 }
 
 /**
@@ -233,14 +252,27 @@ function wireBackendHandlers(server: AcpServer, backend: BackendDriver): void {
  * Build an {@link AcpServer} bound to the given transport.
  */
 export function createAcpServer(options: AcpServerOptions): AcpServer {
-  const { transport, backend } = options
+  const { transport, backend, debugSink } = options
 
   const handlers = new Map<string, MethodHandler>()
   const pending = new Map<string | number, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>()
   let nextId = 1
 
+  const recordOut = (frame: unknown): void => {
+    if (debugSink !== undefined) {
+      debugSink.record('rpc.out', frame)
+    }
+  }
+
+  const recordIn = (frame: unknown): void => {
+    if (debugSink !== undefined) {
+      debugSink.record('rpc.in', frame)
+    }
+  }
+
   const writeResponse = async (id: string | number, result: unknown): Promise<void> => {
     const response: JsonRpcResponse = { jsonrpc: '2.0', id, result }
+    recordOut(response)
     await transport.writeFrame(response)
   }
 
@@ -250,6 +282,7 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
       id,
       error: data === undefined ? { code, message } : { code, message, data },
     }
+    recordOut(response)
     await transport.writeFrame(response)
   }
 
@@ -358,6 +391,7 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
 
         // 1. Fire the request frame; if the transport rejects (closed),
         //    drop the pending entry and surface the failure.
+        recordOut(frame)
         transport.writeFrame(frame).catch((error) => {
           pending.delete(id)
           reject(error)
@@ -369,6 +403,7 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
       const frame: JsonRpcNotification = { jsonrpc: '2.0', method, params }
       // Fire-and-forget; errors land in the unhandled-rejection lane,
       // which the bin's bootstrap pipes through the logger.
+      recordOut(frame)
       void transport.writeFrame(frame)
     },
 
@@ -382,6 +417,12 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
 
       // 1. Pull frames off the wire and dispatch by shape.
       for await (const raw of transport.readFrames()) {
+        // Phase 1.7: tee every inbound frame through the debug sink
+        // before any dispatch decision. Capture happens regardless of
+        // shape so malformed frames also land in the trace for
+        // forensic inspection.
+        recordIn(raw)
+
         // 2. Reject anything that is not a valid JSON-RPC envelope. If
         //    the malformed frame still carries an id, send an
         //    InvalidRequest response back; otherwise drop silently.
