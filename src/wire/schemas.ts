@@ -100,7 +100,7 @@ const PermissionModeSchema = z.enum(['default', 'acceptEdits', 'plan', 'dontAsk'
  * driver applies Kodizm's own default (`bypassPermissions` for the
  * Claude backend; phases 2-3 set their own).
  */
-const ToolPolicySchema = z.object({
+export const ToolPolicySchema = z.object({
   allow: z.array(z.string()).optional(),
   deny: z.array(z.string()).optional(),
   ask: z.array(z.string()).optional(),
