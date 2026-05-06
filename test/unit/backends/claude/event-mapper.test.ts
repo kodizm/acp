@@ -1,0 +1,255 @@
+import { describe, expect, test } from 'bun:test'
+
+import { type SdkMessage, mapSdkMessage } from '@/backends/claude/event-mapper.ts'
+
+const SESSION_ID = 's1'
+
+describe('mapSdkMessage, system init', () => {
+  test('emits model_advertisement when model is announced', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'init',
+      model: 'claude-sonnet-4-6',
+    })
+
+    expect(events).toEqual([{ sessionId: SESSION_ID, type: 'model_advertisement', model: 'claude-sonnet-4-6' }])
+  })
+
+  test('emits subagent_spawn when parent_tool_use_id + uuid + model are present', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'init',
+      model: 'claude-haiku-4-5-20251001',
+      parent_tool_use_id: 'tu_parent',
+      uuid: 'sub_1',
+    })
+
+    expect(events).toHaveLength(2)
+    expect(events[0]?.type).toBe('model_advertisement')
+    expect(events[1]).toEqual({
+      sessionId: SESSION_ID,
+      type: 'subagent_spawn',
+      childId: 'sub_1',
+      parentSessionId: SESSION_ID,
+      model: 'claude-haiku-4-5-20251001',
+      tools: [],
+    })
+  })
+
+  test('returns empty when model is missing on system init', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'system',
+      subtype: 'init',
+    })
+    expect(events).toEqual([])
+  })
+})
+
+describe('mapSdkMessage, assistant', () => {
+  test('text block -> output_chunk', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello world' }],
+      },
+    })
+
+    expect(events).toEqual([{ sessionId: SESSION_ID, type: 'output_chunk', text: 'Hello world' }])
+  })
+
+  test('thinking block -> thinking_chunk', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: 'considering options...' }],
+      },
+    })
+
+    expect(events).toEqual([{ sessionId: SESSION_ID, type: 'thinking_chunk', text: 'considering options...' }])
+  })
+
+  test('tool_use block -> tool_call_begin', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_1',
+            name: 'mcp__kodizm__kodizm_create_task',
+            input: { title: 'Refactor' },
+          },
+        ],
+      },
+    })
+
+    expect(events).toEqual([
+      {
+        sessionId: SESSION_ID,
+        type: 'tool_call_begin',
+        toolUseId: 'tu_1',
+        name: 'mcp__kodizm__kodizm_create_task',
+        input: { title: 'Refactor' },
+      },
+    ])
+  })
+
+  test('mixed content -> events emitted in source order', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'think' },
+          { type: 'text', text: 'speak' },
+          { type: 'tool_use', id: 'tu_2', name: 'foo', input: {} },
+        ],
+      },
+    })
+
+    expect(events.map((e) => e.type)).toEqual(['thinking_chunk', 'output_chunk', 'tool_call_begin'])
+  })
+})
+
+describe('mapSdkMessage, user (tool_result)', () => {
+  test('tool_result block -> tool_call_end with concatenated text + isError', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu_1',
+            content: [
+              { type: 'text', text: 'line one' },
+              { type: 'text', text: 'line two' },
+            ],
+            is_error: false,
+          },
+        ],
+      },
+    })
+
+    expect(events).toEqual([
+      {
+        sessionId: SESSION_ID,
+        type: 'tool_call_end',
+        toolUseId: 'tu_1',
+        result: 'line one\nline two',
+        isError: false,
+      },
+    ])
+  })
+
+  test('tool_result with is_error=true preserves the flag', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu_2',
+            content: [{ type: 'text', text: 'permission denied' }],
+            is_error: true,
+          },
+        ],
+      },
+    })
+
+    expect(events).toHaveLength(1)
+    if (events[0]?.type === 'tool_call_end') {
+      expect(events[0].isError).toBe(true)
+    }
+  })
+})
+
+describe('mapSdkMessage, result', () => {
+  test('emits usage event with the four token counts + cost', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.0152,
+      usage: {
+        input_tokens: 1234,
+        output_tokens: 567,
+        cache_read_input_tokens: 8000,
+        cache_creation_input_tokens: 100,
+      },
+    })
+
+    expect(events).toEqual([
+      {
+        sessionId: SESSION_ID,
+        type: 'usage',
+        inputTokens: 1234,
+        outputTokens: 567,
+        cacheReadTokens: 8000,
+        cacheCreationTokens: 100,
+        costUsd: 0.0152,
+      },
+    ])
+  })
+
+  test('missing token fields default to 0', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'result',
+      subtype: 'success',
+      usage: {},
+    })
+
+    if (events[0]?.type === 'usage') {
+      expect(events[0].inputTokens).toBe(0)
+      expect(events[0].outputTokens).toBe(0)
+      expect(events[0].cacheReadTokens).toBe(0)
+      expect(events[0].cacheCreationTokens).toBe(0)
+      expect(events[0].costUsd).toBe(0)
+    }
+  })
+
+  test('missing usage block -> no events', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'result',
+      subtype: 'success',
+    })
+    expect(events).toEqual([])
+  })
+
+  test('parent_tool_use_id present -> emits subagent_complete with token slice', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.005,
+      parent_tool_use_id: 'sub_1',
+      usage: {
+        input_tokens: 500,
+        output_tokens: 200,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 0,
+      },
+    })
+
+    expect(events).toHaveLength(2)
+    expect(events[1]).toEqual({
+      sessionId: SESSION_ID,
+      type: 'subagent_complete',
+      childId: 'sub_1',
+      inputTokens: 500,
+      outputTokens: 200,
+      cacheReadTokens: 1000,
+      cacheCreationTokens: 0,
+      costUsd: 0.005,
+    })
+  })
+})
+
+describe('mapSdkMessage, unknown variants', () => {
+  test('returns empty for an unknown message type', () => {
+    const events = mapSdkMessage(SESSION_ID, { type: 'mystery' } as unknown as SdkMessage)
+    expect(events).toEqual([])
+  })
+})
