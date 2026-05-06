@@ -13,7 +13,7 @@ Status: **early development**. Phase 1 of 5 (bootstrap + Claude backend) in prog
 | 2, canonical wire shape | T10-T12 | done |
 | 3, backend driver + registry | T13-T15 | done |
 | 4, Claude SDK driver | T16-T20 | done |
-| 5, feature plumbing | T21-T28 | pending |
+| 5, feature plumbing | T21-T28 | done |
 | 6, integration + e2e | T29-T31 | pending |
 
 Phase 2 (codex backend), 3 (opencode backend), 4 (Laravel cutover), 5 (image bake + smoke) follow.
@@ -428,6 +428,8 @@ await server.serve()
 
 Per-turn model override on `prompt()` does not mutate the stored session options; the next turn without override falls back to the session's bound model.
 
+`cancel({ sessionId })` aborts the in-flight SDK `query()` via the per-turn AbortController. The unwinding `prompt()` emits a synthetic `cancelled` `SessionUpdateEvent` (`reason: 'user_cancel'`) and returns `{ stopReason: 'cancelled' }` within the 2s ACP grace window.
+
 ### `@/backends/claude/event-mapper`, SDK message -> Kodizm event
 
 `mapSdkMessage(sessionId, message)` is a pure function the driver calls per SDK message. It produces zero-or-more Kodizm `SessionUpdateEvent` values:
@@ -435,15 +437,107 @@ Per-turn model override on `prompt()` does not mutate the stored session options
 | SDK message | Emitted Kodizm event(s) |
 |-------------|--------------------------|
 | `system.init` (with model) | `model_advertisement` |
+| `system.init` (with skills[]) | `skill_activation` per name (`source: 'auto'`) |
 | `system.init` (with parent_tool_use_id + uuid) | `subagent_spawn` |
 | `assistant` text block | `output_chunk` |
 | `assistant` thinking block | `thinking_chunk` |
-| `assistant` tool_use block | `tool_call_begin` |
+| `assistant` tool_use block (`name: 'Skill'`) | `skill_activation` (`source: 'invoked'`) + `tool_call_begin` |
+| `assistant` tool_use block (other) | `tool_call_begin` |
 | `user` tool_result block | `tool_call_end` |
 | `result` (with usage) | `usage` |
-| `result` (with parent_tool_use_id) | `subagent_complete` |
+| `result` (with parent_tool_use_id) | `subagent_complete` (childId remapped via `SubagentTracker`) |
 
 Unknown SDK message types fail soft (empty event list) so future SDK extensions do not break the dispatcher.
+
+### `@/backends/claude/content-mapper`, content block translation
+
+Bidirectional mapping between Kodizm canonical `ContentBlock` (camelCase) and Claude SDK content blocks (snake_case). The wire schema enforces the 5MB inline base64 cap; this layer re-enforces it as defense-in-depth.
+
+```ts
+import {
+  contentBlockToSdk,
+  promptBlocksToSdk,
+  sdkContentBlockToKodizm,
+} from '@/backends/claude/content-mapper.ts'
+
+const sdkBlock = contentBlockToSdk({
+  type: 'tool_result',
+  toolUseId: 'tu_1',
+  content: [{ type: 'text', text: 'ok' }],
+  isError: false,
+})
+// { type: 'tool_result', tool_use_id: 'tu_1', content: [...], is_error: false }
+
+const sdkBlocks = promptBlocksToSdk([
+  { type: 'text', text: 'Look at this:' },
+  { type: 'image', source: { type: 'url', url: 'https://kodizm.com/logo.png' } },
+])
+
+// Inverse for inbound assistant tool_use echoes:
+const kodizm = sdkContentBlockToKodizm(sdkBlock)
+```
+
+| Kodizm key | SDK key |
+|------------|---------|
+| `mediaType` | `media_type` |
+| `toolUseId` | `tool_use_id` |
+| `isError` | `is_error` |
+
+### `@/backends/claude/subagent`, subagent observability tracker
+
+Cross-message tracker that maps the SDK's `parent_tool_use_id` to the spawned subagent's session uuid. The pure event-mapper emits `subagent_complete` with the tool_use id (the only id available on a result message); the tracker rewrites that to the stable child uuid before the event leaves the driver.
+
+```ts
+import { SubagentTracker } from '@/backends/claude/subagent.ts'
+
+const tracker = new SubagentTracker()
+
+// 1. Observe each raw SDK message:
+tracker.observe({
+  type: 'system',
+  subtype: 'init',
+  model: 'claude-haiku-4-5-20251001',
+  parent_tool_use_id: 'tu_outer',
+  uuid: 'sub_outer',
+})
+
+// 2. Rewrite events emitted by mapSdkMessage(...):
+const rewritten = tracker.rewrite([
+  { sessionId: 's1', type: 'subagent_complete', childId: 'tu_outer', /* tokens */ },
+])
+// rewritten[0].childId === 'sub_outer'
+```
+
+Per-turn lifecycle: a fresh tracker is constructed at the start of every `prompt()` and discarded at turn end so cross-turn leaks are impossible.
+
+### `@/session/manager`, multi-session storage
+
+The ACP spec allows one process to host N concurrent sessions. `SessionManager` is the single source of truth for sessionId -> `SessionState` across backends.
+
+```ts
+import { SessionManager } from '@/session/manager.ts'
+import type { SessionState } from '@/session/state.ts'
+
+const manager = new SessionManager()
+
+const state = manager.create('s1', {
+  backend: 'claude',
+  sdkOptions: { cwd: '/workspace', mcpServers: {} },
+  abortController: new AbortController(),
+  parentChildMap: new Map(),
+})
+// state.createdAt + state.sessionId stamped by the manager
+
+manager.has('s1')          // true
+manager.get('s1')          // SessionState; throws SessionNotFoundError on miss
+manager.list()             // session ids in insertion order
+manager.size()             // active session count
+manager.close('s1')        // aborts the controller, removes the entry
+```
+
+`close()` aborts the AbortController BEFORE deletion so any in-flight SDK `query()` observes cancellation cleanly. `create()` rejects duplicate ids and `get()` / `close()` throw `SessionNotFoundError` on miss so JSON-RPC dispatch surfaces typed errors.
+
+`SessionState.sdkOptions` is `unknown` at the manager seam; each backend driver lays its own typed shape into the field.
 
 ## Test layering
 
@@ -484,9 +578,13 @@ src/
       mcp-bridge.ts           # wire -> SDK MCP record shape
       driver.ts               # ClaudeDriver: BackendDriver implementation
       event-mapper.ts         # SDK message -> Kodizm SessionUpdateEvent
+      content-mapper.ts       # Kodizm ContentBlock <-> SDK content block
+      subagent.ts             # parent_tool_use_id -> child uuid tracker
     codex/                    # phase 2
     opencode/                 # phase 3
-  session/                    # multi-session manager (Wave 4)
+  session/                    # multi-session manager
+    manager.ts                # SessionManager: create/get/has/close/list
+    state.ts                  # SessionState contract (cross-backend)
   util/                       # logger, helpers
 test/
   unit/                       # mocked SDK
