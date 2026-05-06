@@ -37,7 +37,7 @@
 import { z } from 'zod'
 import { type KodizmQuestion, KodizmQuestionSchema } from '../../wire/events.ts'
 
-import { type AcpServerLike, type EmitLike, awaitPermissionResponse } from './permission-bridge.ts'
+import { type AcpServerLike, DEFERRED_SENTINEL, type EmitLike, awaitPermissionResponse } from './permission-bridge.ts'
 import type { CanUseToolOptions, PermissionResult } from './permission-bridge.ts'
 
 const QuestionsArraySchema = z.array(KodizmQuestionSchema).min(1).max(4)
@@ -120,7 +120,7 @@ export function askUserQuestionBranch(
       questions,
       ...(options.agentID === undefined ? {} : { agentId: options.agentID }),
     }
-    const response = await awaitPermissionResponse<AskUserQuestionResponse>(
+    const raced = await awaitPermissionResponse<AskUserQuestionResponse>(
       deps.server,
       'session/ask_user_question',
       payload,
@@ -130,7 +130,14 @@ export function askUserQuestionBranch(
       },
     )
 
-    // 4. Handle cancel envelope.
+    // 4. AskUserQuestion does NOT participate in defer (Phase 1.6 Pattern B);
+    //    narrow for the type checker.
+    if (raced === DEFERRED_SENTINEL) {
+      throw new Error('Tool use aborted')
+    }
+    const response = raced
+
+    // 5. Handle cancel envelope.
     if ('outcome' in response && response.outcome.outcome === 'cancelled') {
       throw new Error('Tool use aborted')
     }

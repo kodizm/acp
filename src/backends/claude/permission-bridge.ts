@@ -153,9 +153,9 @@ export function buildCanUseTool(
     deps.emit.send(event)
 
     // 3. Issue the outbound RPC + race against signal + optional deadline.
-    let response: PermissionResponse
+    let raced: PermissionResponse | typeof DEFERRED_SENTINEL
     try {
-      response = await awaitPermissionResponse<PermissionResponse>(deps.server, 'session/request_permission', payload, {
+      raced = await awaitPermissionResponse<PermissionResponse>(deps.server, 'session/request_permission', payload, {
         signal: composeSignals(deps.signal, options.signal),
         timeoutMs: deps.permissionTimeoutMs,
       })
@@ -166,10 +166,25 @@ export function buildCanUseTool(
       throw error
     }
 
-    // 4. Map the outcome.
-    return mapPermissionOutcome(response, input, options.suggestions)
+    // 4. buildCanUseTool does NOT pass deferTimeoutMs so the sentinel is
+    //    unreachable on this code path; narrow for the type checker.
+    if (raced === DEFERRED_SENTINEL) {
+      return { behavior: 'deny', message: 'Permission deferred (unexpected on canUseTool path)' }
+    }
+
+    // 5. Map the outcome.
+    return mapPermissionOutcome(raced, input, options.suggestions)
   }
 }
+
+/**
+ * Sentinel returned by {@link awaitPermissionResponse} when the
+ * `deferTimeoutMs` racer wins. Caller MUST distinguish this from the
+ * normal RPC payload: defer is a soft outcome (state persistence +
+ * synthetic JSONL row), NOT a hard timeout (which throws
+ * {@link AcpTimeoutError}).
+ */
+export const DEFERRED_SENTINEL: unique symbol = Symbol.for('kodizm.permission.deferred')
 
 /**
  * Resource-bounded await for an outbound permission-style RPC.
@@ -178,6 +193,8 @@ export function buildCanUseTool(
  *   - The RPC promise.
  *   - Optional abort signal -> rejects with `Error('aborted')`.
  *   - Optional `timeoutMs` -> rejects with {@link AcpTimeoutError}.
+ *   - Optional `deferTimeoutMs` -> resolves to {@link DEFERRED_SENTINEL}
+ *     (soft defer; caller writes synthetic tool_result + persists).
  *
  * Pure helper so AskUserQuestion (T8) can reuse it for its own
  * outbound RPC without re-implementing the race.
@@ -186,10 +203,11 @@ export async function awaitPermissionResponse<T>(
   server: AcpServerLike,
   method: string,
   params: unknown,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
-): Promise<T> {
-  const racers: Array<Promise<T>> = [server.request<T>(method, params)]
+  options: { signal?: AbortSignal; timeoutMs?: number; deferTimeoutMs?: number } = {},
+): Promise<T | typeof DEFERRED_SENTINEL> {
+  const racers: Array<Promise<T | typeof DEFERRED_SENTINEL>> = [server.request<T>(method, params)]
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  let deferHandle: ReturnType<typeof setTimeout> | undefined
   let abortListener: (() => void) | undefined
 
   if (options.signal !== undefined) {
@@ -221,11 +239,23 @@ export async function awaitPermissionResponse<T>(
     )
   }
 
+  if (options.deferTimeoutMs !== undefined) {
+    const deferTimeoutMs = options.deferTimeoutMs
+    racers.push(
+      new Promise<typeof DEFERRED_SENTINEL>((resolve) => {
+        deferHandle = setTimeout(() => resolve(DEFERRED_SENTINEL), deferTimeoutMs)
+      }),
+    )
+  }
+
   try {
     return await Promise.race(racers)
   } finally {
     if (timeoutHandle !== undefined) {
       clearTimeout(timeoutHandle)
+    }
+    if (deferHandle !== undefined) {
+      clearTimeout(deferHandle)
     }
     if (abortListener !== undefined && options.signal !== undefined) {
       options.signal.removeEventListener('abort', abortListener)
