@@ -412,9 +412,14 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
         }
 
         if ((raw as { id?: unknown }).id !== undefined) {
-          await handleRequest(raw as JsonRpcRequest)
+          // Dispatch concurrently so a long-running handler (e.g.,
+          // session/prompt awaiting an SDK stream) does NOT block
+          // the read loop. Otherwise an inbound session/cancel
+          // could never be processed because the prompt handler
+          // owns the loop until it returns.
+          void handleRequest(raw as JsonRpcRequest)
         } else {
-          await handleNotification(raw as JsonRpcNotification)
+          void handleNotification(raw as JsonRpcNotification)
         }
       }
     },
