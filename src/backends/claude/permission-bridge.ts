@@ -109,12 +109,40 @@ const DEFAULT_OPTIONS: PermissionRequestPayload['options'] = [
   { kind: 'reject_once', name: 'Reject', optionId: 'reject' },
 ]
 
+/**
+ * Side-effect hook fired on the canUseTool path when the
+ * `deferTimeoutMs` racer wins. Caller MUST persist deferred state
+ * (JSONL + orchestrator-side store) here. Return value is what the
+ * SDK gets back as the PermissionResult; typical answer is a
+ * `{ behavior: 'deny', message: 'Permission deferred', interrupt: true }`
+ * so the SDK turn unwinds with the synthetic tool_result already
+ * written.
+ */
+export type DeferHandler = (args: {
+  toolName: string
+  input: Record<string, unknown>
+  options: CanUseToolOptions
+}) => Promise<PermissionResult>
+
 export interface BuildCanUseToolDeps {
   server: AcpServerLike
   sessionId: string
   emit: EmitLike
   signal: AbortSignal
   permissionTimeoutMs?: number
+  /**
+   * Soft-defer threshold. When the orchestrator has not answered the
+   * outbound `session/request_permission` RPC by this deadline, the
+   * racer resolves to {@link DEFERRED_SENTINEL} and the bridge calls
+   * {@link onDefer} so the driver can write the synthetic JSONL row,
+   * persist the state, and emit the {@link permission_deferred} event.
+   */
+  deferTimeoutMs?: number
+  /**
+   * Required when {@link deferTimeoutMs} is set. The bridge calls this
+   * with the SDK args + options when the defer racer wins.
+   */
+  onDefer?: DeferHandler
 }
 
 /**
@@ -153,12 +181,25 @@ export function buildCanUseTool(
     deps.emit.send(event)
 
     // 3. Issue the outbound RPC + race against signal + optional deadline.
+    //    Forward deferTimeoutMs only when the driver supplied an onDefer hook.
+    const raceOptions: { signal: AbortSignal; timeoutMs?: number; deferTimeoutMs?: number } = {
+      signal: composeSignals(deps.signal, options.signal),
+    }
+    if (deps.permissionTimeoutMs !== undefined) {
+      raceOptions.timeoutMs = deps.permissionTimeoutMs
+    }
+    if (deps.deferTimeoutMs !== undefined && deps.onDefer !== undefined) {
+      raceOptions.deferTimeoutMs = deps.deferTimeoutMs
+    }
+
     let raced: PermissionResponse | typeof DEFERRED_SENTINEL
     try {
-      raced = await awaitPermissionResponse<PermissionResponse>(deps.server, 'session/request_permission', payload, {
-        signal: composeSignals(deps.signal, options.signal),
-        timeoutMs: deps.permissionTimeoutMs,
-      })
+      raced = await awaitPermissionResponse<PermissionResponse>(
+        deps.server,
+        'session/request_permission',
+        payload,
+        raceOptions,
+      )
     } catch (error) {
       if (error instanceof AcpTimeoutError) {
         return { behavior: 'deny', message: 'Permission RPC timed out' }
@@ -166,10 +207,12 @@ export function buildCanUseTool(
       throw error
     }
 
-    // 4. buildCanUseTool does NOT pass deferTimeoutMs so the sentinel is
-    //    unreachable on this code path; narrow for the type checker.
+    // 4. Defer racer winner: hand off to the driver-supplied side-effect.
     if (raced === DEFERRED_SENTINEL) {
-      return { behavior: 'deny', message: 'Permission deferred (unexpected on canUseTool path)' }
+      if (deps.onDefer === undefined) {
+        return { behavior: 'deny', message: 'Permission deferred (no handler)' }
+      }
+      return await deps.onDefer({ toolName, input, options })
     }
 
     // 5. Map the outcome.

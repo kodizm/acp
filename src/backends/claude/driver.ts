@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { SessionNotFoundError } from '../../server/errors.ts'
+import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
 import type {
   CancelRequest,
   ForkSessionRequest,
@@ -39,6 +40,7 @@ import type {
 } from '../driver.ts'
 import { askUserQuestionBranch } from './ask-user-question.ts'
 import type { ClaudeCredentials } from './auth.ts'
+import { findSessionJsonlPath, writeDeferredToolResult } from './deferred-permission.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
 import { buildCanUseTool } from './permission-bridge.ts'
@@ -142,6 +144,21 @@ export interface ClaudeDriverDeps {
    * The integration tests + production bin always provide it.
    */
   server?: import('./permission-bridge.ts').AcpServerLike
+  /**
+   * Optional Pattern B deferred-permission store. When provided + the
+   * session opts in via `permissionDeferTimeoutMs`, the driver
+   * persists deferred state here on Process A and reads cached
+   * answers from it on Process B. Phase 4 wires the production
+   * Laravel-DB binding; Phase 1.6 ships the in-memory binding for
+   * tests + local dev.
+   */
+  deferredStore?: DeferredPermissionStore
+  /**
+   * Override for the `~/.claude` config home. Used by tests to
+   * isolate JSONL writes from the developer's real transcript dir.
+   * Production omits this (defaults to `homedir()/.claude`).
+   */
+  claudeConfigHome?: string
 }
 
 /**
@@ -167,6 +184,14 @@ interface SessionState {
    * no timeout (only abort signal unhooks).
    */
   permissionTimeoutMs?: number
+  /**
+   * Opt-in soft-defer threshold for Pattern B (Phase 1.6). When set,
+   * the driver writes a synthetic JSONL row + persists deferred state
+   * + emits permission_deferred when the orchestrator does not answer
+   * the outbound permission RPC by this deadline. Mutually exclusive
+   * with permissionTimeoutMs at the schema layer.
+   */
+  permissionDeferTimeoutMs?: number
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -208,6 +233,9 @@ export class ClaudeDriver implements BackendDriver {
       sessionId,
       options,
       ...(params.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: params.permissionTimeoutMs }),
+      ...(params.permissionDeferTimeoutMs === undefined
+        ? {}
+        : { permissionDeferTimeoutMs: params.permissionDeferTimeoutMs }),
     })
     return { sessionId }
   }
@@ -304,6 +332,12 @@ export class ClaudeDriver implements BackendDriver {
         emit,
         signal: abortController.signal,
         ...(state.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: state.permissionTimeoutMs }),
+        ...(state.permissionDeferTimeoutMs === undefined
+          ? {}
+          : {
+              deferTimeoutMs: state.permissionDeferTimeoutMs,
+              onDefer: this.buildOnDeferHandler(sessionId, state, emit),
+            }),
       })
       effectiveOptions.canUseTool = async (toolName, input, options) => {
         const askResult = await ask(toolName, input, options)
@@ -364,6 +398,60 @@ export class ClaudeDriver implements BackendDriver {
       throw new SessionNotFoundError(request.sessionId)
     }
     state.abortController?.abort()
+  }
+
+  /**
+   * Build the onDefer handler the permission-bridge calls when the
+   * defer racer wins. The handler:
+   *
+   *   1. Locates the SDK's session JSONL path.
+   *   2. Appends the synthetic deferred tool_result row.
+   *   3. Persists deferred state to the orchestrator side
+   *      (in-memory store when {@link ClaudeDriverDeps.deferredStore}
+   *      is provided; outbound RPC fallback in T7).
+   *   4. Emits the canonical {@link permission_deferred} event.
+   *   5. Returns a deny+interrupt PermissionResult so the SDK turn
+   *      unwinds with the synthetic tool_result already written.
+   */
+  private buildOnDeferHandler(
+    sessionId: string,
+    state: SessionState,
+    emit: EventEmitter,
+  ): import('./permission-bridge.ts').DeferHandler {
+    return async ({ toolName, input, options }) => {
+      // 1. Resolve the JSONL path; defer requires a captured SDK session id.
+      if (state.sdkSessionId === undefined) {
+        return { behavior: 'deny', message: 'Permission deferred before SDK session id captured', interrupt: true }
+      }
+      const jsonlPath = findSessionJsonlPath(state.options.cwd, state.sdkSessionId, this.deps.claudeConfigHome)
+
+      // 2. Append the synthetic deferred row.
+      await writeDeferredToolResult(jsonlPath, options.toolUseID)
+
+      // 3. Persist deferred state. Local store wins when both are
+      //    provided; RPC fallback path lands in T7.
+      if (this.deps.deferredStore !== undefined) {
+        await this.deps.deferredStore.set(sessionId, {
+          toolUseId: options.toolUseID,
+          toolName,
+          rawInput: input,
+          deferredAt: Date.now(),
+          ...(options.agentID === undefined ? {} : { agentId: options.agentID }),
+        })
+      }
+
+      // 4. Emit canonical permission_deferred event.
+      emit.send({
+        sessionId,
+        type: 'permission_deferred',
+        toolUseId: options.toolUseID,
+        name: toolName,
+        ...(options.agentID === undefined ? {} : { agentId: options.agentID }),
+      })
+
+      // 5. Unwind the SDK turn cleanly.
+      return { behavior: 'deny', message: 'Permission deferred', interrupt: true }
+    }
   }
 
   /**
