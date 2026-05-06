@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { SessionNotFoundError } from '../../server/errors.ts'
+import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
 import type {
   CancelRequest,
@@ -41,12 +42,12 @@ import type {
 import { askUserQuestionBranch } from './ask-user-question.ts'
 import type { ClaudeCredentials } from './auth.ts'
 import { findSessionJsonlPath, writeDeferredToolResult } from './deferred-permission.ts'
+import { classifyClaudeError } from './error-classifier.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
 import { buildCanUseTool } from './permission-bridge.ts'
 import { translateToolPolicyToClaude } from './policy.ts'
 import { SubagentTracker } from './subagent.ts'
-import { HeartbeatTimer } from '../../server/heartbeat.ts'
 
 /**
  * Claude SDK Options subset the driver builds + forwards. Defining
@@ -565,7 +566,36 @@ export class ClaudeDriver implements BackendDriver {
         // Treat as clean turn end so the container exits gracefully.
         stopReason = 'end_turn'
       } else {
-        throw error
+        // Phase 1.7: classify the SDK throw and surface a structured
+        // session_failed event + extended PromptResult. Tool-use-aborted
+        // is the one classifier that returns null (it is the
+        // defer-fired sentinel and was supposed to land in the
+        // deferDidFire branch above; if we got here, the abort was
+        // initiated by something else and we re-throw).
+        const classified = classifyClaudeError(error)
+        if (classified === null) {
+          throw error
+        }
+        const errAsErr = error instanceof Error ? error : undefined
+        emit.send({
+          sessionId,
+          type: 'session_failed',
+          reason: classified.reason,
+          detail: classified.detail,
+          capturedAt: Date.now(),
+          ...(errAsErr === undefined
+            ? {}
+            : {
+                cause: {
+                  name: errAsErr.name,
+                  message: errAsErr.message,
+                  ...(errAsErr.stack === undefined ? {} : { stack: errAsErr.stack.slice(0, 4000) }),
+                },
+              }),
+        })
+        failureReason = classified.reason
+        failureDetail = classified.detail
+        stopReason = 'session_failed'
       }
     } finally {
       heartbeat?.stop()
