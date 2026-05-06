@@ -2,7 +2,41 @@
 
 Kodizm runtime's ACP bridge. One protocol controls Claude Code, opencode, and codex CLIs under the same canonical surface, so the orchestrator wires every backend the same way: token rollup, model selection, system prompt replace + append, additional directories, MCP server injection, skill injection, file upload, thinking + output + tool streaming, subagent observability, resume + fork, permission + AskUserQuestion, deferred-permission lifecycle (Pattern B), debug capture, heartbeat liveness, structured failure events.
 
-Status: Phase 1, 1.5, 1.6, 1.7 complete. Codex (Phase 2) and opencode (Phase 3) inherit the canonical seam unchanged.
+Status: Phase 1, 1.5, 1.6, 1.7, 2 complete (Claude + codex backends ship). Opencode (Phase 3) inherits the canonical seam unchanged.
+
+## Backend parity matrix
+
+Every Phase 1 / 1.5 / 1.6 / 1.7 surface is wired identically across the two shipping backends. The orchestrator does not branch on backend; the same canonical wire shape carries every feature.
+
+| Feature | Claude | Codex |
+|---------|--------|-------|
+| `session/new` + `session/load` + `session/fork` + `session/cancel` | yes | yes |
+| `session/prompt` text content blocks | yes | yes |
+| `session/prompt` image / document blocks | yes | text only (codex `UserInput::Image` plumbing landed in follow-up) |
+| Token + cost rollup (`usage` event) | yes | yes |
+| Model selection (`model` field + `model_advertisement` event) | yes | yes |
+| `additionalDirectories` -> sandbox | yes (SDK) | yes (`SandboxPolicy.WorkspaceWrite.writable_roots`) |
+| `mcpServers` inline injection | yes (SDK options) | yes (temp `config.toml` + `--config`) |
+| `systemPrompt` replace / append | yes | yes (codex `instructions` + `developer_instructions`) |
+| `skills` pre-load + `skill_activation` events | yes (`skillEvents: true`) | n/a (`skillEvents: false`; codex has no skill loader) |
+| `toolPolicy.defaultMode` (5 enum) | yes | yes (best-effort 5x5 mapping) |
+| `toolPolicy.allow` / `deny` / `ask` | yes (SDK rules) | yes (sandbox + permission profile) |
+| `autoCompact` on/off | yes (`DISABLE_AUTO_COMPACT=1`) | server-side default; flag pass-through to codex |
+| `permission_request` event + `session/request_permission` RPC | yes | yes (3 codex RPCs collapse to one canonical) |
+| `question_request` + `session/ask_user_question` RPC | yes | n/a (codex's user-prompt scenarios surface through approval RPCs) |
+| `permission_deferred` + `permission_resumed` events (Pattern B) | yes | yes |
+| `session/permission_deferred_persist` + `session/permission_deferred_state` RPCs | yes | yes |
+| Pattern B JSONL injection | `~/.claude/projects/.../<sessionId>.jsonl` | `~/.codex/sessions/rollout-*-<threadId>.jsonl` (resume-by-path) |
+| `compaction_started` + `compaction_completed` events | yes | yes (`ContextCompaction` item lifecycle) |
+| `subagent_spawn` + `subagent_complete` events | yes (Task tool) | yes (`CollabAgentToolCall`) |
+| `tool_call_begin` / `progress` / `end` events | yes | yes (CommandExecution / FileChange / McpToolCall) |
+| `output_chunk` + `thinking_chunk` events | yes | yes |
+| `debug_log` (9 stages) + per-session toggle | yes | yes |
+| `heartbeat` event | yes | yes |
+| `session_failed` event + 7-value reason enum | yes | yes |
+| Per-reason `shouldExitOnReason` exit policy | yes | yes |
+| Graceful SIGTERM shutdown hook | yes | yes (subprocess `kill()` + grace) |
+| `BackendStallError` (-32006) | yes | yes |
 
 ## Install
 
@@ -15,7 +49,8 @@ bun build src/index.ts --target=bun --outdir=dist
 
 | Variable | Description |
 |----------|-------------|
-| `KODIZM_BACKEND` | `claude` (Phase 1) / `codex` (Phase 2) / `opencode` (Phase 3) |
+| `KODIZM_BACKEND` | `claude` (Phase 1) / `codex` (Phase 2) / `opencode` (Phase 3, planned) |
+| `CODEX_API_KEY` or `OPENAI_API_KEY` | codex backend auth |
 | `KODIZM_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. Default `info` |
 | `KODIZM_DEBUG` | `1` enables process-wide debug capture |
 | `KODIZM_DEBUG_DIR` | Forensic JSONL dir, default `/tmp/kodizm-debug` |
@@ -28,8 +63,14 @@ Stdout is reserved for ACP frames. Never log to stdout.
 ## Quick start
 
 ```bash
+# Claude:
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
   | KODIZM_BACKEND=claude CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..." CLAUDE_CODE_REMOTE=1 \
+    bun run dist/index.js
+
+# Codex (same protocol, just switch the backend env):
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+  | KODIZM_BACKEND=codex OPENAI_API_KEY="sk-..." \
     bun run dist/index.js
 ```
 
@@ -166,6 +207,49 @@ Cancel:
 await driver.cancel({ sessionId })
 // emits cancelled event; prompt() returns stopReason='cancelled'
 ```
+
+### `CodexDriver`
+
+Identical contract; just import the codex driver instead. The orchestrator does not branch on backend, every wire shape from `NewSessionRequest` down through `SessionUpdateEvent` is the same.
+
+```ts
+import { CodexDriver } from '@/backends/codex/driver.ts'
+import { CodexAppServerProcess } from '@/backends/codex/app-server-spawn.ts'
+
+const driver = new CodexDriver({
+  agentInfo: { version: '0.0.1' },
+  spawnFactory: async (options) => {
+    const proc = new CodexAppServerProcess({
+      binaryPath: 'codex',
+      configPath: options.configPath,
+    })
+    await proc.spawn()
+    return proc
+  },
+  server,           // for outbound canonical permission RPCs
+  deferredStore,    // optional Pattern B store
+})
+
+const { sessionId } = await driver.newSession({
+  cwd: '/workspace',
+  mcpServers: [
+    { type: 'http', name: 'kodizm', url: 'https://kodizm.com/mcp/internal' },
+  ],
+  toolPolicy: { defaultMode: 'default' },
+  permissionDeferTimeoutMs: 1_800_000,
+  debug: true,
+  heartbeatIntervalMs: 10_000,
+  inactivityThresholdMs: 60_000,
+})
+```
+
+The driver:
+- spawns one `codex app-server --config <temp.toml> --listen stdio://` subprocess per session
+- maps canonical `permissionMode` 5-enum to codex's `AskForApproval` (`untrusted` / `on-failure` / `on-request` / `never`) + pairs `plan` mode with `ReadOnly` sandbox
+- collapses codex's 3 native approval RPCs (`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`) into one canonical `permission_request` event with `name` discriminator (`codex_exec` / `codex_apply_patch` / `codex_permission_grant`)
+- maps codex `ContextCompaction` items to canonical `compaction_started` / `compaction_completed`
+- maps codex `CollabAgentToolCall` items to canonical `subagent_spawn` / `subagent_complete` (parent `sessionId` + fresh Kodizm `childId`; codex thread ids never leak)
+- writes Pattern B sentinel as `RolloutItem` line + resumes via `thread/resume { path }`
 
 ### `NewSessionRequest` schema
 
