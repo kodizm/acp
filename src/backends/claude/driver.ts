@@ -192,6 +192,31 @@ interface SessionState {
    * with permissionTimeoutMs at the schema layer.
    */
   permissionDeferTimeoutMs?: number
+  /**
+   * Latch that flips true after Process B's first prompt has checked
+   * the orchestrator-side store for cached deferred state. The check
+   * is one-shot per session: subsequent prompts skip the lookup.
+   */
+  checkedDeferredOnce?: boolean
+  /**
+   * Cached permission answer the orchestrator wrote after the user's
+   * dialog. Populated by the one-shot deferred-state check on
+   * Process B's first prompt; consumed by the wrapped canUseTool in
+   * T9 and cleared once consumed.
+   */
+  cachedDeferredAnswer?: {
+    behavior: 'allow' | 'deny'
+    updatedInput?: Record<string, unknown>
+    message?: string
+    interrupt?: boolean
+  }
+  /**
+   * Tool-use id of the deferred call. The wrapped canUseTool fires
+   * the cached answer ONLY when `options.toolUseID` matches this
+   * value; subsequent (different) tool calls fall through to the
+   * normal canUseTool flow.
+   */
+  deferredToolUseId?: string
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -282,6 +307,16 @@ export class ClaudeDriver implements BackendDriver {
     const state = this.sessions.get(sessionId)
     if (state === undefined) {
       throw new SessionNotFoundError(sessionId)
+    }
+
+    // One-shot Process B deferred-state check (Phase 1.6 T8). Runs at
+    // most once per session lifetime: if the orchestrator persisted a
+    // cached answer while the prior container was offline, fetch it
+    // here so T9's wrapped canUseTool can short-circuit the matching
+    // tool_use without rolling another permission roundtrip.
+    if (state.checkedDeferredOnce !== true) {
+      state.checkedDeferredOnce = true
+      await this.consumeDeferredAnswerOnResume(state)
     }
 
     // Per-turn model override: spread on top of the session's bound
@@ -398,6 +433,47 @@ export class ClaudeDriver implements BackendDriver {
       throw new SessionNotFoundError(request.sessionId)
     }
     state.abortController?.abort()
+  }
+
+  /**
+   * Process B one-shot resume hook. Pulls deferred state from the
+   * local store (preferred when available) or via outbound
+   * `session/permission_deferred_state` RPC. When the state carries
+   * a {@link DeferredState.cachedAnswer}, populates the session's
+   * resume fields so T9's wrapped canUseTool can fire on the matching
+   * tool_use_id.
+   *
+   * No-ops when no state record exists or the record carries no
+   * cached answer (Process A may have persisted state without an
+   * answer yet; the orchestrator races a fresh container only once
+   * the user has answered).
+   */
+  private async consumeDeferredAnswerOnResume(state: SessionState): Promise<void> {
+    let record: import('../../session/deferred-store.ts').DeferredState | null = null
+
+    if (this.deps.deferredStore !== undefined) {
+      record = await this.deps.deferredStore.get(state.sessionId)
+    } else if (this.deps.server !== undefined) {
+      // Production path: orchestrator stores deferred state on its
+      // side. Tolerate orchestrators that do not advertise the RPC
+      // (legacy Phase 1.5 servers): treat any error or unexpected
+      // shape as "no state" so the resume kickoff never throws.
+      try {
+        const response = await this.deps.server.request<{
+          state?: import('../../session/deferred-store.ts').DeferredState | null
+        }>('session/permission_deferred_state', { sessionId: state.sessionId })
+        record = response?.state ?? null
+      } catch {
+        record = null
+      }
+    }
+
+    if (record === null || record === undefined || record.cachedAnswer === undefined) {
+      return
+    }
+
+    state.cachedDeferredAnswer = record.cachedAnswer
+    state.deferredToolUseId = record.toolUseId
   }
 
   /**

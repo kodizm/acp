@@ -175,12 +175,17 @@ describe('ClaudeDriver Process A defer: outbound RPC fallback (T7)', () => {
     await mkdir(join(configHome, 'projects', sanitized), { recursive: true })
 
     // Server: never answers session/request_permission, captures persist RPC.
+    // T8 added a one-shot session/permission_deferred_state lookup at prompt
+    // entry; respond with state:null since this is a fresh defer.
     const calls: CapturedCall[] = []
     const server = {
       async request<T>(method: string, params: unknown): Promise<T> {
         calls.push({ method, params })
         if (method === 'session/permission_deferred_persist') {
           return { ok: true } as T
+        }
+        if (method === 'session/permission_deferred_state') {
+          return { state: null } as T
         }
         return new Promise(() => {}) as Promise<T>
       },
