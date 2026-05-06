@@ -163,3 +163,111 @@ describe('ClaudeDriver Process A defer wiring', () => {
     expect(await store.get(sessionId)).toBeNull()
   })
 })
+
+describe('ClaudeDriver Process A defer: outbound RPC fallback (T7)', () => {
+  test('falls back to session/permission_deferred_persist RPC when no deferredStore is in deps', async () => {
+    const captured: PermissionResult[] = []
+    const configHome = await mkdtemp(join(tmpdir(), 'kodizm-claude-config-'))
+    const cwd = '/tmp/kodizm-test-cwd-rpc-fallback'
+    const sdkSessionId = 'sdk_sess_rpc'
+    const sanitized = cwd.replace(/[^a-zA-Z0-9]/g, '-')
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(join(configHome, 'projects', sanitized), { recursive: true })
+
+    // Server: never answers session/request_permission, captures persist RPC.
+    const calls: CapturedCall[] = []
+    const server = {
+      async request<T>(method: string, params: unknown): Promise<T> {
+        calls.push({ method, params })
+        if (method === 'session/permission_deferred_persist') {
+          return { ok: true } as T
+        }
+        return new Promise(() => {}) as Promise<T>
+      },
+    }
+
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: makeAdapterThatInvokesCanUseTool('Bash', { command: 'ls' }, 'tu_rpc', sdkSessionId, captured),
+      server,
+      claudeConfigHome: configHome,
+      // NOTE: no deferredStore in deps -> driver must use RPC fallback.
+    })
+
+    const { sessionId } = await driver.newSession({
+      cwd,
+      mcpServers: [],
+      permissionDeferTimeoutMs: 30,
+    })
+    const { emit, events } = recorder()
+    await driver.prompt(sessionId, { sessionId, prompt: [] }, emit)
+
+    await sleep(20)
+
+    // 1. PermissionResult is deny+interrupt.
+    expect(captured[0]?.behavior).toBe('deny')
+
+    // 2. RPC fallback fired with the right shape.
+    const persistCall = calls.find((c) => c.method === 'session/permission_deferred_persist')
+    expect(persistCall).toBeDefined()
+    if (persistCall !== undefined) {
+      const params = persistCall.params as {
+        sessionId: string
+        toolUseId: string
+        toolName: string
+        rawInput: Record<string, unknown>
+      }
+      expect(params.sessionId).toBe(sessionId)
+      expect(params.toolUseId).toBe('tu_rpc')
+      expect(params.toolName).toBe('Bash')
+      expect(params.rawInput).toEqual({ command: 'ls' })
+    }
+
+    // 3. permission_deferred event still emitted.
+    expect(events.some((e) => e.type === 'permission_deferred')).toBe(true)
+  })
+
+  test('local store takes precedence when both store + RPC are available', async () => {
+    const captured: PermissionResult[] = []
+    const configHome = await mkdtemp(join(tmpdir(), 'kodizm-claude-config-'))
+    const cwd = '/tmp/kodizm-test-cwd-store-precedence'
+    const sdkSessionId = 'sdk_sess_pref'
+    const sanitized = cwd.replace(/[^a-zA-Z0-9]/g, '-')
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(join(configHome, 'projects', sanitized), { recursive: true })
+
+    const calls: CapturedCall[] = []
+    const server = {
+      async request<T>(method: string, params: unknown): Promise<T> {
+        calls.push({ method, params })
+        return new Promise(() => {}) as Promise<T>
+      },
+    }
+
+    const store = new InMemoryDeferredStore()
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-test' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: makeAdapterThatInvokesCanUseTool('Bash', {}, 'tu_pref', sdkSessionId, captured),
+      server,
+      deferredStore: store,
+      claudeConfigHome: configHome,
+    })
+
+    const { sessionId } = await driver.newSession({
+      cwd,
+      mcpServers: [],
+      permissionDeferTimeoutMs: 30,
+    })
+    const { emit } = recorder()
+    await driver.prompt(sessionId, { sessionId, prompt: [] }, emit)
+
+    await sleep(20)
+
+    // Local store has the record.
+    expect(await store.get(sessionId)).not.toBeNull()
+    // RPC fallback NOT fired.
+    expect(calls.some((c) => c.method === 'session/permission_deferred_persist')).toBe(false)
+  })
+})

@@ -429,9 +429,21 @@ export class ClaudeDriver implements BackendDriver {
       await writeDeferredToolResult(jsonlPath, options.toolUseID)
 
       // 3. Persist deferred state. Local store wins when both are
-      //    provided; RPC fallback path lands in T7.
+      //    provided; RPC fallback to session/permission_deferred_persist
+      //    fires when only the AcpServer reference is available
+      //    (production path: orchestrator handles persistence over the
+      //    wire via Laravel DB binding).
       if (this.deps.deferredStore !== undefined) {
         await this.deps.deferredStore.set(sessionId, {
+          toolUseId: options.toolUseID,
+          toolName,
+          rawInput: input,
+          deferredAt: Date.now(),
+          ...(options.agentID === undefined ? {} : { agentId: options.agentID }),
+        })
+      } else if (this.deps.server !== undefined) {
+        await this.deps.server.request('session/permission_deferred_persist', {
+          sessionId,
           toolUseId: options.toolUseID,
           toolName,
           rawInput: input,
