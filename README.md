@@ -2,7 +2,7 @@
 
 Custom ACP (Agent Client Protocol) server for the Kodizm runtime. One Bun TypeScript binary that drives `@anthropic-ai/claude-agent-sdk` directly, surfaces a Kodizm-flavored canonical wire shape to the orchestrator, and replaces upstream `claude-agent-acp` + `codex-acp` adapters with one maintained codebase.
 
-Status: Phase 1 of 5 complete (bootstrap + Claude backend). Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
+Status: Phase 1 + 1.5 complete (bootstrap + Claude backend + permission/policy/AskUserQuestion/compaction). Phases 2-5 (codex, opencode, Laravel cutover, image bake) follow.
 
 ## Why
 
@@ -133,8 +133,8 @@ The permission RPC name drifted between SDK drafts (`requestPermission` ↔ `ses
 ```ts
 import { RPC_METHOD_ALIASES } from '@/server/acp-server.ts'
 
-server.on('session/request_permission', handler)
-// Both wire forms hit `handler`.
+server.on('session/request_permission', handler)        // also matches: requestPermission
+server.on('session/ask_user_question', askHandler)      // also matches: askUserQuestion
 ```
 
 ### `BackendDriver`
@@ -224,7 +224,7 @@ manager.close('s1') // aborts the controller, then deletes the entry
 
 ### Request schemas (`@/wire/schemas`)
 
-Six zod schemas cover every Kodizm-flavored ACP method. Canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`) are top-level. The shared refinement rejects any payload smuggling them through `_meta`.
+Six zod schemas cover every Kodizm-flavored ACP method. Canonical fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, `cwd`, `toolPolicy`, `autoCompact`, `permissionTimeoutMs`) are top-level. The shared refinement rejects any payload smuggling them through `_meta`.
 
 ```ts
 import { NewSessionRequestSchema } from '@/wire/schemas.ts'
@@ -235,11 +235,119 @@ const result = NewSessionRequestSchema.safeParse({
   systemPrompt: { append: 'Always respond in Turkish.' },
   model: 'claude-haiku-4-5-20251001',
   skills: ['my-coding'],
+  toolPolicy: {
+    allow: ['Read', 'Glob', 'Grep', 'Bash:git commit*'],
+    deny: ['Bash:git push*'],
+    defaultMode: 'dontAsk',
+  },
+  autoCompact: false,
+  permissionTimeoutMs: 30_000,
 })
 // result.success === true
 ```
 
 `AbsolutePathSchema` enforces `/^\//`. `SystemPromptSchema = z.union([z.string(), z.object({ append: z.string() })])`.
+
+### Tool policy grammar (`@/wire/policy`)
+
+Canonical `<ToolName>:<pattern>` strings. Backend drivers translate to native CLI grammar. Examples:
+
+| Canonical | Claude SDK |
+|-----------|------------|
+| `Read` | `Read` |
+| `Read:/workspace/**` | `Read(/workspace/**)` |
+| `Bash:git commit*` | `Bash(git commit:*)` |
+| `mcp:kodizm` | `mcp__kodizm` |
+| `mcp:kodizm/*` | `mcp__kodizm__*` |
+| `mcp:kodizm/create_task` | `mcp__kodizm__create_task` |
+
+```ts
+import { parseCanonicalPattern } from '@/wire/policy.ts'
+
+const parsed = parseCanonicalPattern('Bash:git commit*')
+// { toolName: 'Bash', argPattern: 'git commit*' }
+```
+
+### Permission flow (`@/backends/claude/permission-bridge`)
+
+Driver wires SDK `canUseTool` to outbound `session/request_permission` RPC + parallel `permission_request` stream event. Default mode is `bypassPermissions` (Kodizm sandboxed Project containers); orchestrator opts in to lower modes.
+
+```ts
+import { buildCanUseTool } from '@/backends/claude/permission-bridge.ts'
+
+const canUseTool = buildCanUseTool({
+  server,
+  sessionId: 's1',
+  emit,
+  signal: abortController.signal,
+  permissionTimeoutMs: 30_000, // optional deadline
+})
+// Pass to SDK options.canUseTool
+```
+
+Outcomes:
+- `selected.allow` → `{ behavior: 'allow', updatedInput }`
+- `selected.allow_always` → `{ behavior: 'allow', updatedInput, updatedPermissions: [...session-scope rule] }`
+- `selected.reject` (or any other) → `{ behavior: 'deny', message: 'User refused permission to run tool' }`
+- `cancelled` → throws `Tool use aborted` (SDK absorbs as deny+abort)
+- `AcpTimeoutError` (deadline elapsed) → `{ behavior: 'deny', message: 'Permission RPC timed out' }`
+
+Subagent calls carry `agentId` + `parentSessionId` on both the RPC payload and the stream event.
+
+### AskUserQuestion (`@/backends/claude/ask-user-question`)
+
+Dedicated outbound `session/ask_user_question` RPC for the SDK's `AskUserQuestion` tool. Driver chains it BEFORE the generic permission flow:
+
+```ts
+const ask = askUserQuestionBranch({ server, sessionId, emit, signal })
+const gate = buildCanUseTool({ server, sessionId, emit, signal })
+
+canUseTool = async (toolName, input, opts) => {
+  const askResult = await ask(toolName, input, opts)
+  if (askResult !== null) return askResult
+  return await gate(toolName, input, opts)
+}
+```
+
+Wire RPC payload:
+```ts
+{
+  sessionId: 's1',
+  toolUseId: 'tu_1',
+  agentId?: 'sub_outer',
+  questions: [
+    {
+      question: 'Pick one color: red or blue?',
+      header: 'Color',          // ≤12 chars
+      options: [
+        { label: 'red',  description: 'Warm tone' },
+        { label: 'blue', description: 'Cool tone' },
+      ],
+      multiSelect: false,
+    },
+  ],
+}
+```
+
+Response: `{ answers: { '<question text>': '<answer>' }, annotations? }`. Multi-select answers comma-joined.
+
+### Compaction observability (`@/backends/claude/event-mapper`)
+
+SDK conversation compaction surfaces as two stream events. Compaction can be opt-out via `autoCompact: false` in `NewSessionRequest` (driver injects `DISABLE_AUTO_COMPACT=1` env).
+
+```ts
+{ type: 'compaction_started',  sessionId, trigger: 'manual' | 'auto' }
+{ type: 'compaction_completed',
+  sessionId,
+  trigger,
+  preTokens: 78000,
+  postTokens?: 12000,
+  durationMs?: 1500,
+  succeeded: true,
+  error?: 'prompt_too_long retry exhausted' }
+```
+
+Compaction CANNOT be vetoed (SDK constraint). `PreCompact` hook can only inject custom summary instructions; the operation always proceeds. Pre-compaction stream events stay valid history; orchestrator UI renders a "history compressed" marker with token deltas.
 
 ### Event union (`@/wire/events`)
 
@@ -252,7 +360,8 @@ Discriminated on `type`. Every variant carries the `sessionId` envelope.
 | `tool_call_begin` | `toolUseId`, `name`, `input` |
 | `tool_call_progress` | `toolUseId`, `delta` |
 | `tool_call_end` | `toolUseId`, `result`, `isError` |
-| `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]` |
+| `permission_request` | `toolUseId`, `name`, `options[{optionId, label}]`, `agentId?`, `parentSessionId?` |
+| `question_request` | `toolUseId`, `questions: KodizmQuestion[]`, `agentId?`, `parentSessionId?` |
 | `usage` | `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `costUsd` |
 | `subagent_spawn` | `childId`, `parentSessionId`, `model`, `tools[]` |
 | `subagent_complete` | `childId`, token slice, cost slice |
@@ -260,6 +369,8 @@ Discriminated on `type`. Every variant carries the `sessionId` envelope.
 | `model_advertisement` | `model` |
 | `process_died` | `exitCode`, optional `detail` |
 | `cancelled` | `reason` |
+| `compaction_started` | `trigger: 'manual' \| 'auto'` |
+| `compaction_completed` | `trigger`, `preTokens`, `postTokens?`, `durationMs?`, `succeeded`, `error?` |
 
 ### Content blocks (`@/wire/content`)
 
@@ -335,7 +446,7 @@ Or with API key:
 ANTHROPIC_API_KEY="sk-ant-..." bun test test/integration
 ```
 
-Phase 1 close-out: 246 unit + e2e tests passing, 14 integration smokes green against real Claude API (Haiku 4.5 by default).
+Phase 1 + 1.5 close-out: 335+ unit + e2e tests passing, 23 integration smokes green against real Claude API (Sonnet 4.6 + Haiku 4.5 mix). Total suite: ~358 tests across ~41 files.
 
 ## Concurrency invariant
 
