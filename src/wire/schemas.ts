@@ -80,6 +80,7 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'toolPolicy',
   'autoCompact',
   'permissionTimeoutMs',
+  'permissionDeferTimeoutMs',
 ] as const
 
 /**
@@ -156,9 +157,15 @@ export const NewSessionRequestSchema = z
     toolPolicy: ToolPolicySchema.optional(),
     autoCompact: z.boolean().optional(),
     permissionTimeoutMs: z.number().int().positive().optional(),
+    permissionDeferTimeoutMs: z.number().int().positive().optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
+  .refine((data) => !(data.permissionTimeoutMs !== undefined && data.permissionDeferTimeoutMs !== undefined), {
+    message:
+      'permissionTimeoutMs and permissionDeferTimeoutMs are mutually exclusive (pick hard-deny on timeout OR soft-defer on timeout)',
+    path: ['permissionDeferTimeoutMs'],
+  })
 
 /**
  * `session/prompt` request: a turn in an existing session. The

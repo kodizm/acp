@@ -251,6 +251,49 @@ describe('NewSessionRequestSchema, toolPolicy + autoCompact + permissionTimeoutM
   })
 })
 
+describe('NewSessionRequestSchema, permissionDeferTimeoutMs', () => {
+  test('accepts permissionDeferTimeoutMs alone as a positive integer', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionDeferTimeoutMs: 1_800_000,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('rejects payloads where both permissionTimeoutMs and permissionDeferTimeoutMs are set', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionTimeoutMs: 30_000,
+      permissionDeferTimeoutMs: 1_800_000,
+    })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      const messages = result.error.issues.map((issue) => issue.message)
+      expect(messages.some((message) => message.includes('mutually exclusive'))).toBe(true)
+    }
+  })
+
+  test('rejects a non-integer permissionDeferTimeoutMs', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      permissionDeferTimeoutMs: 1_800_000.5,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects permissionDeferTimeoutMs smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { permissionDeferTimeoutMs: 1_800_000 },
+    })
+    expect(result.success).toBe(false)
+  })
+})
+
 describe('PromptRequestSchema', () => {
   test('accepts a minimal prompt with sessionId and an empty prompt array', () => {
     const result = PromptRequestSchema.safeParse({
