@@ -44,6 +44,13 @@ function pickCredentials(): ClaudeCredentials {
 /**
  * Build an SdkAdapter wrapping the real `@anthropic-ai/claude-agent-sdk`
  * `query()` function.
+ *
+ * SDK isolation: every adapter built here injects `settingSources: []`
+ * into the options before calling the real SDK so the smokes do NOT
+ * read the developer's `~/.claude/settings.json` (which often has
+ * deny rules, hooks, and a non-default permissionMode that would
+ * break determinism). Production runs leave `settingSources`
+ * undefined so user / project / local settings layer normally.
  */
 export async function buildRealAdapter(
   enrich?: (args: { prompt: string; options: unknown }) => { prompt: string; options: unknown },
@@ -51,7 +58,11 @@ export async function buildRealAdapter(
   const sdk = await import('@anthropic-ai/claude-agent-sdk')
   return {
     async *query(args) {
-      const finalArgs = enrich !== undefined ? enrich(args as { prompt: string; options: unknown }) : args
+      const isolated = {
+        prompt: args.prompt,
+        options: { ...(args.options as Record<string, unknown>), settingSources: [] },
+      } as { prompt: string; options: unknown }
+      const finalArgs = enrich !== undefined ? enrich(isolated) : isolated
       for await (const message of sdk.query(finalArgs as never)) {
         yield message as SdkMessage
       }

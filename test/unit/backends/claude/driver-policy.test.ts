@@ -87,7 +87,7 @@ describe('ClaudeDriver, autoCompact=false threads DISABLE_AUTO_COMPACT env', () 
       autoCompact: false,
     })
     await driver.prompt(sessionId, { sessionId, prompt: [] }, fakeEmit)
-    expect(observed[0]?.env).toEqual({ DISABLE_AUTO_COMPACT: '1' })
+    expect(observed[0]?.env?.DISABLE_AUTO_COMPACT).toBe('1')
   })
 
   test('autoCompact omitted leaves env untouched', async () => {

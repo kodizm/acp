@@ -32,7 +32,11 @@ async function buildRealAdapter(): Promise<SdkAdapter> {
   const sdk = await import('@anthropic-ai/claude-agent-sdk')
   return {
     async *query(args) {
-      for await (const message of sdk.query(args as never)) {
+      const isolated = {
+        prompt: args.prompt,
+        options: { ...(args.options as Record<string, unknown>), settingSources: [] },
+      }
+      for await (const message of sdk.query(isolated as never)) {
         yield message as SdkMessage
       }
     },

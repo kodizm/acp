@@ -75,6 +75,14 @@ export interface ClaudeSdkOptions {
   allowedTools?: string[]
   disallowedTools?: string[]
   /**
+   * SDK settings sources. Pass `[]` to disable filesystem settings
+   * (SDK isolation mode); the driver does NOT set this by default
+   * because production runs want user / project / local settings
+   * layered. Integration smokes pass `[]` to keep tests
+   * deterministic vs. the developer's local settings.json.
+   */
+  settingSources?: Array<'user' | 'project' | 'local'>
+  /**
    * Optional canUseTool gate. When set, the SDK calls it before every
    * tool_use turn and awaits a PermissionResult. The driver builds
    * this via permission-bridge from the per-session toolPolicy +
@@ -423,9 +431,19 @@ export class ClaudeDriver implements BackendDriver {
 
     // Auto-compact opt-out via env. SDK default is on; when the
     // orchestrator passes autoCompact:false the driver injects the
-    // SDK's documented disable env var.
+    // SDK's documented disable env var. Merge with process.env so
+    // the SDK's own auth env (CLAUDE_CODE_OAUTH_TOKEN,
+    // ANTHROPIC_API_KEY) survives the injection — the SDK passes
+    // `Options.env` as the FULL subprocess env, not an addition.
     const compactEnv =
-      'autoCompact' in params && params.autoCompact === false ? { env: { DISABLE_AUTO_COMPACT: '1' } } : {}
+      'autoCompact' in params && params.autoCompact === false
+        ? {
+            env: {
+              ...(process.env as Record<string, string>),
+              DISABLE_AUTO_COMPACT: '1',
+            },
+          }
+        : {}
 
     return {
       cwd: params.cwd,
