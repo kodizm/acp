@@ -1,0 +1,43 @@
+{
+  "name": "kodizm-acp",
+  "version": "0.0.1",
+  "description": "Custom ACP server bridging Claude Code, codex, and opencode CLIs through a single Kodizm-flavored protocol surface.",
+  "type": "module",
+  "bin": {
+    "kodizm-acp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": ["dist/", "README.md", "LICENSE"],
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "test": "bun test test/unit test/e2e",
+    "test:unit": "bun test test/unit",
+    "test:e2e": "bun test test/e2e",
+    "test:integration": "bun test test/integration",
+    "test:watch": "bun test --watch",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "format": "biome format --write src test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/kodizm/acp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kodizm/acp.git"
+  }
+}
