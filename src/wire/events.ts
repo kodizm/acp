@@ -92,6 +92,81 @@ export const PermissionRequestEventSchema = SessionEnvelope.extend({
       label: z.string().min(1),
     }),
   ),
+  /**
+   * Set when the gated tool call originates from a Claude Task-tool
+   * subagent (the SDK's `canUseTool` options carry `agentID`). The
+   * orchestrator UI uses this to render "subagent X requesting tool Y
+   * (parent: <session-id>)" plus stamp `agent_id` on the audit row.
+   */
+  agentId: z.string().min(1).optional(),
+  /**
+   * Echoes the parent session id when the request originates from a
+   * subagent. For main-agent calls this is omitted (the envelope's
+   * sessionId IS the parent).
+   */
+  parentSessionId: z.string().min(1).optional(),
+})
+
+/**
+ * Single question that the model asks the user via the SDK's
+ * `AskUserQuestion` tool. Mirrors Claude Code's tool input shape so
+ * the orchestrator can render the dialog without re-deriving fields.
+ */
+export const KodizmQuestionSchema = z.object({
+  question: z.string().min(1),
+  header: z.string().min(1).max(12),
+  options: z
+    .array(
+      z.object({
+        label: z.string().min(1),
+        description: z.string().min(1),
+        preview: z.string().optional(),
+      }),
+    )
+    .min(2)
+    .max(4),
+  multiSelect: z.boolean(),
+})
+
+/**
+ * `question_request`: emitted alongside the outbound
+ * `session/ask_user_question` RPC so the orchestrator's stream-event
+ * store rolls forward (live UI, audit) without waiting for the RPC
+ * response. Carries 1-4 question rows, each with 2-4 options.
+ */
+export const QuestionRequestEventSchema = SessionEnvelope.extend({
+  type: z.literal('question_request'),
+  toolUseId: z.string().min(1),
+  agentId: z.string().min(1).optional(),
+  parentSessionId: z.string().min(1).optional(),
+  questions: z.array(KodizmQuestionSchema).min(1).max(4),
+})
+
+/**
+ * `compaction_started`: the SDK has begun compressing the prior
+ * conversation transcript. Trigger distinguishes user-invoked
+ * `/compact` from the auto-threshold trigger.
+ */
+export const CompactionStartedEventSchema = SessionEnvelope.extend({
+  type: z.literal('compaction_started'),
+  trigger: z.enum(['manual', 'auto']),
+})
+
+/**
+ * `compaction_completed`: the SDK has settled. `succeeded: false`
+ * means the summarisation API call failed; the active context is
+ * unchanged in that case (SDK absorbs the failure internally and
+ * counts toward the `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3`
+ * circuit breaker).
+ */
+export const CompactionCompletedEventSchema = SessionEnvelope.extend({
+  type: z.literal('compaction_completed'),
+  trigger: z.enum(['manual', 'auto']),
+  preTokens: z.number().int().nonnegative(),
+  postTokens: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  succeeded: z.boolean(),
+  error: z.string().optional(),
 })
 
 /**
@@ -188,6 +263,7 @@ export const SessionUpdateEventSchema = z.discriminatedUnion('type', [
   ToolCallProgressEventSchema,
   ToolCallEndEventSchema,
   PermissionRequestEventSchema,
+  QuestionRequestEventSchema,
   UsageEventSchema,
   SubagentSpawnEventSchema,
   SubagentCompleteEventSchema,
@@ -195,6 +271,10 @@ export const SessionUpdateEventSchema = z.discriminatedUnion('type', [
   ModelAdvertisementEventSchema,
   ProcessDiedEventSchema,
   CancelledEventSchema,
+  CompactionStartedEventSchema,
+  CompactionCompletedEventSchema,
 ])
+
+export type KodizmQuestion = z.infer<typeof KodizmQuestionSchema>
 
 export type SessionUpdateEvent = z.infer<typeof SessionUpdateEventSchema>

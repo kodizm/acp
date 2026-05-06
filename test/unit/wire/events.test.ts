@@ -2,10 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   CancelledEventSchema,
+  CompactionCompletedEventSchema,
+  CompactionStartedEventSchema,
+  KodizmQuestionSchema,
   ModelAdvertisementEventSchema,
   OutputChunkEventSchema,
   PermissionRequestEventSchema,
   ProcessDiedEventSchema,
+  QuestionRequestEventSchema,
   SessionUpdateEventSchema,
   SkillActivationEventSchema,
   SubagentCompleteEventSchema,
@@ -175,6 +179,141 @@ describe('Per-event schemas (12 sessionUpdate types)', () => {
       reason: 'user-initiated',
     }
     expect(CancelledEventSchema.safeParse(event).success).toBe(true)
+  })
+})
+
+describe('Phase 1.5 event extensions', () => {
+  test('permission_request accepts agentId + parentSessionId for subagent calls', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_request' as const,
+      toolUseId: 'tu_1',
+      name: 'Bash',
+      options: [{ optionId: 'allow', label: 'Allow' }],
+      agentId: 'sub_outer',
+      parentSessionId: 's1',
+    }
+    expect(PermissionRequestEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('permission_request main-agent call omits agentId + parentSessionId', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'permission_request' as const,
+      toolUseId: 'tu_1',
+      name: 'Bash',
+      options: [{ optionId: 'allow', label: 'Allow' }],
+    }
+    expect(PermissionRequestEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('KodizmQuestionSchema accepts a 2-option single-select question', () => {
+    const question = {
+      question: 'Which auth path?',
+      header: 'Auth',
+      options: [
+        { label: 'OAuth', description: 'Subscription pool' },
+        { label: 'API key', description: 'Direct key' },
+      ],
+      multiSelect: false,
+    }
+    expect(KodizmQuestionSchema.safeParse(question).success).toBe(true)
+  })
+
+  test('KodizmQuestionSchema rejects header longer than 12 chars', () => {
+    const question = {
+      question: 'Pick one.',
+      header: 'this header is way too long',
+      options: [
+        { label: 'A', description: 'Option A' },
+        { label: 'B', description: 'Option B' },
+      ],
+      multiSelect: false,
+    }
+    expect(KodizmQuestionSchema.safeParse(question).success).toBe(false)
+  })
+
+  test('KodizmQuestionSchema rejects fewer than 2 options', () => {
+    const question = {
+      question: 'Pick.',
+      header: 'Pick',
+      options: [{ label: 'Only', description: 'Only option' }],
+      multiSelect: false,
+    }
+    expect(KodizmQuestionSchema.safeParse(question).success).toBe(false)
+  })
+
+  test('question_request roundtrips with one question', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'question_request' as const,
+      toolUseId: 'tu_1',
+      questions: [
+        {
+          question: 'A or B?',
+          header: 'Pick',
+          options: [
+            { label: 'A', description: 'Option A' },
+            { label: 'B', description: 'Option B' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    }
+    expect(QuestionRequestEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('question_request rejects an empty questions array', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'question_request' as const,
+      toolUseId: 'tu_1',
+      questions: [],
+    }
+    expect(QuestionRequestEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('compaction_started accepts auto trigger', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'compaction_started' as const,
+      trigger: 'auto' as const,
+    }
+    expect(CompactionStartedEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('compaction_started rejects an unknown trigger', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'compaction_started' as const,
+      trigger: 'magic',
+    }
+    expect(CompactionStartedEventSchema.safeParse(event).success).toBe(false)
+  })
+
+  test('compaction_completed roundtrips with full metadata', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'compaction_completed' as const,
+      trigger: 'manual' as const,
+      preTokens: 78_000,
+      postTokens: 12_000,
+      durationMs: 1500,
+      succeeded: true,
+    }
+    expect(CompactionCompletedEventSchema.safeParse(event).success).toBe(true)
+  })
+
+  test('compaction_completed allows minimal payload (preTokens + trigger + succeeded)', () => {
+    const event = {
+      ...baseEnvelope,
+      type: 'compaction_completed' as const,
+      trigger: 'auto' as const,
+      preTokens: 78_000,
+      succeeded: false,
+      error: 'prompt_too_long retry exhausted',
+    }
+    expect(CompactionCompletedEventSchema.safeParse(event).success).toBe(true)
   })
 })
 
