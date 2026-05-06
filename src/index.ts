@@ -10,6 +10,8 @@
  * Claude SDK driver (T16+) on top of this entrypoint.
  */
 
+import { BackendNotConfiguredError, UnknownBackendError } from './server/errors.ts'
+
 /**
  * Backend identifier accepted at runtime. Phase 1 only ships `claude`;
  * `codex` and `opencode` arrive in phases 2 and 3 and slot in via
@@ -19,31 +21,7 @@ export type SupportedBackend = 'claude'
 
 const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude']
 
-/**
- * Thrown when the bin cannot resolve a backend at startup. The message
- * is intentionally explicit so container logs surface the env contract
- * violation without spelunking through stack traces.
- */
-export class BackendNotConfiguredError extends Error {
-  public override readonly name = 'BackendNotConfiguredError'
-
-  public constructor(detail: string) {
-    super(`KODIZM_BACKEND is not set or empty (${detail})`)
-  }
-}
-
-/**
- * Thrown when `KODIZM_BACKEND` carries a value the registry does not
- * recognize. Phase 1 emits this for every value other than `claude`;
- * later phases extend the allowlist.
- */
-export class UnknownBackendError extends Error {
-  public override readonly name = 'UnknownBackendError'
-
-  public constructor(value: string) {
-    super(`unknown backend: ${value} (known: ${KNOWN_BACKENDS.join(', ')})`)
-  }
-}
+export { BackendNotConfiguredError, UnknownBackendError }
 
 /**
  * Resolve the backend identifier from a captured environment.
@@ -68,7 +46,7 @@ export function resolveBackendFromEnv(env: Record<string, string | undefined>): 
 
   // 2. Reject unknown values; phases 2 and 3 will extend the allowlist.
   if (!KNOWN_BACKENDS.includes(raw as SupportedBackend)) {
-    throw new UnknownBackendError(raw)
+    throw new UnknownBackendError(raw, KNOWN_BACKENDS)
   }
 
   return raw as SupportedBackend
