@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { DebugRecorder } from '@/util/debug-recorder.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
@@ -136,5 +139,91 @@ describe('DebugRecorder, ring buffer cap', () => {
     // First 100 entries dropped; the buffer starts at i=100.
     expect((snap[0]?.payload as { i: number }).i).toBe(100)
     expect((snap[999]?.payload as { i: number }).i).toBe(1099)
+  })
+})
+
+describe('DebugRecorder, file output (T6)', () => {
+  test('appends a JSONL line per record() when debugFilePath is set', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kodizm-rec-file-'))
+    const filePath = join(dir, 'session.jsonl')
+    const { emit } = recorder()
+    const rec = new DebugRecorder({ sessionId: 's1', emit, debug: true, debugFilePath: filePath })
+
+    rec.record('sdk.message', { i: 1 })
+    rec.record('rpc.in', { i: 2 })
+    await rec.flushPending()
+
+    const written = await readFile(filePath, 'utf8')
+    const lines = written.trim().split('\n')
+    expect(lines.length).toBe(2)
+    expect(JSON.parse(lines[0] ?? '').stage).toBe('sdk.message')
+    expect(JSON.parse(lines[1] ?? '').stage).toBe('rpc.in')
+  })
+
+  test('flushPending() resolves after pending appends settle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kodizm-rec-flush-'))
+    const filePath = join(dir, 'session.jsonl')
+    const { emit } = recorder()
+    const rec = new DebugRecorder({ sessionId: 's1', emit, debug: true, debugFilePath: filePath })
+
+    for (let i = 0; i < 10; i++) {
+      rec.record('sdk.message', { i })
+    }
+    await rec.flushPending()
+
+    const written = await readFile(filePath, 'utf8')
+    const lines = written.trim().split('\n')
+    expect(lines.length).toBe(10)
+  })
+
+  test('close() stops further file writes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kodizm-rec-close-'))
+    const filePath = join(dir, 'session.jsonl')
+    const { emit, events } = recorder()
+    const rec = new DebugRecorder({ sessionId: 's1', emit, debug: true, debugFilePath: filePath })
+
+    rec.record('sdk.message', { i: 1 })
+    await rec.flushPending()
+    rec.close()
+    rec.record('sdk.message', { i: 2 })
+    await rec.flushPending()
+
+    const written = await readFile(filePath, 'utf8')
+    const lines = written.trim().split('\n')
+    expect(lines.length).toBe(1)
+    // Wire emission still happens after close (only file output stops).
+    expect(events.length).toBe(2)
+  })
+
+  test('file path failure does NOT throw (logs warn instead)', async () => {
+    // Path that does not exist + cannot be created (a regular file as parent).
+    const dir = await mkdtemp(join(tmpdir(), 'kodizm-rec-fail-'))
+    const blockerFile = join(dir, 'blocker')
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(blockerFile, 'not a dir')
+    // Try to write at <blockerFile>/session.jsonl which is impossible.
+    const filePath = join(blockerFile, 'session.jsonl')
+    const { emit, events } = recorder()
+    const rec = new DebugRecorder({ sessionId: 's1', emit, debug: true, debugFilePath: filePath })
+
+    expect(() => rec.record('sdk.message', { i: 1 })).not.toThrow()
+    await rec.flushPending()
+
+    // Wire emit still works; file path failure is silent (logged via stderr).
+    expect(events.length).toBe(1)
+  })
+
+  test('debug=false skips file output even when debugFilePath is set', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kodizm-rec-disabled-'))
+    const filePath = join(dir, 'session.jsonl')
+    const { emit } = recorder()
+    const rec = new DebugRecorder({ sessionId: 's1', emit, debug: false, debugFilePath: filePath })
+
+    rec.record('sdk.message', { i: 1 })
+    await rec.flushPending()
+
+    // File never created.
+    const { existsSync } = await import('node:fs')
+    expect(existsSync(filePath)).toBe(false)
   })
 })

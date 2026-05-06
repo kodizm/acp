@@ -23,6 +23,8 @@
  * production session that never opted in pays zero recording cost.
  */
 
+import { appendFile } from 'node:fs/promises'
+
 import type { DebugLogLevel, DebugStage, SessionUpdateEvent } from '../wire/events.ts'
 import { redact } from './redaction.ts'
 
@@ -73,6 +75,13 @@ export interface DebugRecorderOptions {
    * `src/util/redaction.ts:isRawSecretsMode`).
    */
   rawSecretsMode?: boolean
+  /**
+   * Optional forensic JSONL file path. When set, every captured
+   * entry is appended as a JSON line to this file (in addition to
+   * the wire emit + ring buffer). The bin entrypoint resolves this
+   * to `<KODIZM_DEBUG_DIR ?? '/tmp/kodizm-debug'>/<sessionId>.jsonl`.
+   */
+  debugFilePath?: string
 }
 
 const RING_BUFFER_LIMIT = 1000
@@ -87,6 +96,8 @@ const RPC_STAGES: ReadonlyArray<DebugStage> = ['rpc.in', 'rpc.out']
  */
 export class DebugRecorder {
   private readonly buffer: DebugBufferEntry[] = []
+  private readonly pendingWrites: Array<Promise<void>> = []
+  private closed = false
 
   public constructor(private readonly options: DebugRecorderOptions) {}
 
@@ -132,6 +143,7 @@ export class DebugRecorder {
       payload: entry.payload,
       redacted: entry.redacted,
     })
+    this.appendToFile(entry)
   }
 
   /**
@@ -143,10 +155,53 @@ export class DebugRecorder {
     return [...this.buffer]
   }
 
+  /**
+   * Await all in-flight file appends. Called from the bin's graceful
+   * SIGTERM handler so the JSONL file reflects every captured entry
+   * before the container exits.
+   */
+  public async flushPending(): Promise<void> {
+    if (this.pendingWrites.length === 0) {
+      return
+    }
+    await Promise.allSettled(this.pendingWrites)
+  }
+
+  /**
+   * Mark the recorder closed. Subsequent record() calls still emit
+   * to the wire + ring buffer (so post-close events are not silently
+   * dropped from the orchestrator's view) but skip the file output.
+   */
+  public close(): void {
+    this.closed = true
+  }
+
   private appendToBuffer(entry: DebugBufferEntry): void {
     this.buffer.push(entry)
     if (this.buffer.length > RING_BUFFER_LIMIT) {
       this.buffer.splice(0, this.buffer.length - RING_BUFFER_LIMIT)
     }
+  }
+
+  private appendToFile(entry: DebugBufferEntry): void {
+    if (this.options.debugFilePath === undefined || this.closed) {
+      return
+    }
+    const filePath = this.options.debugFilePath
+    const line = `${JSON.stringify(entry)}\n`
+    const promise = appendFile(filePath, line).catch((err: unknown) => {
+      // Recorder must NEVER throw into the prompt path; surface the
+      // failure on stderr where the bin's logger picks it up.
+      const message = err instanceof Error ? err.message : String(err)
+      process.stderr.write(
+        `${JSON.stringify({
+          level: 'warn',
+          message: 'kodizm-acp debug file append failed',
+          path: filePath,
+          error: message,
+        })}\n`,
+      )
+    })
+    this.pendingWrites.push(promise)
   }
 }
