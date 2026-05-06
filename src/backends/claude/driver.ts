@@ -211,10 +211,19 @@ interface SessionState {
     interrupt?: boolean
   }
   /**
-   * Tool-use id of the deferred call. The wrapped canUseTool fires
-   * the cached answer ONLY when `options.toolUseID` matches this
-   * value; subsequent (different) tool calls fall through to the
-   * normal canUseTool flow.
+   * Tool name of the deferred call. The wrapped canUseTool fires the
+   * cached answer ONLY when the resumed tool call's `toolName`
+   * matches this value (one-shot, then drops through). Matching by
+   * name (not by SDK tool_use_id) is required because the SDK
+   * assigns a fresh id every time the model re-issues the tool, so
+   * the original id from Process A never reappears.
+   */
+  deferredToolName?: string
+  /**
+   * Original tool_use_id from Process A. Carried across only for
+   * audit + the retry prefix injection ("re-issue the deferred tool
+   * call (id: <toolUseId>)"); the canUseTool wrap matches on
+   * {@link deferredToolName} instead.
    */
   deferredToolUseId?: string
 }
@@ -324,9 +333,11 @@ export class ClaudeDriver implements BackendDriver {
     // the retry prefix injected and the canUseTool wrap. Subsequent
     // prompts in the same process behave as plain follow-up turns.
     const resumeAnswer = state.cachedDeferredAnswer
+    const resumeToolName = state.deferredToolName
     const resumeToolUseId = state.deferredToolUseId
     if (resumeAnswer !== undefined) {
       state.cachedDeferredAnswer = undefined
+      state.deferredToolName = undefined
       state.deferredToolUseId = undefined
     }
 
@@ -367,6 +378,11 @@ export class ClaudeDriver implements BackendDriver {
     // Capture the cached-answer one-shot fire so the wrap below can
     // close over the local state and then null it out after consumption.
     let cachedAnswerSlot = resumeAnswer
+    // Turn-local flag flipped by onDefer when Pattern B fires. The
+    // SDK throws on the resulting deny+interrupt; the catch block
+    // checks this flag to distinguish "defer-fired clean exit" from
+    // a real protocol error.
+    const deferDidFire = { value: false }
 
     if (this.deps.server !== undefined) {
       const ask = askUserQuestionBranch({
@@ -386,13 +402,14 @@ export class ClaudeDriver implements BackendDriver {
           ? {}
           : {
               deferTimeoutMs: state.permissionDeferTimeoutMs,
-              onDefer: this.buildOnDeferHandler(sessionId, state, emit),
+              onDefer: this.buildOnDeferHandler(sessionId, state, emit, deferDidFire),
             }),
       })
       effectiveOptions.canUseTool = async (toolName, input, options) => {
         // Resume short-circuit: cached answer fires once for the
-        // matching tool_use_id, then drops through.
-        if (cachedAnswerSlot !== undefined && options.toolUseID === resumeToolUseId) {
+        // matching tool name (the SDK assigns a fresh tool_use_id on
+        // every retry, so matching by id never works in practice).
+        if (cachedAnswerSlot !== undefined && toolName === resumeToolName) {
           const answer = cachedAnswerSlot
           cachedAnswerSlot = undefined
           emit.send({
@@ -417,8 +434,8 @@ export class ClaudeDriver implements BackendDriver {
       // (test setup or local dev). Provide a minimal canUseTool that
       // only short-circuits the resume id; everything else throws as
       // un-gated, mirroring the SDK default.
-      effectiveOptions.canUseTool = async (_toolName, input, options) => {
-        if (cachedAnswerSlot !== undefined && options.toolUseID === resumeToolUseId) {
+      effectiveOptions.canUseTool = async (toolName, input, options) => {
+        if (cachedAnswerSlot !== undefined && toolName === resumeToolName) {
           const answer = cachedAnswerSlot
           cachedAnswerSlot = undefined
           emit.send({
@@ -476,6 +493,12 @@ export class ClaudeDriver implements BackendDriver {
       if (abortController.signal.aborted) {
         stopReason = 'cancelled'
         emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
+      } else if (deferDidFire.value) {
+        // Pattern B: SDK aborted via deny+interrupt:true after defer
+        // fired. Side-effects (synthetic JSONL row, store persist,
+        // permission_deferred event) already settled in onDefer.
+        // Treat as clean turn end so the container exits gracefully.
+        stopReason = 'end_turn'
       } else {
         throw error
       }
@@ -527,7 +550,10 @@ export class ClaudeDriver implements BackendDriver {
    * Locked decision 2 from `phase-01c-deferred-permission.md`.
    */
   private injectDeferredResumePrefix(originalPrompt: string, decision: 'allow' | 'deny', toolUseId: string): string {
-    const prefix = `User has answered the deferred permission: ${decision}. Please re-issue the deferred tool call (id: ${toolUseId}) with the same arguments. Original user request: `
+    const prefix =
+      decision === 'allow'
+        ? `User has approved the deferred permission. Please re-issue the deferred tool call (id: ${toolUseId}) with the same arguments so the transcript records the result. Original user request: `
+        : `User has denied the deferred permission (id: ${toolUseId}). The tool will not run; please acknowledge the denial and continue without retrying it. Original user request: `
     return `${prefix}${originalPrompt}`
   }
 
@@ -569,6 +595,7 @@ export class ClaudeDriver implements BackendDriver {
     }
 
     state.cachedDeferredAnswer = record.cachedAnswer
+    state.deferredToolName = record.toolName
     state.deferredToolUseId = record.toolUseId
   }
 
@@ -589,8 +616,12 @@ export class ClaudeDriver implements BackendDriver {
     sessionId: string,
     state: SessionState,
     emit: EventEmitter,
+    deferDidFire?: { value: boolean },
   ): import('./permission-bridge.ts').DeferHandler {
     return async ({ toolName, input, options }) => {
+      if (deferDidFire !== undefined) {
+        deferDidFire.value = true
+      }
       // 1. Resolve the JSONL path; defer requires a captured SDK session id.
       if (state.sdkSessionId === undefined) {
         return { behavior: 'deny', message: 'Permission deferred before SDK session id captured', interrupt: true }

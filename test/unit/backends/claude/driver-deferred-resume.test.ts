@@ -174,7 +174,7 @@ describe('ClaudeDriver Process B auto-detect on first prompt (T8)', () => {
 })
 
 describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)', () => {
-  test('cached answer fires for matching toolUseId; emits permission_resumed; clears state', async () => {
+  test('cached answer fires for matching tool name; emits permission_resumed; clears state', async () => {
     const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
     const store = new InMemoryDeferredStore()
     await store.set('sess_match', cachedDeferredState())
@@ -190,7 +190,9 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
     const driver = new ClaudeDriver({
       credentials: { type: 'api-key', token: 'sk-test' },
       agentInfo: { version: '0.0.1-test' },
-      sdk: makeRecordingAdapter('Bash', { command: 'pwd' }, 'tu_def_1', 'sdk_resume', harness),
+      // Tool name (Bash) matches fixture; tool_use_id is INTENTIONALLY different
+      // because the SDK assigns a fresh id on every retry.
+      sdk: makeRecordingAdapter('Bash', { command: 'pwd' }, 'tu_fresh_id', 'sdk_resume', harness),
       server,
       deferredStore: store,
     })
@@ -203,11 +205,11 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
     expect(harness.capturedResults[0]).toEqual({ behavior: 'allow', updatedInput: { command: 'pwd' } })
     expect(calls.some((c) => c.method === 'session/request_permission')).toBe(false)
 
-    // 2. permission_resumed event emitted with the matching toolUseId + decision.
+    // 2. permission_resumed event emitted with the SDK's fresh tool_use_id + decision.
     const resumed = events.find((e) => e.type === 'permission_resumed')
     expect(resumed).toBeDefined()
     if (resumed?.type === 'permission_resumed') {
-      expect(resumed.toolUseId).toBe('tu_def_1')
+      expect(resumed.toolUseId).toBe('tu_fresh_id')
       expect(resumed.decision).toBe('allow')
     }
 
@@ -216,7 +218,7 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
     expect(after).toBeNull()
   })
 
-  test('different toolUseId falls through to normal canUseTool (cached answer not consumed)', async () => {
+  test('different tool name falls through to normal canUseTool (cached answer not consumed)', async () => {
     const harness = { capturedResults: [] as PermissionResult[], capturedPrompt: null as string | null }
     const store = new InMemoryDeferredStore()
     await store.set('sess_mismatch', cachedDeferredState())
@@ -232,8 +234,8 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
     const driver = new ClaudeDriver({
       credentials: { type: 'api-key', token: 'sk-test' },
       agentInfo: { version: '0.0.1-test' },
-      // Different toolUseId than the cached one (tu_def_1 in fixture).
-      sdk: makeRecordingAdapter('Bash', { command: 'ls' }, 'tu_other', 'sdk_resume_2', harness),
+      // Different tool name than the cached one (Bash in fixture; we use Write here).
+      sdk: makeRecordingAdapter('Write', { file_path: '/tmp/x', content: 'y' }, 'tu_other', 'sdk_resume_2', harness),
       server,
       deferredStore: store,
     })
@@ -269,8 +271,7 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
       emit,
     )
 
-    expect(harness.capturedPrompt).toContain('User has answered the deferred permission')
-    expect(harness.capturedPrompt).toContain('allow')
+    expect(harness.capturedPrompt).toContain('User has approved the deferred permission')
     expect(harness.capturedPrompt).toContain('tu_def_1')
     expect(harness.capturedPrompt).toContain('list files please')
   })
@@ -295,10 +296,13 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
             | ((t: string, i: Record<string, unknown>, o: CanUseToolOptions) => Promise<PermissionResult>)
             | undefined
           if (canUseTool !== undefined) {
+            // First call: matching tool name (Bash from fixture); second
+            // call: different tool name. Tool_use_ids vary regardless;
+            // matching is by tool name post-fix.
             const result = await canUseTool(
-              'Bash',
+              callIdx === 1 ? 'Bash' : 'Write',
               { command: 'pwd' },
-              { signal: new AbortController().signal, toolUseID: callIdx === 1 ? 'tu_def_1' : 'tu_other' },
+              { signal: new AbortController().signal, toolUseID: `tu_${callIdx}` },
             )
             target.capturedResults.push(result)
           }
@@ -314,8 +318,9 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
     await driver.prompt('sess_second', { sessionId: 'sess_second', prompt: [{ type: 'text', text: 'first' }] }, emit)
     await driver.prompt('sess_second', { sessionId: 'sess_second', prompt: [{ type: 'text', text: 'second' }] }, emit)
 
-    expect(harness1.capturedPrompt).toContain('User has answered the deferred permission')
-    expect(harness2.capturedPrompt).not.toContain('User has answered the deferred permission')
+    expect(harness1.capturedPrompt).toContain('User has approved the deferred permission')
+    expect(harness2.capturedPrompt).not.toContain('User has approved the deferred permission')
+    expect(harness2.capturedPrompt).not.toContain('User has denied the deferred permission')
     expect(harness2.capturedPrompt).toContain('second')
   })
 })
