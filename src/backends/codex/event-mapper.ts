@@ -165,7 +165,10 @@ export class CodexEventMapper {
     const item = params.item
     if (item === undefined) return
 
-    if (item.type === 'CommandExecution') {
+    // codex v2 emits item.type in camelCase ('commandExecution',
+    // 'fileChange', 'mcpToolCall', 'contextCompaction', 'collabAgentToolCall').
+    // Older builds used PascalCase; we accept both for forward + backward compat.
+    if (item.type === 'CommandExecution' || item.type === 'commandExecution') {
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'tool_call_begin',
@@ -175,7 +178,7 @@ export class CodexEventMapper {
       })
       return
     }
-    if (item.type === 'FileChange') {
+    if (item.type === 'FileChange' || item.type === 'fileChange') {
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'tool_call_begin',
@@ -185,7 +188,7 @@ export class CodexEventMapper {
       })
       return
     }
-    if (item.type === 'McpToolCall') {
+    if (item.type === 'McpToolCall' || item.type === 'mcpToolCall') {
       const name = `mcp__${item.server ?? 'unknown'}__${item.tool ?? 'unknown'}`
       this.options.emit({
         sessionId: this.options.sessionId,
@@ -196,7 +199,7 @@ export class CodexEventMapper {
       })
       return
     }
-    if (item.type === 'ContextCompaction') {
+    if (item.type === 'ContextCompaction' || item.type === 'contextCompaction') {
       this.preCompactionTotal = this.lastTotalUsage
       this.options.emit({
         sessionId: this.options.sessionId,
@@ -205,7 +208,10 @@ export class CodexEventMapper {
       })
       return
     }
-    if (item.type === 'CollabAgentToolCall' && item.tool === 'SpawnAgent') {
+    if (
+      (item.type === 'CollabAgentToolCall' || item.type === 'collabAgentToolCall') &&
+      item.tool === 'SpawnAgent'
+    ) {
       const childId = randomUUID()
       this.subagents.set(item.id, childId)
       this.options.emit({
@@ -224,7 +230,14 @@ export class CodexEventMapper {
     const item = params.item
     if (item === undefined) return
 
-    if (item.type === 'CommandExecution' || item.type === 'FileChange' || item.type === 'McpToolCall') {
+    if (
+      item.type === 'CommandExecution' ||
+      item.type === 'commandExecution' ||
+      item.type === 'FileChange' ||
+      item.type === 'fileChange' ||
+      item.type === 'McpToolCall' ||
+      item.type === 'mcpToolCall'
+    ) {
       const isError = item.status === 'error' || item.status === 'failed'
       this.options.emit({
         sessionId: this.options.sessionId,
@@ -235,7 +248,7 @@ export class CodexEventMapper {
       })
       return
     }
-    if (item.type === 'ContextCompaction') {
+    if (item.type === 'ContextCompaction' || item.type === 'contextCompaction') {
       const preTokens = this.preCompactionTotal?.inputTokens ?? 0
       const postTokens = this.lastTotalUsage?.inputTokens ?? 0
       this.options.emit({
@@ -249,7 +262,7 @@ export class CodexEventMapper {
       this.preCompactionTotal = undefined
       return
     }
-    if (item.type === 'CollabAgentToolCall') {
+    if (item.type === 'CollabAgentToolCall' || item.type === 'collabAgentToolCall') {
       const childId = this.subagents.get(item.id)
       if (childId === undefined) return
       this.options.emit({

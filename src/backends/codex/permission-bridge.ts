@@ -42,11 +42,22 @@ type CodexApprovalMethod =
   | 'item/fileChange/requestApproval'
   | 'item/permissions/requestApproval'
 
+/**
+ * Codex v2 approval params (camelCase per
+ * `v2/CommandExecutionRequestApprovalParams.ts`,
+ * `FileChangeRequestApprovalParams.ts`,
+ * `PermissionsRequestApprovalParams.ts`).
+ */
 interface CodexApprovalParams {
-  thread_id?: string
-  turn_id?: string
-  item_id: string
-  approval_id?: string
+  threadId?: string
+  turnId?: string
+  itemId: string
+  /**
+   * Subcommand approval id when codex's zsh-exec-bridge splits a
+   * single command into multiple approval callbacks. Null for
+   * vanilla shell/unified_exec approvals.
+   */
+  approvalId?: string | null
   command?: string
   cwd?: string
   reason?: string
@@ -89,7 +100,9 @@ export async function handleCodexApproval(args: {
 }): Promise<CodexApprovalResult> {
   const name = approvalRpcToCanonicalName(args.method)
   const toolUseId =
-    args.params.approval_id !== undefined ? `${args.params.item_id}-${args.params.approval_id}` : args.params.item_id
+    args.params.approvalId !== undefined && args.params.approvalId !== null
+      ? `${args.params.itemId}-${args.params.approvalId}`
+      : args.params.itemId
 
   // 1. Emit canonical permission_request event so orchestrator's
   //    stream-event store rolls forward in real time.

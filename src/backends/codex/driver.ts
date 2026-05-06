@@ -441,7 +441,7 @@ export class CodexDriver implements BackendDriver {
             emit.send({
               sessionId,
               type: 'permission_resumed',
-              toolUseId: approvalParams.item_id,
+              toolUseId: approvalParams.itemId,
               decision,
             })
             if (this.deps.deferredStore !== undefined) {
@@ -495,7 +495,7 @@ export class CodexDriver implements BackendDriver {
             await state.process
               .request('turn/interrupt', {
                 threadId: state.codexThreadId,
-                turn_id: state.activeTurnId,
+                turnId: state.activeTurnId,
               })
               .catch(() => undefined)
             // Wait for the synthesized turn/completed (with 1s budget).
@@ -622,13 +622,13 @@ export class CodexDriver implements BackendDriver {
         (state.codexThreadId === undefined ? null : await findCodexJsonlPath(codexHome, state.codexThreadId))
 
       if (jsonlPath !== null) {
-        await writeDeferredRolloutItem(jsonlPath, params.item_id)
+        await writeDeferredRolloutItem(jsonlPath, params.itemId)
         state.codexJsonlPath = jsonlPath
       }
 
       if (this.deps.deferredStore !== undefined) {
         await this.deps.deferredStore.set(sessionId, {
-          toolUseId: params.item_id,
+          toolUseId: params.itemId,
           toolName: this.approvalMethodToName(method),
           rawInput: params,
           deferredAt: Date.now(),
@@ -637,7 +637,7 @@ export class CodexDriver implements BackendDriver {
         await this.deps.server
           .request('session/permission_deferred_persist', {
             sessionId,
-            toolUseId: params.item_id,
+            toolUseId: params.itemId,
             toolName: this.approvalMethodToName(method),
             rawInput: params,
             deferredAt: Date.now(),
@@ -648,7 +648,7 @@ export class CodexDriver implements BackendDriver {
       emit.send({
         sessionId,
         type: 'permission_deferred',
-        toolUseId: params.item_id,
+        toolUseId: params.itemId,
         name: this.approvalMethodToName(method),
       })
     }
