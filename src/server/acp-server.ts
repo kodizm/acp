@@ -64,6 +64,7 @@ export type JsonRpcErrorCode = (typeof JsonRpcErrorCode)[keyof typeof JsonRpcErr
  */
 export const RPC_METHOD_ALIASES: Readonly<Record<string, ReadonlyArray<string>>> = {
   'session/request_permission': ['requestPermission'],
+  'session/ask_user_question': ['askUserQuestion'],
 }
 
 /**

@@ -174,6 +174,59 @@ describe('RPC alias dispatch (permission request name drift)', () => {
     })
   })
 
+  test('session/ask_user_question alias map binds askUserQuestion bidirectionally', () => {
+    expect(RPC_METHOD_ALIASES['session/ask_user_question']).toEqual(['askUserQuestion'])
+  })
+
+  test('handler registered under session/ask_user_question fires for askUserQuestion frames', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const server = createAcpServer({ transport })
+
+    let received: unknown
+    server.on('session/ask_user_question', (params) => {
+      received = params
+      return { answers: { 'A or B?': 'A' } }
+    })
+
+    const serving = server.serve()
+    injectFrame({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'askUserQuestion',
+      params: { sessionId: 's-q', toolUseId: 'tu_1', questions: [] },
+    })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    expect(received).toEqual({ sessionId: 's-q', toolUseId: 'tu_1', questions: [] })
+    expect(outbound[0]).toMatchObject({
+      jsonrpc: '2.0',
+      id: 5,
+      result: { answers: { 'A or B?': 'A' } },
+    })
+  })
+
+  test('handler registered under askUserQuestion fires for session/ask_user_question frames', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const server = createAcpServer({ transport })
+
+    server.on('askUserQuestion', () => ({ answers: { x: 'y' } }))
+
+    const serving = server.serve()
+    injectFrame({
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'session/ask_user_question',
+      params: {},
+    })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    expect(outbound[0]).toMatchObject({ jsonrpc: '2.0', id: 6, result: { answers: { x: 'y' } } })
+  })
+
   test('non-aliased methods stay unaliased (no accidental cross-routing)', async () => {
     const { transport, injectFrame, injectClose, outbound } = createTestTransport()
     const server = createAcpServer({ transport })
