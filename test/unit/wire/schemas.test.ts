@@ -294,6 +294,74 @@ describe('NewSessionRequestSchema, permissionDeferTimeoutMs', () => {
   })
 })
 
+describe('NewSessionRequestSchema, debug + lifecycle fields (Phase 1.7)', () => {
+  test('accepts all five new fields with sane values', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      debug: true,
+      debugCaptureRawSdk: true,
+      debugCaptureRpc: false,
+      heartbeatIntervalMs: 5_000,
+      inactivityThresholdMs: 30_000,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('accepts payload without any debug fields (all optional)', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('rejects non-integer heartbeatIntervalMs', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      heartbeatIntervalMs: 5.5,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects non-positive inactivityThresholdMs', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      inactivityThresholdMs: 0,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects debug smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { debug: true },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects heartbeatIntervalMs smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { heartbeatIntervalMs: 5_000 },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects inactivityThresholdMs smuggled inside _meta', () => {
+    const result = NewSessionRequestSchema.safeParse({
+      cwd: '/workspace',
+      mcpServers: [],
+      _meta: { inactivityThresholdMs: 30_000 },
+    })
+    expect(result.success).toBe(false)
+  })
+})
+
 describe('PromptRequestSchema', () => {
   test('accepts a minimal prompt with sessionId and an empty prompt array', () => {
     const result = PromptRequestSchema.safeParse({

@@ -81,6 +81,11 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'autoCompact',
   'permissionTimeoutMs',
   'permissionDeferTimeoutMs',
+  'debug',
+  'debugCaptureRawSdk',
+  'debugCaptureRpc',
+  'heartbeatIntervalMs',
+  'inactivityThresholdMs',
 ] as const
 
 /**
@@ -158,6 +163,11 @@ export const NewSessionRequestSchema = z
     autoCompact: z.boolean().optional(),
     permissionTimeoutMs: z.number().int().positive().optional(),
     permissionDeferTimeoutMs: z.number().int().positive().optional(),
+    debug: z.boolean().optional(),
+    debugCaptureRawSdk: z.boolean().optional(),
+    debugCaptureRpc: z.boolean().optional(),
+    heartbeatIntervalMs: z.number().int().positive().optional(),
+    inactivityThresholdMs: z.number().int().positive().optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
