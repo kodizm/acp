@@ -266,6 +266,23 @@ export class ClaudeDriver implements BackendDriver {
 
   public constructor(private readonly deps: ClaudeDriverDeps) {}
 
+  /**
+   * Attach the AcpServer reference after construction.
+   *
+   * The bin entrypoint creates the driver before the server (server
+   * needs the driver as its backend), then wires the server back into
+   * the driver here so outbound RPCs (`session/request_permission`,
+   * `session/ask_user_question`) can flow during prompt(). Idempotent:
+   * re-attaching replaces the prior reference, which is useful when a
+   * test harness rebuilds the server between scenarios.
+   *
+   * @param server - the AcpServer (or AcpServerLike) the driver issues
+   *                 outbound RPCs against
+   */
+  public attachServer(server: import('./permission-bridge.ts').AcpServerLike): void {
+    ;(this.deps as { server?: import('./permission-bridge.ts').AcpServerLike }).server = server
+  }
+
   public capabilities(): DriverCapabilities {
     return FULL_CAPABILITIES
   }
