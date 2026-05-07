@@ -51,8 +51,9 @@ describe('handleOpencodePermission', () => {
     expect(events.find((e) => e.type === 'permission_request')).toBeDefined()
     expect(sdk.permission.reply).toHaveBeenCalled()
     const call = (sdk.permission.reply.mock.calls[0] ?? []) as unknown[]
-    const body = (call[0] as { body: { reply: string } }).body
-    expect(body.reply).toBe('once')
+    const payload = call[0] as { requestID: string; reply: string }
+    expect(payload.requestID).toBe('perm-1')
+    expect(payload.reply).toBe('once')
   })
 
   test('orchestrator selects allow_always -> reply=always', async () => {
@@ -71,7 +72,7 @@ describe('handleOpencodePermission', () => {
     })
 
     const call = (sdk.permission.reply.mock.calls[0] ?? []) as unknown[]
-    expect((call[0] as { body: { reply: string } }).body.reply).toBe('always')
+    expect((call[0] as { reply: string }).reply).toBe('always')
   })
 
   test('orchestrator selects reject -> reply=reject + feedback message from _meta', async () => {
@@ -95,9 +96,9 @@ describe('handleOpencodePermission', () => {
     })
 
     const call = (sdk.permission.reply.mock.calls[0] ?? []) as unknown[]
-    const body = (call[0] as { body: { reply: string; message?: string } }).body
-    expect(body.reply).toBe('reject')
-    expect(body.message).toBe('too dangerous')
+    const payload = call[0] as { reply: string; message?: string }
+    expect(payload.reply).toBe('reject')
+    expect(payload.message).toBe('too dangerous')
   })
 
   test('defer threshold fires onDefer hook + does NOT call sdk.permission.reply', async () => {

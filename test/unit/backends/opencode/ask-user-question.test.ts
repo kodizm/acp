@@ -69,9 +69,9 @@ describe('handleOpencodeQuestion', () => {
     //    answers = Answer[][]; one Answer per question = [selectedLabel].
     expect(sdk.question.reply).toHaveBeenCalled()
     const replyCall = (sdk.question.reply.mock.calls[0] ?? []) as unknown[]
-    expect(replyCall[0]).toMatchObject({ id: 'qreq-1' })
-    const replyBody = (replyCall[0] as { body: { answers: string[][] } }).body
-    expect(replyBody.answers).toEqual([['Option A']])
+    const payload = replyCall[0] as { requestID: string; answers: string[][] }
+    expect(payload.requestID).toBe('qreq-1')
+    expect(payload.answers).toEqual([['Option A']])
   })
 
   test('multiSelect=true splits comma-separated orchestrator answer', async () => {
@@ -108,8 +108,8 @@ describe('handleOpencodeQuestion', () => {
     })
 
     const replyCall = (sdk.question.reply.mock.calls[0] ?? []) as unknown[]
-    const body = (replyCall[0] as { body: { answers: string[][] } }).body
-    expect(body.answers).toEqual([['Option A', 'Option B']])
+    const payload = replyCall[0] as { answers: string[][] }
+    expect(payload.answers).toEqual([['Option A', 'Option B']])
   })
 
   test('opencode `multiple` field translates to canonical `multiSelect`', async () => {

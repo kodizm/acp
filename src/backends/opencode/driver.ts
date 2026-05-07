@@ -37,6 +37,7 @@ import type {
   NewSessionRequest,
   PromptRequest,
 } from '../../wire/types.ts'
+import type { AcpServerLike } from '../claude/permission-bridge.ts'
 import type {
   BackendDriver,
   DriverCapabilities,
@@ -45,9 +46,13 @@ import type {
   NewSessionResult,
   PromptResult,
 } from '../driver.ts'
+import { handleOpencodeQuestion } from './ask-user-question.ts'
 import { classifyOpencodeError } from './error-classifier.ts'
 import { OpencodeEventMapper } from './event-mapper.ts'
 import { OpencodeHttpBridge, type OpencodeHttpBridgeHandle } from './http-bridge.ts'
+import { buildOpencodeMcpAdds } from './mcp-mapper.ts'
+import { handleOpencodePermission } from './permission-bridge.ts'
+import { buildOpencodeRuleset } from './policy.ts'
 import { dispatchOpencodeEvent, isTurnComplete } from './prompt-stream.ts'
 
 /**
@@ -69,6 +74,13 @@ export interface OpencodeDriverDeps {
    * factory builds {@link OpencodeHttpBridge}.
    */
   bridgeFactory?: () => OpencodeHttpBridge
+  /**
+   * AcpServer reference used to send outbound permission +
+   * AskUserQuestion RPCs. Optional so unit tests that exercise the
+   * driver without a wire surface keep working. Production +
+   * integration smokes always provide it.
+   */
+  server?: AcpServerLike
 }
 
 /**
@@ -91,6 +103,12 @@ interface OpencodeSessionState {
    */
   handle: OpencodeHttpBridgeHandle
   /**
+   * Reverse MCP name map produced by `buildOpencodeMcpAdds` so the
+   * event-mapper can resolve `<sanitizedServer>_<tool>` keys back to
+   * the canonical `mcp__<server>__<tool>` shape.
+   */
+  mcpReverseMap: Map<string, string>
+  /**
    * Snapshot of cwd / mcpServers / model so future loadSession or
    * fork calls have a baseline to merge against.
    */
@@ -104,6 +122,14 @@ interface OpencodeSessionState {
    * SDK prompt call.
    */
   activePromptController?: AbortController
+  /**
+   * One-shot latch for `model_advertisement`. The driver emits the
+   * event the first time prompt() runs against this session so the
+   * orchestrator can stamp the session row's model field; later
+   * prompts skip re-advertising the same model unless the orchestrator
+   * passes a per-turn override.
+   */
+  modelAdvertised?: boolean
 }
 
 /**
@@ -172,18 +198,35 @@ export class OpencodeDriver implements BackendDriver {
 
     // 3. Create the opencode session via the v1 session API. Returns
     //    a server-allocated session id (`ses_...`) we cache for
-    //    prompt / cancel routing. Future tasks layer model / permission
-    //    rules / per-session config; T3 keeps the create call minimal.
-    const createResult = await handle.sdk.session.create({})
+    //    prompt / cancel routing. The `permission` ruleset comes from
+    //    the policy translator (D5); when the orchestrator omits
+    //    toolPolicy the ruleset is empty and opencode falls back to
+    //    its own per-tool ask flow.
+    const ruleset = buildOpencodeRuleset(params.toolPolicy)
+    const createParams: Record<string, unknown> = {}
+    if (ruleset.length > 0) {
+      createParams.permission = ruleset
+    }
+    const createResult = await handle.sdk.session.create(createParams)
     const opencodeSessionId = this.extractSessionId(createResult)
 
-    // 4. Persist driver-internal state. Orchestrator only sees the
+    // 4. Inject MCP servers via per-session add(). Returns the reverse
+    //    name map so subsequent prompt() calls can translate
+    //    `<sanitizedServer>_<tool>` event names back to canonical
+    //    `mcp__<server>__<tool>` (D6).
+    const mcpAdds = buildOpencodeMcpAdds(params.mcpServers)
+    for (const entry of mcpAdds.adds) {
+      await this.tryAddMcpServer(handle, opencodeSessionId, entry.name, entry.config).catch(() => undefined)
+    }
+
+    // 5. Persist driver-internal state. Orchestrator only sees the
     //    Kodizm sessionId; opencode's id stays inside the driver.
     this.sessions.set(sessionId, {
       sessionId,
       bridge,
       opencodeSessionId,
       handle,
+      mcpReverseMap: mcpAdds.reverseMap,
       configSnapshot: {
         cwd: params.cwd,
         ...(params.model === undefined ? {} : { model: params.model }),
@@ -191,6 +234,28 @@ export class OpencodeDriver implements BackendDriver {
     })
 
     return { sessionId }
+  }
+
+  /**
+   * Best-effort MCP add via opencode's mcp/add HTTP endpoint. Older
+   * builds expose the call differently; the catch-all in newSession
+   * means an unsupported add does not crash session create.
+   */
+  private async tryAddMcpServer(
+    handle: OpencodeHttpBridgeHandle,
+    opencodeSessionId: string,
+    name: string,
+    config: { type: 'remote'; url: string; headers?: Record<string, string> },
+  ): Promise<void> {
+    const mcpApi = handle.sdk.mcp as unknown as {
+      add?: (params: unknown) => Promise<unknown>
+    }
+    if (typeof mcpApi.add !== 'function') return
+    await mcpApi.add({
+      name,
+      body: config,
+      sessionID: opencodeSessionId,
+    })
   }
 
   public async prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult> {
@@ -207,19 +272,43 @@ export class OpencodeDriver implements BackendDriver {
     const eventMapper = new OpencodeEventMapper({
       sessionId,
       emit: (e) => emit.send(e),
-      mcpReverseMap: new Map(),
+      mcpReverseMap: state.mcpReverseMap,
     })
 
     // 3. Subscribe to the SSE event stream + dispatch in parallel
     //    with the prompt RPC. The dispatch loop resolves on
-    //    isTurnComplete() OR on signal abort.
+    //    isTurnComplete() OR on signal abort. Permission + question
+    //    bridges fire only when the orchestrator wired a server ref;
+    //    otherwise opencode's own UI prompts continue to handle them.
+    const server = this.deps.server
     const subscriptionPromise = this.runEventLoop({
       handle: state.handle,
       controller,
       handlers: {
         onMessageBus: (method, properties) => eventMapper.handle(method, properties),
-        onPermissionAsked: () => undefined,
-        onQuestionAsked: () => undefined,
+        onPermissionAsked: (properties) => {
+          if (server === undefined) return
+          void handleOpencodePermission({
+            params: properties as Parameters<typeof handleOpencodePermission>[0]['params'],
+            server,
+            sessionId,
+            sdk: state.handle.sdk as unknown as Parameters<typeof handleOpencodePermission>[0]['sdk'],
+            emit: { send: (e) => emit.send(e) },
+            signal: controller.signal,
+            mcpReverseMap: state.mcpReverseMap,
+          })
+        },
+        onQuestionAsked: (properties) => {
+          if (server === undefined) return
+          void handleOpencodeQuestion({
+            params: properties as Parameters<typeof handleOpencodeQuestion>[0]['params'],
+            server,
+            sessionId,
+            sdk: state.handle.sdk as unknown as Parameters<typeof handleOpencodeQuestion>[0]['sdk'],
+            emit: { send: (e) => emit.send(e) },
+            signal: controller.signal,
+          })
+        },
         onSessionError: () => undefined,
       },
     })
@@ -232,13 +321,35 @@ export class OpencodeDriver implements BackendDriver {
     let failureReason: PromptResult['failureReason']
 
     try {
+      // Per-turn model precedence: PromptRequest.model > session
+      // newSession.model. Either string is canonical
+      // 'providerID/modelID' (D13).
+      const turnModel = params.model ?? state.configSnapshot.model
+
+      // One-shot model_advertisement at first prompt with a known
+      // model (or when the per-turn override changes it). Mirrors the
+      // codex driver's modelAdvertised latch.
+      if (turnModel !== undefined && state.modelAdvertised !== true) {
+        state.modelAdvertised = true
+        emit.send({
+          sessionId,
+          type: 'model_advertisement',
+          model: turnModel,
+        })
+      }
       await this.sendPrompt({
         handle: state.handle,
         opencodeSessionId: state.opencodeSessionId,
         text: promptText,
+        model: turnModel,
         signal: controller.signal,
       })
-      await subscriptionPromise
+      // Turn is done at the SDK level. Give the SSE loop a tiny grace
+      // window so any tail events that arrive between SDK resolve and
+      // the message.updated frame still flow through; then abort.
+      await Promise.race([subscriptionPromise, new Promise<void>((resolve) => setTimeout(resolve, 750))])
+      controller.abort()
+      await subscriptionPromise.catch(() => undefined)
     } catch (err) {
       if (controller.signal.aborted) {
         stopReason = 'cancelled'
@@ -310,27 +421,53 @@ export class OpencodeDriver implements BackendDriver {
     handle: OpencodeHttpBridgeHandle
     opencodeSessionId: string
     text: string
+    model: string | undefined
     signal: AbortSignal
   }): Promise<void> {
-    const v2Session = (
-      args.handle.sdk as unknown as { v2?: { session?: { prompt?: (p: unknown) => Promise<unknown> } } }
-    ).v2?.session
-    if (v2Session?.prompt !== undefined) {
-      await v2Session.prompt({
-        sessionID: args.opencodeSessionId,
-        prompt: { parts: [{ type: 'text', text: args.text }] },
-      })
-      return
+    const v1Session = args.handle.sdk.session as unknown as {
+      prompt?: (params: unknown) => Promise<{ data?: unknown; error?: unknown }>
+    }
+    if (v1Session.prompt === undefined) {
+      throw new Error('opencode SDK session.prompt is not available on this build')
     }
 
-    const v1Session = args.handle.sdk.session as unknown as {
-      message?: (params: unknown) => Promise<unknown>
+    // Build the v1 SessionPromptParams: parts array + optional model
+    // tuple (providerID + modelID). The canonical wire model is
+    // 'providerID/modelID' (D13); split on the first '/' before
+    // forwarding.
+    const promptParams: Record<string, unknown> = {
+      sessionID: args.opencodeSessionId,
+      parts: [{ type: 'text', text: args.text }],
     }
-    if (v1Session.message !== undefined) {
-      await v1Session.message({
-        sessionID: args.opencodeSessionId,
-        body: { parts: [{ type: 'text', text: args.text }] },
-      })
+    const parsedModel = this.parseCanonicalModel(args.model)
+    if (parsedModel !== undefined) {
+      promptParams.model = parsedModel
+    }
+
+    const result = await v1Session.prompt(promptParams)
+    if (result?.error !== undefined && this.errorEnvelopeIsNonEmpty(result.error)) {
+      throw new Error(`opencode session.prompt error: ${JSON.stringify(result.error).slice(0, 200)}`)
+    }
+  }
+
+  private errorEnvelopeIsNonEmpty(error: unknown): boolean {
+    if (error === null || typeof error !== 'object') return false
+    return Object.keys(error as Record<string, unknown>).length > 0
+  }
+
+  /**
+   * Split canonical 'providerID/modelID' into the {providerID, modelID}
+   * shape opencode's session.prompt accepts. Returns undefined when
+   * the orchestrator omitted model (opencode falls back to its
+   * provider default).
+   */
+  private parseCanonicalModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
+    if (model === undefined || model === '') return undefined
+    const slash = model.indexOf('/')
+    if (slash <= 0 || slash === model.length - 1) return undefined
+    return {
+      providerID: model.slice(0, slash),
+      modelID: model.slice(slash + 1),
     }
   }
 
@@ -412,6 +549,7 @@ export class OpencodeDriver implements BackendDriver {
       bridge,
       opencodeSessionId: meta.opencodeSessionId,
       handle,
+      mcpReverseMap: new Map(),
       configSnapshot: { cwd: params.cwd },
     })
 
@@ -449,6 +587,7 @@ export class OpencodeDriver implements BackendDriver {
       bridge: source.bridge,
       opencodeSessionId: forkedOpencodeId,
       handle: source.handle,
+      mcpReverseMap: source.mcpReverseMap,
       configSnapshot: {
         cwd: params.cwd,
         ...(params.model === undefined ? {} : { model: params.model }),
@@ -469,6 +608,17 @@ export class OpencodeDriver implements BackendDriver {
       out.set(k, v.opencodeSessionId)
     }
     return out
+  }
+
+  /**
+   * Test helper: expose the per-session bridge handle (URL + SDK
+   * client) so smoke suites can subscribe to opencode bus events
+   * directly while exercising the driver. Production code routes
+   * everything through the driver's internal dispatch and never
+   * needs this. Returns undefined when the session is not active.
+   */
+  public debugHandleFor(sessionId: string): OpencodeHttpBridgeHandle | undefined {
+    return this.sessions.get(sessionId)?.handle
   }
 
   /**

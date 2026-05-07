@@ -186,9 +186,10 @@ export async function handleOpencodeQuestion(args: {
 
 async function safeReply(sdk: OpencodeQuestionSdk, requestId: string, answers: string[][]): Promise<void> {
   try {
+    // SDK shape (`QuestionReplyData`): flat `{requestID, answers}`.
     await sdk.question.reply({
-      id: requestId,
-      body: { answers },
+      requestID: requestId,
+      answers,
     })
   } catch {
     // Best-effort; opencode logs reply failures on its side.
@@ -197,7 +198,7 @@ async function safeReply(sdk: OpencodeQuestionSdk, requestId: string, answers: s
 
 async function safeReject(sdk: OpencodeQuestionSdk, requestId: string): Promise<void> {
   try {
-    await sdk.question.reject({ id: requestId })
+    await sdk.question.reject({ requestID: requestId })
   } catch {
     // Same best-effort policy.
   }

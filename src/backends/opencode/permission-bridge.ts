@@ -195,9 +195,11 @@ async function safeReply(
   body: { reply: 'once' | 'always' | 'reject'; message?: string },
 ): Promise<void> {
   try {
+    // SDK shape (`PermissionReplyData`): flat `{requestID, reply, message?}`.
     await sdk.permission.reply({
-      id: requestId,
-      body,
+      requestID: requestId,
+      reply: body.reply,
+      ...(body.message === undefined ? {} : { message: body.message }),
     })
   } catch {
     // best-effort
