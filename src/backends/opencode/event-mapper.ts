@@ -55,6 +55,8 @@ interface SubagentSlot {
 export class OpencodeEventMapper {
   private readonly partTypes: Map<string, string> = new Map()
   private readonly subagents: Map<string, SubagentSlot> = new Map()
+  private readonly toolBegan: Set<string> = new Set()
+  private readonly toolEnded: Set<string> = new Set()
   private compactingActive = false
 
   public constructor(private readonly options: OpencodeEventMapperOptions) {}
@@ -138,8 +140,14 @@ export class OpencodeEventMapper {
       return
     }
 
-    // 3. Generic tool lifecycle. running -> begin; completed/error -> end.
+    // 3. Generic tool lifecycle. running -> begin (one-shot per callID);
+    //    completed/error -> end (one-shot per callID). opencode emits
+    //    multiple `running` updates as the tool's input record fills
+    //    in, but the canonical wire expects exactly one begin + one
+    //    end per call.
     if (state.status === 'running') {
+      if (this.toolBegan.has(toolPart.callID)) return
+      this.toolBegan.add(toolPart.callID)
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'tool_call_begin',
@@ -151,6 +159,8 @@ export class OpencodeEventMapper {
     }
 
     if (state.status === 'completed' || state.status === 'error') {
+      if (this.toolEnded.has(toolPart.callID)) return
+      this.toolEnded.add(toolPart.callID)
       const isError = state.status === 'error'
       this.options.emit({
         sessionId: this.options.sessionId,

@@ -176,10 +176,10 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
   test(
     'F4 askUserQuestion: model invokes the question tool; ask_user_question RPC fires',
     async () => {
+      const rpcCalls: { method: string; params: unknown }[] = []
       const fakeServer: AcpServerLike = {
-        // Orchestrator deterministically picks the first option so
-        // the smoke loop converges fast.
         request: mock(async (method: string, params: unknown) => {
+          rpcCalls.push({ method, params })
           if (method !== 'session/ask_user_question') return {}
           const p = params as { questions: Array<{ question: string; options: { label: string }[] }> }
           const answers: Record<string, string> = {}
@@ -213,10 +213,11 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
               {
                 type: 'text',
                 text:
-                  'Call the `question` tool exactly once with these arguments: ' +
-                  '{"question": "Pick a color", "header": "Color", "options": ' +
-                  '[{"label": "RED", "description": "the red one"}, ' +
-                  '{"label": "BLUE", "description": "the blue one"}]}. ' +
+                  'You MUST call the `question` tool right now, exactly once, with this JSON: ' +
+                  '{"question":"Pick a color","header":"Color","options":' +
+                  '[{"label":"RED","description":"the red one"},' +
+                  '{"label":"BLUE","description":"the blue one"}]}. ' +
+                  'Do not output any text before invoking the tool. ' +
                   'After receiving the answer, reply with the chosen color in one word.',
               },
             ],
@@ -224,17 +225,21 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
           emit,
         )
 
+        // Strict: the canonical question_request event MUST fire,
+        // the outbound session/ask_user_question RPC MUST hit the
+        // fake orchestrator, and the question MUST carry both options.
         const questionEvent = events.find((e) => e.type === 'question_request')
-        if (questionEvent !== undefined) {
-          const calls = (fakeServer.request as ReturnType<typeof mock>).mock?.calls ?? []
-          expect(calls.length).toBeGreaterThan(0)
-          expect(questionEvent.questions.length).toBeGreaterThan(0)
-        } else {
-          // Some opencode-go variants suppress the question tool unless
-          // a system prompt enables it. Wire shape is verified by the
-          // unit suite (test/unit/backends/opencode/ask-user-question.test.ts).
-          console.warn('[F4] model did not invoke the question tool; verified via unit suite instead')
+        expect(questionEvent).toBeDefined()
+        if (questionEvent?.type !== 'question_request') {
+          throw new Error('question_request event missing')
         }
+        expect(questionEvent.questions.length).toBeGreaterThan(0)
+        const askCalls = rpcCalls.filter((c) => c.method === 'session/ask_user_question')
+        expect(askCalls.length).toBeGreaterThan(0)
+        const askParams = askCalls[0]?.params as { questions: { options: { label: string }[] }[] }
+        const labels = askParams.questions[0]?.options.map((o) => o.label) ?? []
+        expect(labels).toContain('RED')
+        expect(labels).toContain('BLUE')
       } finally {
         await driver.disposeAll()
       }
@@ -243,11 +248,12 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
   )
 
   test(
-    'F5 permission allow: bash gated under ask policy + canonical allow drives execution',
+    'F5 permission allow: bash gated under ask policy + canonical allow drives execution end-to-end',
     async () => {
+      const rpcCalls: { method: string; params: unknown }[] = []
       const fakeServer: AcpServerLike = {
-        // Always allow once so the model loop continues.
-        request: mock(async (method: string) => {
+        request: mock(async (method: string, params: unknown) => {
+          rpcCalls.push({ method, params })
           if (method !== 'session/request_permission') return {}
           return { outcome: { outcome: 'selected', optionId: 'allow' } }
         }),
@@ -259,9 +265,6 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
       })
 
       try {
-        // Explicit toolPolicy.ask=['Bash'] forces opencode to gate
-        // every bash invocation; the bridge translates orchestrator
-        // 'allow' to opencode reply: 'once' so the model continues.
         const session = await driver.newSession({
           cwd: process.cwd(),
           mcpServers: [],
@@ -271,29 +274,57 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver real-LLM smoke (opencode-go/
 
         const { events, emit } = recorder()
 
-        await driver.prompt(
+        const result = await driver.prompt(
           session.sessionId,
           {
             sessionId: session.sessionId,
             prompt: [
               {
                 type: 'text',
-                text: 'Run `echo HELLO_FROM_BASH` using the bash tool. Then reply with the captured output.',
+                text:
+                  'You MUST run this command using the bash tool: `echo HELLO_FROM_BASH`. ' +
+                  'After the tool finishes, reply with the captured stdout in plain text.',
               },
             ],
           },
           emit,
         )
 
-        const permEvent = events.find((e) => e.type === 'permission_request')
-        if (permEvent !== undefined) {
-          expect(permEvent.name.toLowerCase()).toContain('bash')
-          const calls = (fakeServer.request as ReturnType<typeof mock>).mock?.calls ?? []
-          expect(calls.length).toBeGreaterThan(0)
-        } else {
-          // The model may decline to run bash; the unit suite pins the
-          // bridge contract regardless.
-          console.warn('[F5] permission did not fire (model declined bash); unit suite covers wire shape')
+        // Strict: permission_request fires, the bridge sends
+        // session/request_permission to the orchestrator, exactly one
+        // tool_call_begin + tool_call_end pair fires for bash, and the
+        // tool_call_end's result captures the actual `echo` stdout
+        // (deepseek-v4-flash sometimes ends the turn after the tool
+        // result without producing reply text, so we assert on the
+        // tool result rather than output_chunk).
+        expect(result.stopReason).toBe('end_turn')
+
+        const permEvents = events.filter((e) => e.type === 'permission_request')
+        expect(permEvents.length).toBe(1)
+        const permEvent = permEvents[0]
+        if (permEvent?.type !== 'permission_request') {
+          throw new Error('permission_request event missing')
+        }
+        expect(permEvent.name.toLowerCase()).toContain('bash')
+        const permCalls = rpcCalls.filter((c) => c.method === 'session/request_permission')
+        expect(permCalls.length).toBeGreaterThan(0)
+
+        const beginEvents = events.filter((e) => e.type === 'tool_call_begin')
+        expect(beginEvents.length).toBe(1)
+        const begin = beginEvents[0]
+        if (begin?.type === 'tool_call_begin') {
+          expect(begin.name.toLowerCase()).toContain('bash')
+          const input = begin.input as { command?: string }
+          expect(input.command).toContain('echo HELLO_FROM_BASH')
+        }
+
+        const endEvents = events.filter((e) => e.type === 'tool_call_end')
+        expect(endEvents.length).toBe(1)
+        const end = endEvents[0]
+        if (end?.type === 'tool_call_end') {
+          expect(end.isError).toBe(false)
+          const result = typeof end.result === 'string' ? end.result : ''
+          expect(result).toContain('HELLO_FROM_BASH')
         }
       } finally {
         await driver.disposeAll()
