@@ -486,7 +486,46 @@ export class CodexDriver implements BackendDriver {
     let cachedAnswerSlot = resumeAnswer
     if (this.deps.server !== undefined) {
       const server = this.deps.server
-      state.process.onServerRequest(async (method, params) => {
+      state.process.onServerRequest(async (rawMethod, rawParams) => {
+        // Legacy alias: pre-v2 codex emits `applyPatchApproval` /
+        // `execCommandApproval` with conversationId+callId shape.
+        // Rewrite to v2 method + params shape so the single approval
+        // pipeline handles both.
+        let method = rawMethod
+        let params = rawParams
+        if (rawMethod === 'applyPatchApproval') {
+          method = 'item/fileChange/requestApproval'
+          const p = rawParams as {
+            conversationId?: string
+            callId?: string
+            fileChanges?: Record<string, unknown>
+            reason?: string | null
+          }
+          params = {
+            threadId: p.conversationId,
+            itemId: p.callId,
+            files: p.fileChanges === undefined ? [] : Object.keys(p.fileChanges),
+            reason: p.reason ?? undefined,
+          }
+        } else if (rawMethod === 'execCommandApproval') {
+          method = 'item/commandExecution/requestApproval'
+          const p = rawParams as {
+            conversationId?: string
+            callId?: string
+            approvalId?: string | null
+            command?: ReadonlyArray<string>
+            cwd?: string
+            reason?: string | null
+          }
+          params = {
+            threadId: p.conversationId,
+            itemId: p.callId,
+            approvalId: p.approvalId ?? null,
+            command: p.command === undefined ? '' : p.command.join(' '),
+            cwd: p.cwd,
+            reason: p.reason ?? undefined,
+          }
+        }
         if (
           method === 'item/commandExecution/requestApproval' ||
           method === 'item/fileChange/requestApproval' ||
@@ -542,6 +581,134 @@ export class CodexDriver implements BackendDriver {
             emit,
             signal: abortController.signal,
           })
+        }
+        if (method === 'mcpServer/elicitation/request') {
+          // Codex bubbles MCP server elicit (form / url) to the client.
+          // Collapse to canonical question_request with a single
+          // Accept/Decline/Cancel question; codex's action enum maps
+          // 1:1 with the option ids.
+          const elicit = params as {
+            threadId?: string
+            turnId?: string | null
+            serverName?: string
+            mode?: 'form' | 'url'
+            message?: string
+            url?: string
+            elicitationId?: string
+          }
+          const toolUseId = elicit.elicitationId ?? `mcp-elicit-${elicit.serverName ?? 'unknown'}-${Date.now()}`
+          const headerLabel = (elicit.serverName ?? 'mcp').slice(0, 12)
+          emit.send({
+            sessionId,
+            type: 'question_request',
+            toolUseId,
+            questions: [
+              {
+                question: elicit.message ?? `${elicit.serverName ?? 'MCP'} requested input`,
+                header: headerLabel,
+                multiSelect: false,
+                options: [
+                  {
+                    label: 'Accept',
+                    description:
+                      elicit.mode === 'url' ? `Allow URL: ${elicit.url ?? ''}` : 'Provide the requested form input.',
+                  },
+                  { label: 'Decline', description: 'Refuse this elicitation.' },
+                  { label: 'Cancel', description: 'Cancel this elicitation; continue without an answer.' },
+                ],
+              },
+            ],
+          })
+          try {
+            const response = await server.request<{ answers?: Record<string, string> }>('session/ask_user_question', {
+              sessionId,
+              toolUseId,
+              questions: [
+                {
+                  question: elicit.message ?? `${elicit.serverName ?? 'MCP'} requested input`,
+                  header: headerLabel,
+                  multiSelect: false,
+                  options: [
+                    { label: 'Accept', description: 'Provide the requested form input.' },
+                    { label: 'Decline', description: 'Refuse this elicitation.' },
+                    { label: 'Cancel', description: 'Cancel this elicitation; continue without an answer.' },
+                  ],
+                },
+              ],
+            })
+            const answer = Object.values(response?.answers ?? {})[0] ?? 'Decline'
+            const action = answer === 'Accept' ? 'accept' : answer === 'Cancel' ? 'cancel' : 'decline'
+            return { action, content: null, _meta: null }
+          } catch {
+            return { action: 'decline', content: null, _meta: null }
+          }
+        }
+        if (method === 'item/tool/call') {
+          // Codex orchestrator-hosted dynamic tool. Forward to canonical
+          // session/dynamic_tool_call so the orchestrator can route to
+          // its tool registry. Driver returns the orchestrator's answer
+          // verbatim. If the orchestrator can't handle, return a
+          // structured failure so codex unwinds.
+          const dyn = params as {
+            threadId?: string
+            turnId?: string
+            callId: string
+            namespace?: string | null
+            tool: string
+            arguments: unknown
+          }
+          try {
+            const response = await server.request<{
+              contentItems?: ReadonlyArray<unknown>
+              success?: boolean
+            }>('session/dynamic_tool_call', {
+              sessionId,
+              callId: dyn.callId,
+              namespace: dyn.namespace ?? null,
+              tool: dyn.tool,
+              arguments: dyn.arguments,
+            })
+            return {
+              contentItems: response?.contentItems ?? [],
+              success: response?.success ?? false,
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'orchestrator did not handle dynamic tool'
+            return {
+              contentItems: [{ type: 'text', text: `[kodizm-acp] ${message}` }],
+              success: false,
+            }
+          }
+        }
+        if (method === 'account/chatgptAuthTokens/refresh') {
+          // Codex notices the chatgpt access token is stale. Forward
+          // to orchestrator (Laravel side rotates the token from its
+          // record). When the orchestrator declines or has no
+          // implementation, codex falls back to its built-in OAuth
+          // flow (which would prompt on stderr; not a crash path).
+          const refresh = params as { reason?: string; previousAccountId?: string | null }
+          try {
+            const response = await server.request<{
+              accessToken?: string
+              chatgptAccountId?: string
+              chatgptPlanType?: string | null
+            }>('session/codex_chatgpt_token_refresh', {
+              sessionId,
+              reason: refresh.reason,
+              previousAccountId: refresh.previousAccountId ?? null,
+            })
+            if (response?.accessToken !== undefined && response.chatgptAccountId !== undefined) {
+              return {
+                accessToken: response.accessToken,
+                chatgptAccountId: response.chatgptAccountId,
+                chatgptPlanType: response.chatgptPlanType ?? null,
+              }
+            }
+          } catch {
+            // fall through to codex's fallback
+          }
+          // Returning null tells codex to fall back to its own refresh.
+          return null
         }
         return undefined
       })
@@ -789,6 +956,79 @@ export class CodexDriver implements BackendDriver {
       await state.process.kill()
     }
     this.sessions.delete(request.sessionId)
+  }
+
+  /**
+   * Phase 2 cross-process Pattern B helper. Spawns a fresh codex
+   * subprocess + recreates {@link CodexSessionState} for an existing
+   * sessionId so a Process B can pick up where Process A left off.
+   *
+   * This is the lifecycle the orchestrator drives when the original
+   * driver instance has died (container restart, deploy, machine
+   * shutdown) and a new driver needs to consume a deferred answer or
+   * keep streaming on the same Kodizm sessionId.
+   *
+   * The orchestrator persists `(codexThreadId, codexJsonlPath)`
+   * alongside the deferred record; on resume it calls this method
+   * with the same sessionId. We initialize a new subprocess, send
+   * `thread/resume` with the captured threadId, and seat the session
+   * in `this.sessions` so subsequent `prompt()` / `loadSession()` /
+   * `cancel()` calls succeed without `SessionNotFoundError`.
+   *
+   * @returns the same sessionId echoed back (matches NewSessionResult
+   *   for caller convenience)
+   */
+  public async hydrateSession(params: {
+    sessionId: string
+    codexThreadId: string
+    codexJsonlPath?: string
+    cwd: string
+    mcpServers: NewSessionRequest['mcpServers']
+    additionalDirectories?: NewSessionRequest['additionalDirectories']
+    toolPolicy?: NewSessionRequest['toolPolicy']
+    permissionDeferTimeoutMs?: number
+    heartbeatIntervalMs?: number
+    inactivityThresholdMs?: number
+  }): Promise<NewSessionResult> {
+    if (this.sessions.has(params.sessionId)) {
+      throw new Error(`hydrateSession: session ${params.sessionId} already seated`)
+    }
+
+    // 1. Build temp config + spawn fresh subprocess (mirrors newSession).
+    const configPath = await buildCodexConfigToml({
+      sessionId: params.sessionId,
+      dir: this.configDir,
+      mcpServers: params.mcpServers,
+    })
+    const proc = await this.spawnFactory({ configPath })
+    await proc.initialize({ protocolVersion: 1 })
+
+    // 2. Resume the codex thread from disk via thread/resume + threadId.
+    const response = await proc.request<{ thread: { id: string; path?: string }; model?: string }>('thread/resume', {
+      threadId: params.codexThreadId,
+    })
+
+    // 3. Seat the session record so prompt() / cancel() / loadSession()
+    //    all behave as if newSession had run on this driver.
+    this.sessions.set(params.sessionId, {
+      sessionId: params.sessionId,
+      codexThreadId: response.thread.id,
+      ...(response.thread.path === undefined
+        ? params.codexJsonlPath === undefined
+          ? {}
+          : { codexJsonlPath: params.codexJsonlPath }
+        : { codexJsonlPath: response.thread.path }),
+      process: proc,
+      configPath,
+      ...(params.heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs: params.heartbeatIntervalMs }),
+      ...(params.inactivityThresholdMs === undefined ? {} : { inactivityThresholdMs: params.inactivityThresholdMs }),
+      ...(response.model === undefined ? {} : { codexModel: response.model }),
+      ...(params.permissionDeferTimeoutMs === undefined
+        ? {}
+        : { permissionDeferTimeoutMs: params.permissionDeferTimeoutMs }),
+    })
+
+    return { sessionId: params.sessionId }
   }
 
   public async loadSession(params: LoadSessionRequest): Promise<NewSessionResult> {

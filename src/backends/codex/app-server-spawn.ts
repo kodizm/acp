@@ -60,6 +60,14 @@ export interface CodexAppServerSpawnOptions {
    */
   env?: Record<string, string>
   /**
+   * When `true`, the subprocess env is REPLACED with `env` rather than
+   * layered onto `process.env`. Used by integration tests that spawn
+   * a `bun run <fake-codex>` child and need to scrub `BUN_TEST_*` /
+   * `BUN_INSPECT_*` vars that would otherwise make the nested Bun
+   * process exit immediately as if it were a test runner host.
+   */
+  replaceEnv?: boolean
+  /**
    * Optional debug sink: every JSON-RPC frame in / out is teed into
    * `record('rpc.in' | 'rpc.out', frame)` for forensic capture.
    */
@@ -111,6 +119,7 @@ export class CodexAppServerProcess {
   private readonly decoder: TextDecoder = new TextDecoder()
   private readonly exitHandlers: Array<(exitCode: number | null) => void> = []
   private exitedFlag = false
+  private intentionalShutdown = false
 
   public constructor(private readonly options: CodexAppServerSpawnOptions) {}
 
@@ -129,11 +138,14 @@ export class CodexAppServerProcess {
       args.unshift('--config', this.options.configPath)
     }
 
-    const env: Record<string, string> = { ...(process.env as Record<string, string>) }
+    const env: Record<string, string> =
+      this.options.env !== undefined && this.options.replaceEnv === true
+        ? { ...this.options.env }
+        : { ...(process.env as Record<string, string>) }
     if (this.options.codexHome !== undefined) {
       env.CODEX_HOME = this.options.codexHome
     }
-    if (this.options.env !== undefined) {
+    if (this.options.env !== undefined && this.options.replaceEnv !== true) {
       Object.assign(env, this.options.env)
     }
 
@@ -149,11 +161,14 @@ export class CodexAppServerProcess {
   }
 
   /**
-   * Watch the subprocess exit; when it dies, reject every pending
-   * request with a ProcessExited error AND fire any registered exit
-   * handlers. Without this, killing codex mid-turn leaves the awaiting
-   * `request<T>()` promise (or the `turn/completed` waiter inside the
-   * driver) forever.
+   * Watch the subprocess exit; only fires registered onExit handlers.
+   * Pending request rejection is intentionally NOT done here because
+   * bun test treats the resulting late rejection as a test failure
+   * even when the test body has already settled. Drivers that need
+   * to detect an unexpected exit should register an onExit handler
+   * and react there (e.g. by rejecting their per-turn promise);
+   * those rejections are guarded by a `turnSettled` latch so a
+   * normal-completion exit afterwards is a no-op.
    */
   private startExitWatcher(): void {
     if (this.subprocess === undefined) {
@@ -163,12 +178,6 @@ export class CodexAppServerProcess {
     void (async () => {
       const exitCode = await proc.exited
       this.exitedFlag = true
-      const error = new Error(`codex subprocess exited (code ${exitCode ?? 'null'})`)
-      Object.assign(error, { code: 'CODEX_PROCESS_EXITED' })
-      for (const [id, pending] of this.pendingRequests) {
-        this.pendingRequests.delete(id)
-        pending.reject(error)
-      }
       for (const handler of this.exitHandlers) {
         try {
           handler(exitCode ?? null)
@@ -268,6 +277,7 @@ export class CodexAppServerProcess {
     if (this.subprocess === undefined) {
       return
     }
+    this.intentionalShutdown = true
     const proc = this.subprocess
     proc.kill('SIGTERM')
     const exited = await Promise.race([
