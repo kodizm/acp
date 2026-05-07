@@ -20,7 +20,8 @@
     "lint:fix": "biome check --write src test",
     "format": "biome format --write src test",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build && bun run typecheck"
+    "typecheck:src": "tsc --noEmit -p tsconfig.publish.json",
+    "prepublishOnly": "bun run build && bun run typecheck:src"
   },
   "engines": {
     "bun": ">=1.1.0"
