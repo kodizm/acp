@@ -230,16 +230,28 @@ async function buildClaudeBackend(): Promise<{
 
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.0' },
+    agentInfo: { version: '0.5.1' },
     sdk: {
       // Real-SDK adapter: forwards prompt + options to the SDK's
-      // query() iterator. Production runs do NOT inject
-      // `settingSources: []` (tests do, to isolate from the dev's
-      // ~/.claude/settings.json); the orchestrator has full control
-      // over the session config it ships.
+      // query() iterator. Force `settingSources: []` so the SDK does
+      // not read the container-baked /home/agent/.claude/settings.json
+      // (which carries Kodizm's curated CC defaults: hooks, model,
+      // enabledPlugins, etc.) — those defaults are meant for when a
+      // human runs Claude Code interactively. The orchestrator owns
+      // the session config it ships through `session/new`; layering
+      // a stale settings.json on top creates surprising hangs (the
+      // SDK can wait on hooks the container has not provisioned).
       // biome-ignore lint/suspicious/useAwait: AsyncGenerator wrapper requires async signature
       async *query(args) {
-        for await (const message of sdk.query(args as never)) {
+        const optsIn = (args as { options?: unknown }).options as Record<string, unknown> | undefined
+        const isolated = {
+          prompt: (args as { prompt: unknown }).prompt,
+          options: {
+            ...(optsIn ?? {}),
+            settingSources: [],
+          },
+        }
+        for await (const message of sdk.query(isolated as never)) {
           yield message as never
         }
       },
