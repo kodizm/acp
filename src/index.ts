@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 /**
  * kodizm-acp bin entrypoint.
  *
