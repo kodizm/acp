@@ -1,36 +1,41 @@
 # kodizm-acp
 
-Kodizm runtime's ACP bridge. One protocol controls Claude Code, opencode, and codex CLIs under the same canonical surface, so the orchestrator wires every backend the same way: token rollup, model selection, system prompt replace + append, additional directories, MCP server injection, skill injection, file upload, thinking + output + tool streaming, subagent observability, resume + fork, permission + AskUserQuestion, deferred-permission lifecycle (Pattern B), debug capture, heartbeat liveness, structured failure events.
+Kodizm runtime's ACP bridge. One protocol controls Claude Code and codex CLIs (opencode arrives in Phase 3) under a single canonical surface, so the orchestrator wires every backend the same way: token rollup, model selection, system prompt replace + append, additional directories, MCP server injection, skill injection, image content blocks, thinking + output + tool streaming, subagent observability, resume + fork, permission + AskUserQuestion, MCP elicitation, dynamic tool dispatch, chatgpt token refresh, deferred-permission lifecycle (Pattern B incl. cross-process resume), debug capture, heartbeat liveness, structured failure events.
 
 Status: Phase 1, 1.5, 1.6, 1.7, 2 complete (Claude + codex backends ship). Opencode (Phase 3) inherits the canonical seam unchanged.
 
 ## Backend parity matrix
 
-Every Phase 1 / 1.5 / 1.6 / 1.7 surface is wired identically across the two shipping backends. The orchestrator does not branch on backend; the same canonical wire shape carries every feature.
+Every Phase 1 / 1.5 / 1.6 / 1.7 / 2 surface is wired identically across the two shipping backends. The orchestrator does not branch on backend; the same canonical wire shape carries every feature.
 
 | Feature | Claude | Codex |
 |---------|--------|-------|
 | `session/new` + `session/load` + `session/fork` + `session/cancel` | yes | yes |
 | `session/prompt` text content blocks | yes | yes |
-| `session/prompt` image / document blocks | yes | text only (codex `UserInput::Image` plumbing landed in follow-up) |
+| `session/prompt` image content blocks (`{ type: 'image', uri: 'file://...' \| 'http(s)://...' }`) | yes | yes (mapped to `localImage` / `image` UserInput) |
 | Token + cost rollup (`usage` event) | yes | yes |
-| Model selection (`model` field + `model_advertisement` event) | yes | yes |
-| `additionalDirectories` -> sandbox | yes (SDK) | yes (`SandboxPolicy.WorkspaceWrite.writable_roots`) |
-| `mcpServers` inline injection | yes (SDK options) | yes (temp `config.toml` + `--config`) |
-| `systemPrompt` replace / append | yes | yes (codex `instructions` + `developer_instructions`) |
-| `skills` pre-load + `skill_activation` events | yes (`skillEvents: true`) | n/a (`skillEvents: false`; codex has no skill loader) |
-| `toolPolicy.defaultMode` (5 enum) | yes | yes (best-effort 5x5 mapping) |
+| Model selection (`model` field + `model_advertisement` event) | yes | yes (api-key auth honors override; chatgpt-mode keeps default) |
+| `additionalDirectories` -> sandbox | yes (SDK) | yes (`SandboxPolicy.WorkspaceWrite.writableRoots`) |
+| `mcpServers` inline injection | yes (SDK options) | yes (CODEX_HOME `config.toml` + `[mcp_servers.*]`) |
+| `systemPrompt` replace / append | yes | yes (codex `baseInstructions` / `developerInstructions`) |
+| `skills` pre-load + `skill_activation` events | yes (`skillEvents: true`) | n/a (codex has no skill loader) |
+| `toolPolicy.defaultMode` (5 enum) | yes | yes |
 | `toolPolicy.allow` / `deny` / `ask` | yes (SDK rules) | yes (sandbox + permission profile) |
-| `autoCompact` on/off | yes (`DISABLE_AUTO_COMPACT=1`) | server-side default; flag pass-through to codex |
+| `autoCompact` on/off | yes (`DISABLE_AUTO_COMPACT=1`) | yes (codex respects `model_auto_compact_token_limit`) |
 | `permission_request` event + `session/request_permission` RPC | yes | yes (3 codex RPCs collapse to one canonical) |
-| `question_request` + `session/ask_user_question` RPC | yes | n/a (codex's user-prompt scenarios surface through approval RPCs) |
+| Legacy `applyPatchApproval` + `execCommandApproval` | n/a | yes (auto-aliased to v2 `item/*/requestApproval` shape) |
+| `question_request` + `session/ask_user_question` RPC | yes (AskUserQuestion tool) | yes (`item/tool/requestUserInput` + `mcpServer/elicitation/request` both feed in) |
+| `session/dynamic_tool_call` (orchestrator-hosted tools) | n/a | yes (codex `item/tool/call`) |
+| `session/codex_chatgpt_token_refresh` | n/a | yes (codex `account/chatgptAuthTokens/refresh`) |
 | `permission_deferred` + `permission_resumed` events (Pattern B) | yes | yes |
+| Cross-process Pattern B (`hydrateSession()` API) | yes | yes |
 | `session/permission_deferred_persist` + `session/permission_deferred_state` RPCs | yes | yes |
-| Pattern B JSONL injection | `~/.claude/projects/.../<sessionId>.jsonl` | `~/.codex/sessions/rollout-*-<threadId>.jsonl` (resume-by-path) |
+| Pattern B JSONL injection | `~/.claude/projects/.../<sessionId>.jsonl` | `~/.codex/sessions/rollout-*-<threadId>.jsonl` (resume-by-threadId) |
 | `compaction_started` + `compaction_completed` events | yes | yes (`ContextCompaction` item lifecycle) |
-| `subagent_spawn` + `subagent_complete` events | yes (Task tool) | yes (`CollabAgentToolCall`) |
+| `subagent_spawn` + `subagent_complete` events | yes (Task tool) | yes (`CollabAgentToolCall`; chatgpt-mode tier-gated) |
 | `tool_call_begin` / `progress` / `end` events | yes | yes (CommandExecution / FileChange / McpToolCall) |
-| `output_chunk` + `thinking_chunk` events | yes | yes |
+| `output_chunk` event | yes | yes |
+| `thinking_chunk` event | yes | yes (`item/reasoning/summaryTextDelta` + `item/reasoning/textDelta`) |
 | `debug_log` (9 stages) + per-session toggle | yes | yes |
 | `heartbeat` event | yes | yes |
 | `session_failed` event + 7-value reason enum | yes | yes |
@@ -50,13 +55,14 @@ bun build src/index.ts --target=bun --outdir=dist
 | Variable | Description |
 |----------|-------------|
 | `KODIZM_BACKEND` | `claude` (Phase 1) / `codex` (Phase 2) / `opencode` (Phase 3, planned) |
-| `CODEX_API_KEY` or `OPENAI_API_KEY` | codex backend auth |
+| `CODEX_API_KEY` or `OPENAI_API_KEY` | codex backend api-key auth (alternative to chatgpt OAuth) |
+| `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CODE_REMOTE=1` | Subscription auth |
+| `ANTHROPIC_API_KEY` | API key auth (fallback) |
 | `KODIZM_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. Default `info` |
 | `KODIZM_DEBUG` | `1` enables process-wide debug capture |
 | `KODIZM_DEBUG_DIR` | Forensic JSONL dir, default `/tmp/kodizm-debug` |
 | `KODIZM_DEBUG_RAW_SECRETS` | `1` disables allow-list redaction (incident-only) |
-| `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CODE_REMOTE=1` | Subscription auth |
-| `ANTHROPIC_API_KEY` | API key auth (fallback) |
+| `KODIZM_ACP_FORWARD_STDERR` | `1` tees codex subprocess stderr to parent stderr (diagnosis) |
 
 Stdout is reserved for ACP frames. Never log to stdout.
 
@@ -210,7 +216,7 @@ await driver.cancel({ sessionId })
 
 ### `CodexDriver`
 
-Identical contract; just import the codex driver instead. The orchestrator does not branch on backend, every wire shape from `NewSessionRequest` down through `SessionUpdateEvent` is the same.
+Identical contract; just import the codex driver instead. The orchestrator does not branch on backend; every wire shape from `NewSessionRequest` down through `SessionUpdateEvent` is the same.
 
 ```ts
 import { CodexDriver } from '@/backends/codex/driver.ts'
@@ -226,7 +232,7 @@ const driver = new CodexDriver({
     await proc.spawn()
     return proc
   },
-  server,           // for outbound canonical permission RPCs
+  server,           // for outbound canonical permission / ask / dynamic-tool / token-refresh RPCs
   deferredStore,    // optional Pattern B store
 })
 
@@ -236,6 +242,7 @@ const { sessionId } = await driver.newSession({
     { type: 'http', name: 'kodizm', url: 'https://kodizm.com/mcp/internal' },
   ],
   toolPolicy: { defaultMode: 'default' },
+  systemPrompt: { append: 'Always respond in Turkish.' },
   permissionDeferTimeoutMs: 1_800_000,
   debug: true,
   heartbeatIntervalMs: 10_000,
@@ -244,12 +251,37 @@ const { sessionId } = await driver.newSession({
 ```
 
 The driver:
-- spawns one `codex app-server --config <temp.toml> --listen stdio://` subprocess per session
-- maps canonical `permissionMode` 5-enum to codex's `AskForApproval` (`untrusted` / `on-failure` / `on-request` / `never`) + pairs `plan` mode with `ReadOnly` sandbox
-- collapses codex's 3 native approval RPCs (`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`) into one canonical `permission_request` event with `name` discriminator (`codex_exec` / `codex_apply_patch` / `codex_permission_grant`)
-- maps codex `ContextCompaction` items to canonical `compaction_started` / `compaction_completed`
-- maps codex `CollabAgentToolCall` items to canonical `subagent_spawn` / `subagent_complete` (parent `sessionId` + fresh Kodizm `childId`; codex thread ids never leak)
-- writes Pattern B sentinel as `RolloutItem` line + resumes via `thread/resume { path }`
+- spawns one `codex app-server --listen stdio://` subprocess per session (no `--config <path>` flag in app-server mode; per-key overrides via `-c key=value` and `[mcp_servers.*]` via CODEX_HOME's `config.toml`).
+- maps canonical `permissionMode` 5-enum to codex's `AskForApproval` (`untrusted` / `on-failure` / `on-request` / `never`) + pairs `plan` mode with `ReadOnly` sandbox.
+- maps canonical `systemPrompt` to codex's `baseInstructions` (string form) or `developerInstructions` (`{ append }` form) per `v2/ThreadStartParams.ts`.
+- forwards canonical image content blocks to codex `UserInput`: `file://` paths and bare absolute paths become `localImage`; `http(s)://` URLs become `image`.
+- collapses 7 codex serverRequest channels onto canonical wire:
+  - 3 approval RPCs (`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`) plus 2 legacy aliases (`applyPatchApproval`, `execCommandApproval`) -> canonical `permission_request` event with `name` discriminator (`codex_exec` / `codex_apply_patch` / `codex_permission_grant`).
+  - `item/tool/requestUserInput` + `mcpServer/elicitation/request` -> canonical `question_request` event + `session/ask_user_question` RPC.
+  - `item/tool/call` -> outbound `session/dynamic_tool_call` RPC.
+  - `account/chatgptAuthTokens/refresh` -> outbound `session/codex_chatgpt_token_refresh` RPC.
+- maps codex `ContextCompaction` items to canonical `compaction_started` / `compaction_completed`.
+- maps codex `CollabAgentToolCall` items to canonical `subagent_spawn` / `subagent_complete` (parent `sessionId` + fresh Kodizm `childId`; codex thread ids never leak).
+- routes codex `item/reasoning/summaryTextDelta` + `item/reasoning/textDelta` to canonical `thinking_chunk` (separate from `output_chunk`).
+- writes Pattern B sentinel as `RolloutItem` line + resumes via `thread/resume { threadId }`.
+
+### `CodexDriver.hydrateSession({ sessionId, codexThreadId, codexJsonlPath?, ... })`
+
+Cross-process Pattern B entry. A fresh driver instance can resume a Kodizm sessionId by replaying codex's `thread/resume` against the persisted threadId. Use this when the original driver instance died (container restart, deploy, machine shutdown) and a new driver needs to consume a deferred-permission cached answer or keep streaming on the same Kodizm `sessionId`.
+
+```ts
+await driverB.hydrateSession({
+  sessionId,                    // same Kodizm sessionId from Process A
+  codexThreadId,                // captured from Process A's session state
+  codexJsonlPath,               // optional; codex glob-resolves from threadId if absent
+  cwd: process.cwd(),
+  mcpServers: [],
+  toolPolicy: { defaultMode: 'default' },
+})
+
+// Process B's first prompt automatically picks up the orchestrator's
+// cached answer from the deferredStore + fires permission_resumed.
+```
 
 ### `NewSessionRequest` schema
 
@@ -394,12 +426,13 @@ timer.start(Date.now())
 timer.stop()
 ```
 
-`ClaudeDriver.prompt()` instantiates one timer per turn when `heartbeatIntervalMs` is set. The inactivity probe runs alongside; when SDK message gap exceeds `inactivityThresholdMs`, the driver emits `session_failed { reason: 'sdk_stall' }` + aborts the per-turn controller.
+`ClaudeDriver.prompt()` and `CodexDriver.prompt()` instantiate one timer per turn when `heartbeatIntervalMs` is set. The inactivity probe runs alongside; when the SDK message gap exceeds `inactivityThresholdMs`, the driver emits `session_failed { reason: 'sdk_stall' }` + aborts the per-turn controller.
 
-### Structured failures (`@/backends/claude/error-classifier`)
+### Structured failures (`@/backends/{claude,codex}/error-classifier`)
 
 ```ts
 import { classifyClaudeError } from '@/backends/claude/error-classifier.ts'
+import { classifyCodexError } from '@/backends/codex/error-classifier.ts'
 import { shouldExitOnReason } from '@/util/exit-policy.ts'
 
 const classified = classifyClaudeError(err)
@@ -471,12 +504,49 @@ const parsed = parseCanonicalPattern('Bash:git commit*')
 | `AcpProtocolError` | -32005 |
 | `BackendStallError` | -32006 |
 
-### Run tests
+## Codex CLI specifics
+
+Codex's app-server protocol drifts from claude's SDK in subtle ways the driver normalizes:
+
+- **Field shape is camelCase v2**: `threadId`, `turnId`, `itemId`, `approvalId`, `cachedInputTokens`, `tokenUsage.total.*`. Pre-v2 snake_case (`thread_id`, `item_id`) and the legacy `conversationId` / `callId` shape from `applyPatchApproval` / `execCommandApproval` are auto-aliased in the approval pipeline.
+- **Item type discriminator is camelCase**: `commandExecution`, `fileChange`, `mcpToolCall`, `contextCompaction`, `collabAgentToolCall`. Driver accepts both `PascalCase` and `camelCase` for forward + back compat.
+- **Reasoning chunks travel on dedicated methods**, NOT via `subtype='reasoning'` on `agentMessage/delta`. The driver routes `item/reasoning/summaryTextDelta` + `item/reasoning/textDelta` to canonical `thinking_chunk`.
+- **`codex app-server` has NO `--config <path>` flag.** To inject `[mcp_servers.*]` etc., set `CODEX_HOME` to a temp dir + write `config.toml` there. Per-key overrides via `-c key=value`.
+- **ChatGPT-mode auth ignores `model` overrides** and silently keeps `gpt-5.5`. API-key auth honors them.
+- **Some features only expose with explicit feature flags**:
+  - `features.default_mode_request_user_input=true` for `requestUserInput` tool
+  - `features.request_permissions_tool=true` for permission grants
+  - `features.multi_agent_v2=true` for `spawn_agent` (still account-tier gated; chatgpt-mode never invokes it organically regardless of Plus / Free)
+
+## Run tests
+
+Always run from the package directory (Bun 1.3.10 has a subprocess lifecycle quirk under `bun test` when invoked from a parent dir).
 
 ```bash
-bun test                                   # unit + e2e
-CLAUDE_CODE_OAUTH_TOKEN=... bun test       # + integration smokes
+cd packages/kodizm-acp
+
+# Unit + e2e (mocked SDK + fake codex subprocess)
+bun test test/unit test/e2e
+
+# Real-CLI smoke (requires CLAUDE_CODE_OAUTH_TOKEN or codex login)
+bun test test/integration
+
+# Specific real-codex suites
+bun test test/integration/codex-features.smoke.test.ts
+bun test test/integration/codex-thinking.smoke.test.ts
+bun test test/integration/codex-mcp-elicit.smoke.test.ts
 ```
+
+Coverage at last run (ChatGPT Plus + Claude OAuth on host):
+
+| Layer | Tests | Source |
+|-------|------:|--------|
+| Unit + e2e | 525 + | `test/unit/`, `test/e2e/` |
+| Codex baseline real-CLI | 3 | `codex-real.smoke` |
+| Codex features F1-F19 real-CLI | 21 | `codex-features.smoke`, `codex-features-extended.smoke`, `codex-features-complete.smoke` |
+| Codex deep F20-F28 real-CLI | 9 | `codex-features-deep.smoke` |
+| Codex final A1-A4 + B1-B4 + C1-C4 (deterministic fake fixture) | 17 | `codex-features-final.smoke` |
+| Codex dedicated real-CLI (auth_error, cross-process, thinking, auth_refresh, mcp_elicit) | 5 | per-file smokes |
 
 ## License
 
