@@ -45,7 +45,10 @@ import type {
   NewSessionResult,
   PromptResult,
 } from '../driver.ts'
+import { classifyOpencodeError } from './error-classifier.ts'
+import { OpencodeEventMapper } from './event-mapper.ts'
 import { OpencodeHttpBridge, type OpencodeHttpBridgeHandle } from './http-bridge.ts'
+import { dispatchOpencodeEvent, isTurnComplete } from './prompt-stream.ts'
 
 /**
  * Construction-time dependencies for the opencode driver. Phase 3 T2+
@@ -190,8 +193,155 @@ export class OpencodeDriver implements BackendDriver {
     return { sessionId }
   }
 
-  public async prompt(_sessionId: string, _params: PromptRequest, _emit: EventEmitter): Promise<PromptResult> {
-    throw new MethodNotSupportedError('session/prompt', this.supportedMethodNames())
+  public async prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult> {
+    const state = this.sessions.get(sessionId)
+    if (state === undefined) {
+      throw new MethodNotSupportedError('session/prompt', this.supportedMethodNames())
+    }
+
+    // 1. Per-turn abort controller; cancel() flips this.
+    const controller = new AbortController()
+    state.activePromptController = controller
+
+    // 2. Bus event mapper translates opencode -> canonical sessionUpdate.
+    const eventMapper = new OpencodeEventMapper({
+      sessionId,
+      emit: (e) => emit.send(e),
+      mcpReverseMap: new Map(),
+    })
+
+    // 3. Subscribe to the SSE event stream + dispatch in parallel
+    //    with the prompt RPC. The dispatch loop resolves on
+    //    isTurnComplete() OR on signal abort.
+    const subscriptionPromise = this.runEventLoop({
+      handle: state.handle,
+      controller,
+      handlers: {
+        onMessageBus: (method, properties) => eventMapper.handle(method, properties),
+        onPermissionAsked: () => undefined,
+        onQuestionAsked: () => undefined,
+        onSessionError: () => undefined,
+      },
+    })
+
+    // 4. Send the actual prompt to opencode. Either v2 prompt or v1
+    //    fallback depending on what the SDK exposes.
+    const promptText = this.collectPromptText(params)
+    let stopReason: PromptResult['stopReason'] = 'end_turn'
+    let failureDetail: string | undefined
+    let failureReason: PromptResult['failureReason']
+
+    try {
+      await this.sendPrompt({
+        handle: state.handle,
+        opencodeSessionId: state.opencodeSessionId,
+        text: promptText,
+        signal: controller.signal,
+      })
+      await subscriptionPromise
+    } catch (err) {
+      if (controller.signal.aborted) {
+        stopReason = 'cancelled'
+      } else {
+        const classified = classifyOpencodeError(err)
+        if (classified === null) {
+          stopReason = 'cancelled'
+        } else {
+          stopReason = 'session_failed'
+          failureReason = classified.reason
+          failureDetail = classified.detail
+        }
+      }
+    } finally {
+      state.activePromptController = undefined
+    }
+
+    const result: PromptResult = { stopReason }
+    if (failureReason !== undefined) result.failureReason = failureReason
+    if (failureDetail !== undefined) result.failureDetail = failureDetail
+    return result
+  }
+
+  private async runEventLoop(args: {
+    handle: OpencodeHttpBridgeHandle
+    controller: AbortController
+    handlers: Parameters<typeof dispatchOpencodeEvent>[1]
+  }): Promise<void> {
+    const eventApi = args.handle.sdk.event as unknown as {
+      subscribe?: (
+        params?: unknown,
+        options?: unknown,
+      ) => Promise<{
+        stream?: AsyncIterable<{ event?: string; data?: unknown }>
+      }>
+    }
+    if (typeof eventApi.subscribe !== 'function') return
+
+    let result: { stream?: AsyncIterable<{ event?: string; data?: unknown }> }
+    try {
+      result = await eventApi.subscribe({}, { signal: args.controller.signal })
+    } catch {
+      return
+    }
+
+    const stream = result?.stream
+    if (stream === undefined) return
+
+    for await (const frame of stream) {
+      if (args.controller.signal.aborted) break
+
+      const parsed = this.parseEventFrame(frame)
+      if (parsed === undefined) continue
+
+      dispatchOpencodeEvent(parsed, args.handlers)
+      if (isTurnComplete(parsed)) break
+    }
+  }
+
+  private parseEventFrame(frame: unknown): { type: string; properties: unknown } | undefined {
+    if (frame === null || typeof frame !== 'object') return undefined
+    const f = frame as { event?: string; type?: string; data?: unknown; properties?: unknown }
+    const type = f.event ?? f.type
+    if (typeof type !== 'string') return undefined
+    return { type, properties: f.properties ?? f.data ?? {} }
+  }
+
+  private async sendPrompt(args: {
+    handle: OpencodeHttpBridgeHandle
+    opencodeSessionId: string
+    text: string
+    signal: AbortSignal
+  }): Promise<void> {
+    const v2Session = (
+      args.handle.sdk as unknown as { v2?: { session?: { prompt?: (p: unknown) => Promise<unknown> } } }
+    ).v2?.session
+    if (v2Session?.prompt !== undefined) {
+      await v2Session.prompt({
+        sessionID: args.opencodeSessionId,
+        prompt: { parts: [{ type: 'text', text: args.text }] },
+      })
+      return
+    }
+
+    const v1Session = args.handle.sdk.session as unknown as {
+      message?: (params: unknown) => Promise<unknown>
+    }
+    if (v1Session.message !== undefined) {
+      await v1Session.message({
+        sessionID: args.opencodeSessionId,
+        body: { parts: [{ type: 'text', text: args.text }] },
+      })
+    }
+  }
+
+  private collectPromptText(params: PromptRequest): string {
+    const parts: string[] = []
+    for (const block of params.prompt) {
+      if (block === null || typeof block !== 'object') continue
+      const b = block as { type?: string; text?: string }
+      if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
+    }
+    return parts.join('\n')
   }
 
   public async cancel(request: CancelRequest): Promise<void> {
