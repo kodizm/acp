@@ -41,8 +41,15 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Versions
+      - name: Activate npm@latest via corepack
+        # Bundled npm 10.9.x (Node 22 default) does NOT implement
+        # Trusted Publisher OIDC (added in 11.5.0). Direct
+        # 'npm install -g npm@latest' is broken on Node 22 toolcache
+        # (promise-retry MODULE_NOT_FOUND mid-install). Corepack
+        # downloads + activates npm 11+ cleanly.
         run: |
+          corepack enable
+          corepack prepare npm@latest --activate
           echo "node version: $(node --version)"
           echo "npm version: $(npm --version)"
 
@@ -55,8 +62,7 @@ jobs:
       - name: Typecheck (src only)
         run: bun run typecheck:src
 
-      - name: Publish via OIDC
-        # Trusted Publisher auto-attaches provenance + handles auth.
-        # NO NODE_AUTH_TOKEN env: presence of a token would force
-        # classic bearer auth and skip the OIDC exchange.
-        run: npm publish --access public
+      - name: Publish via OIDC Trusted Publisher
+        # npm 11.5+ auto-detects GitHub Actions OIDC + the configured
+        # Trusted Publisher; no NODE_AUTH_TOKEN, no manual --provenance.
+        run: npm publish --access public --provenance
