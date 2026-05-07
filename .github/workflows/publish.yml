@@ -1,13 +1,17 @@
 name: Publish to npm
 
 # OIDC-based Trusted Publisher path: tag push triggers a build +
-# publish, npm registry verifies the GitHub Actions OIDC token
+# publish. The npm registry verifies the GitHub Actions OIDC token
 # against the configured Trusted Publisher (kodizm / acp /
-# publish.yml). No static npm token, no OTP prompt.
+# publish.yml). No static NPM_TOKEN, no OTP prompt, no NODE_AUTH_TOKEN.
 #
-# Manual fallback: workflow_dispatch lets a maintainer publish a
-# specific commit without tagging (useful for hotfix dry-runs that
-# go through CI but don't pollute git history).
+# Requirements per https://docs.npmjs.com/trusted-publishers:
+#   - npm CLI >= 11.5.1
+#   - Node >= 22.14.0
+#   - Public GitHub-hosted runner (id-token: write)
+#   - Package's Publishing access setting must allow OIDC
+#     (NOT "Require 2FA or granular token with bypass 2fa enabled";
+#      use "Require 2FA and disallow tokens" or "2FA not required")
 
 on:
   push:
@@ -36,7 +40,12 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          always-auth: true
+
+      - name: Bump npm to OIDC-capable version
+        run: |
+          npm install -g npm@latest
+          echo "node version: $(node --version)"
+          echo "npm version: $(npm --version)"
 
       - name: Install deps
         run: bun install --frozen-lockfile
@@ -47,13 +56,8 @@ jobs:
       - name: Typecheck (src only)
         run: bun run typecheck:src
 
-      - name: Verify OIDC auth
-        run: |
-          echo "npm version: $(npm --version)"
-          echo "Trying npm whoami via OIDC..."
-          npm whoami --registry=https://registry.npmjs.org/ || true
-
-      - name: Publish
-        env:
-          NPM_CONFIG_PROVENANCE: 'true'
-        run: npm publish --provenance --access public
+      - name: Publish via OIDC
+        # Trusted Publisher auto-attaches provenance + handles auth.
+        # NO NODE_AUTH_TOKEN env: presence of a token would force
+        # classic bearer auth and skip the OIDC exchange.
+        run: npm publish --access public
