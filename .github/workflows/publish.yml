@@ -35,21 +35,20 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Setup Node
+      - name: Setup Node 24 (ships npm 11.x natively)
+        # Node 24 bundles npm >= 11.5.0 which implements Trusted
+        # Publisher OIDC. Node 22 default ships npm 10.9.x; the
+        # 'npm install -g npm@latest' self-upgrade is broken on the
+        # Node 22 toolcache (promise-retry MODULE_NOT_FOUND), and
+        # corepack's npm shim only activates when packageManager is
+        # pinned in package.json. Cleanest path: use Node 24.
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Activate npm@latest via corepack
-        # Bundled npm 10.9.x (Node 22 default) does NOT implement
-        # Trusted Publisher OIDC (added in 11.5.0). Direct
-        # 'npm install -g npm@latest' is broken on Node 22 toolcache
-        # (promise-retry MODULE_NOT_FOUND mid-install). Corepack
-        # downloads + activates npm 11+ cleanly.
+      - name: Versions
         run: |
-          corepack enable
-          corepack prepare npm@latest --activate
           echo "node version: $(node --version)"
           echo "npm version: $(npm --version)"
 
