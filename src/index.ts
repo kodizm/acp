@@ -228,9 +228,20 @@ async function buildClaudeBackend(): Promise<{
   const { ClaudeDriver } = await import('./backends/claude/driver.ts')
   const sdk = await import('@anthropic-ai/claude-agent-sdk')
 
+  // Resolve the claude CLI path explicitly. After bun build, the
+  // bundled bin's import.meta.url no longer resolves to the SDK's
+  // module dir; the SDK's auto-detection (which uses import.meta.url
+  // relative paths to find its bundled-alongside cli.js) silently
+  // points at /usr/local/bin/cli.js (a path that does not exist).
+  // The SDK then spawns claude as `cli.js` on $PATH, gets ENOENT,
+  // and exits with code 1 surfaced as "Claude Code process exited
+  // with code 1". Set CLAUDE_CODE_PATH to override or fall back to
+  // the canonical install location baked into kodizm-ai-docker.
+  const claudePath = process.env.CLAUDE_CODE_PATH ?? '/usr/local/bin/claude'
+
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.1' },
+    agentInfo: { version: '0.5.2' },
     sdk: {
       // Real-SDK adapter: forwards prompt + options to the SDK's
       // query() iterator. Force `settingSources: []` so the SDK does
@@ -249,6 +260,10 @@ async function buildClaudeBackend(): Promise<{
           options: {
             ...(optsIn ?? {}),
             settingSources: [],
+            // Force the SDK to spawn the system-installed claude CLI
+            // instead of trying to resolve cli.js via import.meta.url
+            // (which the bundle breaks).
+            pathToClaudeCodeExecutable: claudePath,
           },
         }
         for await (const message of sdk.query(isolated as never)) {
