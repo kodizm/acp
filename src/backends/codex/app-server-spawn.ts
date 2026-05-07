@@ -158,6 +158,26 @@ export class CodexAppServerProcess {
 
     this.startReadLoop()
     this.startExitWatcher()
+    if (process.env.KODIZM_ACP_FORWARD_STDERR === '1') this.startStderrPump()
+  }
+
+  private startStderrPump(): void {
+    if (this.subprocess === undefined) return
+    const stderr = this.subprocess.stderr
+    if (stderr === undefined || stderr === null) return
+    void (async () => {
+      try {
+        const reader = stderr.getReader()
+        const dec = new TextDecoder()
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          process.stderr.write(`[codex-stderr] ${dec.decode(value)}`)
+        }
+      } catch {
+        // ignore
+      }
+    })()
   }
 
   /**
