@@ -36,6 +36,7 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+          always-auth: true
 
       - name: Install deps
         run: bun install --frozen-lockfile
@@ -46,5 +47,13 @@ jobs:
       - name: Typecheck (src only)
         run: bun run typecheck:src
 
+      - name: Verify OIDC auth
+        run: |
+          echo "npm version: $(npm --version)"
+          echo "Trying npm whoami via OIDC..."
+          npm whoami --registry=https://registry.npmjs.org/ || true
+
       - name: Publish
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
         run: npm publish --provenance --access public
