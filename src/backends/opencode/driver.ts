@@ -95,6 +95,12 @@ interface OpencodeSessionState {
     cwd: string
     model?: string
   }
+  /**
+   * Per-turn abort controller. T10 sets this before opening the SSE
+   * stream; cancel() flips it to terminate dispatch + the outbound
+   * SDK prompt call.
+   */
+  activePromptController?: AbortController
 }
 
 /**
@@ -188,16 +194,118 @@ export class OpencodeDriver implements BackendDriver {
     throw new MethodNotSupportedError('session/prompt', this.supportedMethodNames())
   }
 
-  public async cancel(_request: CancelRequest): Promise<void> {
-    throw new MethodNotSupportedError('session/cancel', this.supportedMethodNames())
+  public async cancel(request: CancelRequest): Promise<void> {
+    const state = this.sessions.get(request.sessionId)
+    if (state === undefined) return
+
+    // 1. Cancel any in-flight prompt at the SDK layer; this fires a
+    //    POST /session/:id/abort against the opencode HTTP server.
+    if (state.activePromptController !== undefined) {
+      state.activePromptController.abort()
+      state.activePromptController = undefined
+    }
+    try {
+      const sessionApi = state.handle.sdk.session as unknown as {
+        abort?: (params: { sessionID: string }) => Promise<unknown>
+      }
+      if (typeof sessionApi.abort === 'function') {
+        await sessionApi.abort({ sessionID: state.opencodeSessionId })
+      }
+    } catch {
+      // Best-effort abort; subprocess teardown below catches the rest.
+    }
+
+    // 2. Tear down the per-session bridge (subprocess termination).
+    //    Removes the entry from the map so the next prompt() returns
+    //    SessionNotFoundError instead of resurrecting a dead listener.
+    const bridge = state.bridge
+    this.sessions.delete(request.sessionId)
+    await bridge.stop().catch(() => undefined)
   }
 
-  public async loadSession(_params: LoadSessionRequest): Promise<NewSessionResult> {
-    throw new MethodNotSupportedError('session/load', this.supportedMethodNames())
+  public async loadSession(params: LoadSessionRequest): Promise<NewSessionResult> {
+    // 1. Already-known session: validate the cached state and return.
+    const cached = this.sessions.get(params.sessionId)
+    if (cached !== undefined) {
+      return { sessionId: params.sessionId }
+    }
+
+    // 2. Cross-process resume (Pattern B). The orchestrator passes the
+    //    Kodizm sessionId; opencode SQLite-persists the underlying
+    //    server-side session, so a fresh listener plus a get() probe
+    //    seats the state without re-creating the opencode session.
+    //    The orchestrator side is responsible for reconciling the
+    //    Kodizm <-> opencode id mapping via _meta.opencodeSessionId
+    //    (cross-process Pattern B contract).
+    const meta = (params._meta ?? {}) as { opencodeSessionId?: string }
+    if (meta.opencodeSessionId === undefined) {
+      throw new MethodNotSupportedError('session/load', this.supportedMethodNames())
+    }
+
+    const bridge = this.bridgeFactory()
+    const handle = await bridge.start({})
+
+    const sessionApi = handle.sdk.session as unknown as {
+      get?: (parameters: { sessionID: string }) => Promise<unknown>
+    }
+    if (typeof sessionApi.get === 'function') {
+      try {
+        await sessionApi.get({ sessionID: meta.opencodeSessionId })
+      } catch (err) {
+        await bridge.stop().catch(() => undefined)
+        throw err
+      }
+    }
+
+    this.sessions.set(params.sessionId, {
+      sessionId: params.sessionId,
+      bridge,
+      opencodeSessionId: meta.opencodeSessionId,
+      handle,
+      configSnapshot: { cwd: params.cwd },
+    })
+
+    return { sessionId: params.sessionId }
   }
 
-  public async forkSession(_params: ForkSessionRequest): Promise<NewSessionResult> {
-    throw new MethodNotSupportedError('session/fork', this.supportedMethodNames())
+  public async forkSession(params: ForkSessionRequest): Promise<NewSessionResult> {
+    const source = this.sessions.get(params.sourceSessionId)
+    if (source === undefined) {
+      throw new MethodNotSupportedError('session/fork', this.supportedMethodNames())
+    }
+
+    const newSessionId = randomUUID()
+
+    // 1. Reuse the source session's listener (no fresh subprocess; the
+    //    fork shares the opencode HTTP server with the parent so the
+    //    SQLite-side fork is atomic). Capability isolation is handled
+    //    on the opencode side: each fork gets its own session row.
+    const sessionApi = source.handle.sdk.session as unknown as {
+      fork?: (parameters: {
+        sessionID: string
+        messageID?: string
+      }) => Promise<{ data?: { id?: string }; id?: string }>
+    }
+
+    if (typeof sessionApi.fork !== 'function') {
+      throw new MethodNotSupportedError('session/fork', this.supportedMethodNames())
+    }
+
+    const forkResult = await sessionApi.fork({ sessionID: source.opencodeSessionId })
+    const forkedOpencodeId = this.extractSessionId(forkResult)
+
+    this.sessions.set(newSessionId, {
+      sessionId: newSessionId,
+      bridge: source.bridge,
+      opencodeSessionId: forkedOpencodeId,
+      handle: source.handle,
+      configSnapshot: {
+        cwd: params.cwd,
+        ...(params.model === undefined ? {} : { model: params.model }),
+      },
+    })
+
+    return { sessionId: newSessionId }
   }
 
   /**
