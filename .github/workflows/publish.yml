@@ -41,11 +41,8 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Bump npm to OIDC-capable version
-        # --force avoids MODULE_NOT_FOUND ('promise-retry') when self-
-        # upgrading from Node 22's bundled npm 10.9.x.
+      - name: Versions
         run: |
-          npm install -g --force npm@latest
           echo "node version: $(node --version)"
           echo "npm version: $(npm --version)"
 
