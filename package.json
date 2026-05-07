@@ -1,6 +1,6 @@
 {
-  "name": "kodizm-acp",
-  "version": "0.0.1",
+  "name": "@kodizm/acp",
+  "version": "0.4.0",
   "description": "Custom ACP server bridging Claude Code, codex, and opencode CLIs through a single Kodizm-flavored protocol surface.",
   "type": "module",
   "bin": {
@@ -19,10 +19,14 @@
     "lint": "biome check src test",
     "lint:fix": "biome check --write src test",
     "format": "biome format --write src test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build && bun run typecheck"
   },
   "engines": {
     "bun": ">=1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.21.0",
@@ -40,5 +44,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kodizm/acp.git"
-  }
+  },
+  "keywords": ["acp", "agent-client-protocol", "claude", "codex", "opencode", "ai", "bridge", "jsonrpc"]
 }
