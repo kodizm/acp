@@ -194,6 +194,7 @@ const FULL_CAPABILITIES: DriverCapabilities = {
   subagent: true,
   skillEvents: false,
   debug: true,
+  askQuestion: true,
 }
 
 const DEFAULT_SPAWN_FACTORY = async (options: CodexSpawnFactoryOptions): Promise<CodexAppServerProcess> => {

@@ -56,6 +56,19 @@ export interface DriverCapabilities {
    * ignores debug toggles entirely.
    */
   debug: boolean
+
+  /**
+   * Phase 3 addition: the backend exposes a first-class user-question
+   * channel mapped onto the canonical `session/ask_user_question`
+   * outbound RPC. Claude (SDK `AskUserQuestion` plugin) and codex
+   * (`item/tool/requestUserInput` + `mcpServer/elicitation/request`)
+   * both surface it; opencode goes a step further with native
+   * `Question.Service` + `tool/question.ts`. When false, the driver
+   * does NOT translate any backend prompt into the canonical
+   * question event; the orchestrator should not surface a "model
+   * asked a question" UI for that backend.
+   */
+  askQuestion: boolean
 }
 
 /**

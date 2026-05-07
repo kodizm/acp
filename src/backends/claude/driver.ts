@@ -252,6 +252,7 @@ const FULL_CAPABILITIES: DriverCapabilities = {
   subagent: true,
   skillEvents: true,
   debug: true,
+  askQuestion: true,
 }
 
 /**

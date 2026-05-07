@@ -102,6 +102,7 @@ function makeMockDriver(caps: Partial<DriverCapabilities> = {}): {
     subagent: true,
     skillEvents: true,
     debug: true,
+    askQuestion: true,
     ...caps,
   }
 

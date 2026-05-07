@@ -24,6 +24,7 @@ function makeFakeDriver(label: string): BackendDriver {
     subagent: false,
     skillEvents: false,
     debug: false,
+    askQuestion: false,
   }
 
   return {

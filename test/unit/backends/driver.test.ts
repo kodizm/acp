@@ -70,6 +70,7 @@ describe('BackendDriver contract', () => {
       subagent: true,
       skillEvents: true,
       debug: true,
+      askQuestion: true,
     })
 
     const init = await driver.initialize({ protocolVersion: 1 })
@@ -101,6 +102,7 @@ describe('BackendDriver contract', () => {
       subagent: false,
       skillEvents: false,
       debug: true,
+      askQuestion: false,
     }
     const driver = new StubDriver(caps)
     expect(driver.capabilities()).toEqual(caps)
@@ -135,6 +137,7 @@ describe('Phase 1.7 DriverCapabilities.debug flag', () => {
       subagent: true,
       skillEvents: true,
       debug: true,
+      askQuestion: true,
     }
     const driver = new StubDriver(caps)
     expect(driver.capabilities().debug).toBe(true)
@@ -150,6 +153,7 @@ describe('ensureCapability', () => {
     subagent: false,
     skillEvents: false,
     debug: false,
+    askQuestion: false,
   }
 
   test('passes silently when the capability is advertised', () => {

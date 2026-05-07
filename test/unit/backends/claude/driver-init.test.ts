@@ -33,6 +33,7 @@ describe('ClaudeDriver.initialize', () => {
       subagent: true,
       skillEvents: true,
       debug: true,
+      askQuestion: true,
     })
   })
 })

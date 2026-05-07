@@ -15,6 +15,7 @@ describe('CodexDriver capabilities', () => {
       subagent: true,
       skillEvents: false,
       debug: true,
+      askQuestion: true,
     }
     expect(caps).toEqual(expected)
   })

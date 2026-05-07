@@ -22,13 +22,14 @@ import { runShutdown } from './server/shutdown.ts'
 import type { DebugRecorder } from './util/debug-recorder.ts'
 
 /**
- * Backend identifier accepted at runtime. Phase 1 only ships `claude`;
- * `codex` and `opencode` arrive in phases 2 and 3 and slot in via
- * {@link resolveBackendFromEnv} pattern matching.
+ * Backend identifier accepted at runtime. Phase 1 ships `claude`,
+ * Phase 2 adds `codex`, Phase 3 adds `opencode`. New backends extend
+ * the union here and append to {@link KNOWN_BACKENDS}; the registry
+ * construction happens externally so this module stays import-light.
  */
-export type SupportedBackend = 'claude' | 'codex'
+export type SupportedBackend = 'claude' | 'codex' | 'opencode'
 
-const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'codex']
+const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'codex', 'opencode']
 
 export { BackendNotConfiguredError, UnknownBackendError }
 
