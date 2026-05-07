@@ -125,6 +125,26 @@ export class CodexEventMapper {
       this.handleAgentMessageDelta(params as DeltaNotification)
       return
     }
+    // Real codex v2 emits reasoning separately from agent message:
+    //   item/reasoning/summaryTextDelta -> reasoning summary delta
+    //   item/reasoning/textDelta        -> raw reasoning chain delta
+    //   item/reasoning/summaryPartAdded -> structural marker (no text)
+    // Both delta methods feed canonical `thinking_chunk`.
+    if (method === 'item/reasoning/summaryTextDelta' || method === 'item/reasoning/textDelta') {
+      const p = params as { delta?: string }
+      if (typeof p.delta === 'string') {
+        this.options.emit({
+          sessionId: this.options.sessionId,
+          type: 'thinking_chunk',
+          text: p.delta,
+        })
+      }
+      return
+    }
+    if (method === 'item/reasoning/summaryPartAdded') {
+      // No text; ignore at the canonical layer.
+      return
+    }
     if (method === 'item/started') {
       this.handleItemStarted(params as ItemNotification)
       return
