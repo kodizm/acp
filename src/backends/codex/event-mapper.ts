@@ -208,10 +208,7 @@ export class CodexEventMapper {
       })
       return
     }
-    if (
-      (item.type === 'CollabAgentToolCall' || item.type === 'collabAgentToolCall') &&
-      item.tool === 'SpawnAgent'
-    ) {
+    if ((item.type === 'CollabAgentToolCall' || item.type === 'collabAgentToolCall') && item.tool === 'SpawnAgent') {
       const childId = randomUUID()
       this.subagents.set(item.id, childId)
       this.options.emit({

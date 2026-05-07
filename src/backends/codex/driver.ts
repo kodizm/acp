@@ -43,6 +43,7 @@ import type {
   PromptResult,
 } from '../driver.ts'
 import { CodexAppServerProcess, type CodexDebugSink } from './app-server-spawn.ts'
+import { handleCodexRequestUserInput } from './ask-user-question.ts'
 import { buildCodexConfigToml } from './config-mapper.ts'
 import { findCodexJsonlPath, writeDeferredRolloutItem } from './deferred-permission.ts'
 import { classifyCodexError } from './error-classifier.ts'
@@ -345,9 +346,14 @@ export class CodexDriver implements BackendDriver {
     // 2. Translate canonical content blocks to codex UserInput[].
     //    Pattern B: when resuming with a cached answer, prepend a retry
     //    prefix so the model re-issues the deferred tool call.
-    // Codex's UserInput schema requires `text_elements: Array<TextElement>`
-    // even when empty (codex-rs/v2/UserInput.ts: text_elements is non-optional).
-    const inputs: Array<{ type: string; text?: string; text_elements: ReadonlyArray<unknown> }> = []
+    // Codex's UserInput schema (codex-rs/v2/UserInput.ts):
+    //   { type: 'text', text, text_elements }
+    //   { type: 'image', url }            <- remote URL
+    //   { type: 'localImage', path }      <- local filesystem
+    //   { type: 'skill', name, path }
+    //   { type: 'mention', name, path }
+    // text_elements is non-optional; we ship empty.
+    const inputs: Array<Record<string, unknown>> = []
     if (resumeAnswer !== undefined && resumeToolUseId !== undefined && resumeToolName !== undefined) {
       inputs.push({
         type: 'text',
@@ -356,10 +362,23 @@ export class CodexDriver implements BackendDriver {
       })
     }
     for (const block of params.prompt) {
-      if (typeof block === 'object' && block !== null) {
-        const b = block as { type?: string; text?: string }
-        if (b.type === 'text' && typeof b.text === 'string') {
-          inputs.push({ type: 'text', text: b.text, text_elements: [] })
+      if (typeof block !== 'object' || block === null) continue
+      const b = block as { type?: string; text?: string; uri?: string; path?: string; url?: string }
+      if (b.type === 'text' && typeof b.text === 'string') {
+        inputs.push({ type: 'text', text: b.text, text_elements: [] })
+        continue
+      }
+      if (b.type === 'image') {
+        // Canonical: { type: 'image', uri } accepts file://, http(s)://,
+        // or a bare local path. Map to codex's localImage / image.
+        const uri = b.uri ?? b.url ?? b.path
+        if (typeof uri !== 'string') continue
+        if (uri.startsWith('file://')) {
+          inputs.push({ type: 'localImage', path: uri.slice('file://'.length) })
+        } else if (uri.startsWith('http://') || uri.startsWith('https://')) {
+          inputs.push({ type: 'image', url: uri })
+        } else if (uri.startsWith('/')) {
+          inputs.push({ type: 'localImage', path: uri })
         }
       }
     }
@@ -409,8 +428,36 @@ export class CodexDriver implements BackendDriver {
 
     // 4. Wire codex notification listener; resolve on turn/completed.
     let resolveTurn!: () => void
-    const turnDone = new Promise<void>((resolve) => {
-      resolveTurn = resolve
+    let rejectTurn!: (err: Error) => void
+    let turnSettled = false
+    const turnDone = new Promise<void>((resolve, reject) => {
+      resolveTurn = () => {
+        turnSettled = true
+        resolve()
+      }
+      rejectTurn = (err) => {
+        if (turnSettled) return
+        turnSettled = true
+        reject(err)
+      }
+    })
+    // Defensive no-op handler: if the turn/start RPC itself throws
+    // before anyone awaits turnDone (Phase 2 T13 error path), the
+    // subsequent subprocess kill would otherwise produce an
+    // unhandled-rejection. Attaching .catch() makes the promise's
+    // rejection observable even when the outer race is bypassed.
+    turnDone.catch(() => undefined)
+
+    // Subprocess crash watcher: a SIGKILL or codex internal crash mid-
+    // turn would otherwise leave turnDone hanging because no
+    // turn/completed notification ever arrives. Bail with a structured
+    // throw the catch block below classifies as session_failed.
+    // Idempotent: if the turn already settled (normal completion or
+    // upstream error), the rejecter no-ops.
+    state.process.onExit((exitCode) => {
+      const err = new Error(`codex subprocess exited mid-turn (code ${exitCode ?? 'null'})`)
+      Object.assign(err, { code: 'CODEX_PROCESS_EXITED' })
+      rejectTurn(err)
     })
 
     // Wire event-mapper: codex notifications -> canonical sessionUpdate.
@@ -486,6 +533,16 @@ export class CodexDriver implements BackendDriver {
             ...deferHookArgs,
           })
         }
+        if (method === 'item/tool/requestUserInput') {
+          const userInputParams = params as Parameters<typeof handleCodexRequestUserInput>[0]['params']
+          return handleCodexRequestUserInput({
+            params: userInputParams,
+            server,
+            sessionId,
+            emit,
+            signal: abortController.signal,
+          })
+        }
         return undefined
       })
     }
@@ -521,7 +578,11 @@ export class CodexDriver implements BackendDriver {
             stopReason = 'cancelled'
             emit.send({ sessionId, type: 'cancelled', reason: 'user_cancel' })
           }
+          return
         }
+        // Non-cancel rejection: subprocess crash, RPC error, codex
+        // panic. Re-throw so the outer catch classifies it.
+        throw err
       })
     } catch (error) {
       // Phase 2 T13: classify codex throw + emit canonical session_failed.

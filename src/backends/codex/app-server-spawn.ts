@@ -109,6 +109,8 @@ export class CodexAppServerProcess {
   private nextId = 1
   private readBuffer = ''
   private readonly decoder: TextDecoder = new TextDecoder()
+  private readonly exitHandlers: Array<(exitCode: number | null) => void> = []
+  private exitedFlag = false
 
   public constructor(private readonly options: CodexAppServerSpawnOptions) {}
 
@@ -143,6 +145,56 @@ export class CodexAppServerProcess {
     })
 
     this.startReadLoop()
+    this.startExitWatcher()
+  }
+
+  /**
+   * Watch the subprocess exit; when it dies, reject every pending
+   * request with a ProcessExited error AND fire any registered exit
+   * handlers. Without this, killing codex mid-turn leaves the awaiting
+   * `request<T>()` promise (or the `turn/completed` waiter inside the
+   * driver) forever.
+   */
+  private startExitWatcher(): void {
+    if (this.subprocess === undefined) {
+      return
+    }
+    const proc = this.subprocess
+    void (async () => {
+      const exitCode = await proc.exited
+      this.exitedFlag = true
+      const error = new Error(`codex subprocess exited (code ${exitCode ?? 'null'})`)
+      Object.assign(error, { code: 'CODEX_PROCESS_EXITED' })
+      for (const [id, pending] of this.pendingRequests) {
+        this.pendingRequests.delete(id)
+        pending.reject(error)
+      }
+      for (const handler of this.exitHandlers) {
+        try {
+          handler(exitCode ?? null)
+        } catch {
+          // handler swallowed; subprocess exit is terminal
+        }
+      }
+    })()
+  }
+
+  /**
+   * Subscribe to the subprocess `exited` event. Driver wires this to
+   * abort the per-turn controller so an unexpected codex crash unwinds
+   * the awaiting prompt instead of hanging on the unfinished
+   * `turn/completed` notification.
+   */
+  public onExit(handler: (exitCode: number | null) => void): void {
+    this.exitHandlers.push(handler)
+    if (this.exitedFlag) {
+      // Already exited; fire synchronously.
+      try {
+        handler(null)
+      } catch {
+        // swallow
+      }
+    }
   }
 
   /**
