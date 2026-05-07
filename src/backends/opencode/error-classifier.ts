@@ -64,10 +64,12 @@ export function classifyOpencodeError(err: unknown): ClassifiedFailure | null {
     }
   }
 
-  // 4. ContextOverflowError -> compaction_failure (transport semantics
-  //    align: the conversation cannot continue on this driver).
+  // 4. ContextOverflowError -> transport_error (the canonical wire
+  //    has no dedicated 'compaction_failure' code; opencode's
+  //    summarizer-failed signal maps onto transport_error semantics
+  //    so the orchestrator surfaces a retry button).
   if (tagged?.name === 'ContextOverflowError') {
-    return { reason: 'compaction_failure', detail }
+    return { reason: 'transport_error', detail }
   }
 
   // 5. Plain HttpError messages from the v2 SDK fetch interceptor.

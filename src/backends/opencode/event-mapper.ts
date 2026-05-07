@@ -126,14 +126,15 @@ export class OpencodeEventMapper {
     // 1. Cache partID -> type so subsequent PartDelta events resolve.
     this.partTypes.set(part.id, part.type)
 
-    if (part.type !== 'tool') return
+    const toolPart = isToolPart(part) ? part : undefined
+    if (toolPart === undefined) return
 
-    const state = part.state
+    const state = toolPart.state
     if (state === undefined) return
 
     // 2. Subagent (task tool) lifecycle.
-    if (part.tool === 'task') {
-      this.handleTaskToolPart(part, state)
+    if (toolPart.tool === 'task') {
+      this.handleTaskToolPart(toolPart, state)
       return
     }
 
@@ -142,8 +143,8 @@ export class OpencodeEventMapper {
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'tool_call_begin',
-        toolUseId: part.callID,
-        name: this.resolveToolName(part.tool),
+        toolUseId: toolPart.callID,
+        name: this.resolveToolName(toolPart.tool),
         input: state.input,
       })
       return
@@ -154,7 +155,7 @@ export class OpencodeEventMapper {
       this.options.emit({
         sessionId: this.options.sessionId,
         type: 'tool_call_end',
-        toolUseId: part.callID,
+        toolUseId: toolPart.callID,
         result: isError ? state.error : state.output,
         isError,
       })
@@ -294,6 +295,17 @@ interface PartUpdatedPayload {
   sessionID?: string
   part?: Part
   time?: number
+}
+
+/**
+ * Narrowing predicate: opencode's Part union is structurally
+ * discriminated by `type`, but TS does not narrow the union to
+ * `ToolPart` after a non-equality guard like `part.type !== 'tool'`
+ * because `OtherPart.type` is `string`. This helper makes the
+ * narrow explicit.
+ */
+function isToolPart(part: Part): part is ToolPart {
+  return part.type === 'tool'
 }
 
 type Part = TextPart | ReasoningPart | ToolPart | OtherPart

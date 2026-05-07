@@ -30,9 +30,9 @@ describe('classifyOpencodeError', () => {
     expect(classifyOpencodeError(err)?.reason).toBe('transport_error')
   })
 
-  test('ContextOverflowError -> compaction_failure', () => {
+  test('ContextOverflowError -> transport_error', () => {
     const err = { name: 'ContextOverflowError', message: 'context window exceeded' }
-    expect(classifyOpencodeError(err)?.reason).toBe('compaction_failure')
+    expect(classifyOpencodeError(err)?.reason).toBe('transport_error')
   })
 
   test('MessageOutputLengthError -> sdk_throw', () => {
