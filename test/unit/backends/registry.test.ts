@@ -40,7 +40,7 @@ function makeFakeDriver(label: string): BackendDriver {
     cancel: async () => undefined,
     loadSession: async () => ({ sessionId: `${label}-session` }) as NewSessionResult,
     forkSession: async () => ({ sessionId: `${label}-fork` }) as NewSessionResult,
-    compact: async () => undefined,
+    compact: async (_request, _emit) => undefined,
   }
 }
 

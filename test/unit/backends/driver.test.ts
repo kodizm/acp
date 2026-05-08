@@ -60,7 +60,7 @@ class StubDriver implements BackendDriver {
     return { sessionId: 'stub-fork' }
   }
 
-  public async compact(_request: CompactSessionRequest): Promise<void> {
+  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
     // no-op
   }
 }
@@ -96,7 +96,7 @@ describe('BackendDriver contract', () => {
     await driver.cancel({ sessionId: session.sessionId })
     await driver.loadSession({ sessionId: 's1', cwd: '/x', mcpServers: [] })
     await driver.forkSession({ sourceSessionId: 's1', cwd: '/x', mcpServers: [] })
-    await driver.compact({ sessionId: session.sessionId })
+    await driver.compact({ sessionId: session.sessionId }, { send: () => undefined })
   })
 
   test('capabilities() returns the advertised feature set', () => {

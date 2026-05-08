@@ -676,7 +676,7 @@ export class OpencodeDriver implements BackendDriver {
    *
    * @throws {MethodNotSupportedError} unconditionally until T8 lands
    */
-  public async compact(_request: CompactSessionRequest): Promise<void> {
+  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
     throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
   }
 

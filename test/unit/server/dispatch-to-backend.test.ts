@@ -137,7 +137,7 @@ function makeMockDriver(caps: Partial<DriverCapabilities> = {}): {
       calls.forkSession?.push(params)
       return { sessionId: 'forked-session' }
     },
-    compact: async (request) => {
+    compact: async (request, _emit) => {
       calls.compact?.push(request)
     },
   }

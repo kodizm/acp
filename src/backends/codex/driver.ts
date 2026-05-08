@@ -1098,7 +1098,7 @@ export class CodexDriver implements BackendDriver {
    *
    * @throws {MethodNotSupportedError} unconditionally until T6 lands
    */
-  public async compact(_request: CompactSessionRequest): Promise<void> {
+  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
     throw new MethodNotSupportedError('session/compact', [
       'initialize',
       'session/new',

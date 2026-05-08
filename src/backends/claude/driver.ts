@@ -357,7 +357,7 @@ export class ClaudeDriver implements BackendDriver {
    *
    * @throws {MethodNotSupportedError} unconditionally until T4 lands
    */
-  public async compact(_request: CompactSessionRequest): Promise<void> {
+  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
     throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
   }
 

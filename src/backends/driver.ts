@@ -182,9 +182,12 @@ export interface BackendDriver {
    * `trigger: 'manual'` on the way back out. Drivers without a
    * manual compact lever throw {@link MethodNotSupportedError}.
    *
+   * Events fire through `emit` exactly like a `prompt()` turn so the
+   * AcpServer can fan them out as `sessionUpdate` notifications.
+   *
    * @throws {MethodNotSupportedError} when the backend has no manual compact lever
    */
-  compact(request: CompactSessionRequest): Promise<void>
+  compact(request: CompactSessionRequest, emit: EventEmitter): Promise<void>
 }
 
 /**

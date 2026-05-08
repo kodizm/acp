@@ -251,11 +251,15 @@ function wireBackendHandlers(server: AcpServer, backend: BackendDriver): void {
   // 7. session/compact: manual context-compaction trigger. Driver-level
   //    MethodNotSupported throws fall through the dispatcher's catch
   //    and surface as -32601 to the orchestrator (no static capability
-  //    flag yet — the wire shape is uniform across backends, only the
-  //    underlying lever differs).
+  //    flag yet, the wire shape is uniform across backends, only the
+  //    underlying lever differs). Events flow through the same
+  //    sessionUpdate fan-out as prompt() turns.
   server.on('session/compact', async (params) => {
     const validated = validateOrThrow(CompactSessionRequestSchema, params)
-    await backend.compact(validated)
+    const emit: EventEmitter = {
+      send: (event) => server.notify('sessionUpdate', event),
+    }
+    await backend.compact(validated, emit)
     return {}
   })
 }
