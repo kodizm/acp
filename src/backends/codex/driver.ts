@@ -22,7 +22,7 @@
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 
-import { MethodNotSupportedError, SessionNotFoundError } from '../../server/errors.ts'
+import { SessionNotFoundError } from '../../server/errors.ts'
 import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
 import type {
@@ -185,6 +185,16 @@ interface CodexSessionState {
    * prefix injection.
    */
   deferredToolUseId?: string
+  /**
+   * Latch that flips true when {@link CodexDriver.compact} dispatches
+   * `thread/compact/start` + flips back to false the moment the
+   * matching `compaction_completed` event lands. While true, the
+   * compact flow's local mapper override re-tags `compaction_started`
+   * + `compaction_completed` with `trigger: 'manual'` (codex's
+   * `ContextCompaction` item carries no trigger field, so the
+   * default mapper falls back to 'auto').
+   */
+  pendingManualCompact?: boolean
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -1092,20 +1102,96 @@ export class CodexDriver implements BackendDriver {
   }
 
   /**
-   * `session/compact`: T2 stub. Real implementation lands in T6
-   * (codex `thread/compact/start` JSON-RPC + `pendingManualCompact`
-   * latch + event-mapper trigger override on `ContextCompaction`).
+   * `session/compact`: dispatches codex's `thread/compact/start`
+   * JSON-RPC against the session's persistent codex subprocess.
+   * Sets {@link CodexSessionState.pendingManualCompact} before the
+   * dispatch so the local event-mapper wraps the
+   * `compaction_started` / `compaction_completed` events with
+   * `trigger: 'manual'` on the way out (codex's `ContextCompaction`
+   * item carries no trigger field).
    *
-   * @throws {MethodNotSupportedError} unconditionally until T6 lands
+   * Runs a per-call event-mapper because the long-lived prompt()
+   * mapper only exists during a turn; a manual compaction can fire
+   * outside any prompt window. Awaits the matching
+   * `compaction_completed` event before resolving so the
+   * orchestrator's caller knows the compaction settled.
+   *
+   * @throws {SessionNotFoundError} when the session id is unknown
    */
-  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
-    throw new MethodNotSupportedError('session/compact', [
-      'initialize',
-      'session/new',
-      'session/prompt',
-      'session/cancel',
-      'session/load',
-      'session/fork',
-    ])
+  public async compact(request: CompactSessionRequest, emit: EventEmitter): Promise<void> {
+    const state = this.sessions.get(request.sessionId)
+    if (state === undefined) {
+      throw new SessionNotFoundError(request.sessionId)
+    }
+    if (state.process === undefined || state.codexThreadId === undefined) {
+      throw new SessionNotFoundError(`${request.sessionId} (no codex thread)`)
+    }
+
+    state.pendingManualCompact = true
+
+    // 1. Per-compact event-mapper. Wraps every emit() with the latch
+    //    override so compaction_started + compaction_completed both
+    //    carry trigger:'manual' instead of the mapper's default
+    //    'auto'.
+    let completedSettled = false
+    let resolveCompleted: () => void = () => undefined
+    const completedPromise = new Promise<void>((resolve) => {
+      resolveCompleted = resolve
+    })
+
+    const compactMapper = new CodexEventMapper({
+      sessionId: request.sessionId,
+      emit: (event) => {
+        if (event.type === 'compaction_started' && state.pendingManualCompact === true) {
+          emit.send({ ...event, trigger: 'manual' })
+          return
+        }
+        if (event.type === 'compaction_completed') {
+          if (state.pendingManualCompact === true) {
+            emit.send({ ...event, trigger: 'manual' })
+          } else {
+            emit.send(event)
+          }
+          state.pendingManualCompact = false
+          if (!completedSettled) {
+            completedSettled = true
+            resolveCompleted()
+          }
+          return
+        }
+        emit.send(event)
+      },
+    })
+
+    // 2. Subscribe to inbound notifications for the duration of the
+    //    compaction. onNotification is multi-subscriber so this layer
+    //    coexists with any prompt() listener (in practice compact()
+    //    runs between turns, but the contract is safe regardless).
+    const handler = (method: string, params: unknown): void => {
+      compactMapper.handle(method, params)
+    }
+    state.process.onNotification(handler)
+
+    try {
+      // 3. Send the canonical RPC. Codex emits `item/started` +
+      //    `item/completed` notifications during compaction; the
+      //    handler above pipes them through the mapper.
+      await state.process.request<Record<string, unknown>>('thread/compact/start', {
+        threadId: state.codexThreadId,
+      })
+      // 4. Wait for the matching compaction_completed event so the
+      //    caller observes a settled compaction. Codex may settle the
+      //    response BEFORE the item/completed notification depending
+      //    on subprocess scheduling, so the await here is on the
+      //    sessionUpdate event, not the RPC response.
+      await Promise.race([
+        completedPromise,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('compaction_completed timeout')), 10_000)),
+      ])
+    } finally {
+      // 5. Best-effort: clear the latch even on early throw so a
+      //    subsequent prompt-driven auto-compact does not inherit it.
+      state.pendingManualCompact = false
+    }
   }
 }
