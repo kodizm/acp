@@ -241,7 +241,7 @@ async function buildClaudeBackend(): Promise<{
 
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.2' },
+    agentInfo: { version: '0.5.4' },
     sdk: {
       // Real-SDK adapter: forwards prompt + options to the SDK's
       // query() iterator. Force `settingSources: []` so the SDK does

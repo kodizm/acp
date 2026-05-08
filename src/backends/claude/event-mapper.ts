@@ -285,6 +285,24 @@ function mapAssistantMessage(sessionId: string, message: SdkAssistantMessage): S
       if (skillName !== undefined) {
         events.push({ sessionId, type: 'skill_activation', skillName, source: 'invoked' })
       }
+      // Surface Task tool dispatches (Claude Code's subagent
+      // delegation lever) as subagent_spawn before the generic
+      // tool_call_begin. Older Anthropic SDK builds named the same
+      // tool 'Agent' on the wire; both aliases route here. The
+      // tool_use_id is reused as childId because the Task tool
+      // does not allocate a separate session uuid; the matching
+      // subagent_complete (T370 below) ties back via tool_use_id.
+      const subagentType = extractSubagentType(block)
+      if (subagentType !== undefined) {
+        events.push({
+          sessionId,
+          type: 'subagent_spawn',
+          childId: block.id,
+          parentSessionId: sessionId,
+          model: subagentType,
+          tools: [],
+        })
+      }
       events.push({
         sessionId,
         type: 'tool_call_begin',
@@ -321,6 +339,32 @@ function extractSkillName(block: SdkToolUseBlock): string | undefined {
 }
 
 /**
+ * Detect a Claude Code Task tool dispatch and return the
+ * `subagent_type` argument so the mapper can record it as the
+ * "model" hint on the subagent_spawn event.
+ *
+ * Tool name is `Task` on current SDK builds + `Agent` on legacy
+ * builds; both surface a `subagent_type` field on the input. When
+ * the field is missing we still treat the call as a subagent (the
+ * Task tool always does), defaulting to `'general-purpose'` since
+ * that is the SDK's default subagent class.
+ */
+function extractSubagentType(block: SdkToolUseBlock): string | undefined {
+  if (block.name !== 'Task' && block.name !== 'Agent') {
+    return undefined
+  }
+  const input = block.input
+  if (typeof input !== 'object' || input === null) {
+    return 'general-purpose'
+  }
+  const subagentType = (input as { subagent_type?: unknown }).subagent_type
+  if (typeof subagentType === 'string' && subagentType.length > 0) {
+    return subagentType
+  }
+  return 'general-purpose'
+}
+
+/**
  * `user` message: usually echoes user input + tool_result blocks. We
  * surface tool_result blocks as tool_call_end events; user text
  * blocks are not re-emitted to the orchestrator (it already knows
@@ -333,6 +377,28 @@ function mapUserMessage(sessionId: string, message: SdkUserMessage): SessionUpda
     if (block.type === 'tool_result') {
       // SDK can hand us either a plain string or an array of text blocks.
       const resultText = typeof block.content === 'string' ? block.content : block.content.map((c) => c.text).join('\n')
+
+      // Detect a Task tool subagent return BEFORE the generic
+      // tool_call_end so the orchestrator's tree observer pairs the
+      // complete with its spawn before the tool lifecycle event
+      // closes. Markers: the Task tool stamps `agentId: <hex>` plus a
+      // `<usage>total_tokens: N tool_uses: M duration_ms: D</usage>`
+      // block on its result string. Both must be present to avoid
+      // false-positives on any unrelated tool that mentions the word.
+      const subagentUsage = extractTaskToolUsage(resultText)
+      if (subagentUsage !== undefined) {
+        events.push({
+          sessionId,
+          type: 'subagent_complete',
+          childId: block.tool_use_id,
+          inputTokens: subagentUsage.totalTokens,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0,
+        })
+      }
+
       events.push({
         sessionId,
         type: 'tool_call_end',
@@ -344,6 +410,36 @@ function mapUserMessage(sessionId: string, message: SdkUserMessage): SessionUpda
   }
 
   return events
+}
+
+/**
+ * Detect a Claude Code Task tool result by scanning for both the
+ * `agentId:` line + the `<usage>total_tokens: N ...</usage>` block.
+ * Returns the parsed numeric counts when both markers land, else
+ * undefined for any unrelated tool result.
+ *
+ * The Task tool does not split input vs output tokens; the wire
+ * exposes `total_tokens` only. Callers map total -> inputTokens and
+ * leave outputTokens at 0; the orchestrator's modal renders both.
+ */
+function extractTaskToolUsage(resultText: string): { totalTokens: number } | undefined {
+  if (!resultText.includes('agentId:')) {
+    return undefined
+  }
+
+  const usageMatch = resultText.match(/<usage>([\s\S]*?)<\/usage>/)
+  if (usageMatch === null) {
+    return undefined
+  }
+
+  const totalMatch = usageMatch[1]?.match(/total_tokens:\s*(\d+)/)
+  if (totalMatch === null || totalMatch === undefined) {
+    return undefined
+  }
+
+  return {
+    totalTokens: Number.parseInt(totalMatch[1] ?? '0', 10),
+  }
 }
 
 /**

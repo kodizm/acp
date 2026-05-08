@@ -2,6 +2,37 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-05-08
+
+### Added
+
+- **Task tool subagent lifecycle events on the Claude bridge**.
+  `claude/event-mapper.ts` now detects `tool_use.name === 'Task'`
+  (and the legacy `'Agent'` alias) on assistant messages and emits
+  `subagent_spawn` before the generic `tool_call_begin`. The matching
+  `tool_result` is scanned for the Task tool's wire markers
+  (`agentId:` line + `<usage>total_tokens: N ...</usage>` block);
+  when both land, `subagent_complete` fires before the generic
+  `tool_call_end` with the parsed `total_tokens` mapped to
+  `inputTokens` (the Task tool wire does not split input vs output
+  so `outputTokens / cacheReadTokens / cacheCreationTokens / costUsd`
+  default to 0).
+- `extractSubagentType()` helper reads the optional `subagent_type`
+  field on the Task tool input and stamps it as the spawn event's
+  `model` field; defaults to `'general-purpose'` (the SDK's own
+  default) when missing.
+
+### Why
+
+Claude Code's Task tool does NOT spawn a separate SDK session; it
+inlines the subagent's output as a `tool_use` / `tool_result` pair
+inside the parent conversation. Prior versions only fired
+`subagent_spawn` when the SDK emitted a system init with
+`parent_tool_use_id`, so Task tool delegations stayed invisible on
+the orchestrator's subagent tree view. The new mapper branch closes
+the gap so the Filament Subagents tab populates automatically for
+every Task tool call.
+
 ## [0.5.3] - 2026-05-08
 
 ### Added

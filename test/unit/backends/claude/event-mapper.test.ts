@@ -97,6 +97,114 @@ describe('mapSdkMessage, assistant', () => {
     ])
   })
 
+  test('Task tool_use -> subagent_spawn before tool_call_begin', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_task_1',
+            name: 'Task',
+            input: {
+              subagent_type: 'general-purpose',
+              prompt: 'Find all *.md files',
+            },
+          },
+        ],
+      },
+    })
+
+    // Two events: subagent_spawn first (so the orchestrator's tree
+    // observers see the spawn before the tool_call_begin), then the
+    // generic tool_call_begin.
+    expect(events).toHaveLength(2)
+    expect(events[0]).toEqual({
+      sessionId: SESSION_ID,
+      type: 'subagent_spawn',
+      childId: 'tu_task_1',
+      parentSessionId: SESSION_ID,
+      model: 'general-purpose',
+      tools: [],
+    })
+    expect(events[1]?.type).toBe('tool_call_begin')
+  })
+
+  test('Agent tool_use (legacy alias) -> subagent_spawn', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_agent_1',
+            name: 'Agent',
+            input: { prompt: 'count' },
+          },
+        ],
+      },
+    })
+
+    expect(events).toHaveLength(2)
+    expect(events[0]?.type).toBe('subagent_spawn')
+  })
+
+  test('Task tool_result with usage marker -> subagent_complete + tool_call_end', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu_task_1',
+            content:
+              '432\nagentId: af301668674acf9fc (use SendMessage with to: \'af301668674acf9fc\' to continue this agent)\n<usage>total_tokens: 12816 tool_uses: 2 duration_ms: 6236</usage>',
+            is_error: false,
+          },
+        ],
+      },
+    })
+
+    // Two events: subagent_complete first (so the tree observer pairs
+    // it with the spawn before the tool_call_end fires), then the
+    // generic tool_call_end.
+    expect(events).toHaveLength(2)
+    expect(events[0]).toEqual({
+      sessionId: SESSION_ID,
+      type: 'subagent_complete',
+      childId: 'tu_task_1',
+      inputTokens: 12816,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: 0,
+    })
+    expect(events[1]?.type).toBe('tool_call_end')
+  })
+
+  test('Plain tool_result without Task markers -> only tool_call_end', () => {
+    const events = mapSdkMessage(SESSION_ID, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu_glob_1',
+            content: '/workspace/foo.md\n/workspace/bar.md',
+            is_error: false,
+          },
+        ],
+      },
+    })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]?.type).toBe('tool_call_end')
+  })
+
   test('mixed content -> events emitted in source order', () => {
     const events = mapSdkMessage(SESSION_ID, {
       type: 'assistant',
