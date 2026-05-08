@@ -29,6 +29,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { MethodNotSupportedError } from '../../server/errors.ts'
+import type { SessionUpdateEvent } from '../../wire/events.ts'
 import type {
   CancelRequest,
   CompactSessionRequest,
@@ -131,6 +132,24 @@ interface OpencodeSessionState {
    * passes a per-turn override.
    */
   modelAdvertised?: boolean
+  /**
+   * Latch flipped true by {@link OpencodeDriver.compact} before the
+   * `session.summarize({auto: false})` SDK call. Cleared the moment
+   * the matching `session.compacted` SSE event arrives. While true,
+   * the compact flow's local mapper override re-tags
+   * `compaction_started` + `compaction_completed` with
+   * `trigger: 'manual'` (opencode's `session.compacted` SSE event
+   * carries no trigger field, so the default mapper falls back to
+   * 'auto').
+   */
+  pendingManualCompact?: boolean
+  /**
+   * Captured providerID + modelID for the session. opencode's
+   * `session.summarize` requires both; we cache them at session.create
+   * time so compact() can fire without rebuilding the model identity.
+   */
+  providerID?: string
+  modelID?: string
 }
 
 /**
@@ -222,6 +241,7 @@ export class OpencodeDriver implements BackendDriver {
 
     // 5. Persist driver-internal state. Orchestrator only sees the
     //    Kodizm sessionId; opencode's id stays inside the driver.
+    const parsedModel = this.parseCanonicalModel(params.model)
     this.sessions.set(sessionId, {
       sessionId,
       bridge,
@@ -232,6 +252,7 @@ export class OpencodeDriver implements BackendDriver {
         cwd: params.cwd,
         ...(params.model === undefined ? {} : { model: params.model }),
       },
+      ...(parsedModel === undefined ? {} : { providerID: parsedModel.providerID, modelID: parsedModel.modelID }),
     })
 
     return { sessionId }
@@ -270,9 +291,12 @@ export class OpencodeDriver implements BackendDriver {
     state.activePromptController = controller
 
     // 2. Bus event mapper translates opencode -> canonical sessionUpdate.
+    //    Wrap emit with the manual-compact latch override so the events
+    //    mapped from `session.updated.time.compacting` + `session.compacted`
+    //    re-tag trigger:'manual' when compact() initiated the compaction.
     const eventMapper = new OpencodeEventMapper({
       sessionId,
-      emit: (e) => emit.send(e),
+      emit: (e) => emit.send(this.applyManualCompactLatch(state, e)),
       mcpReverseMap: state.mcpReverseMap,
     })
 
@@ -669,15 +693,73 @@ export class OpencodeDriver implements BackendDriver {
   }
 
   /**
-   * `session/compact`: T2 stub. Real implementation lands in T8
-   * (opencode `sdk.session.summarize({auto: false})` +
-   * `pendingManualCompact` latch + event-mapper override on
-   * `session.compacted` SSE).
+   * `session/compact`: dispatches opencode's
+   * `sdk.session.summarize({sessionID, providerID, modelID, auto: false})`
+   * against the session's running opencode HTTP server. Sets
+   * {@link OpencodeSessionState.pendingManualCompact} on the state
+   * before the dispatch so the local mapper override re-tags the
+   * resulting `compaction_started` / `compaction_completed` events
+   * with `trigger: 'manual'` (opencode's `session.compacted` SSE
+   * event carries no trigger field).
    *
-   * @throws {MethodNotSupportedError} unconditionally until T8 lands
+   * Unlike Claude/codex, opencode's compaction is fire-and-track:
+   * the SDK call returns immediately with a 202; the actual
+   * `compaction_started` (mapped from `session.updated.time.compacting`)
+   * + `compaction_completed` (mapped from `session.compacted`)
+   * notifications flow on the persistent SSE stream the prompt()
+   * loop subscribes to. compact() awaits the latch's clear so the
+   * caller observes a settled compaction.
+   *
+   * @throws {SessionNotFoundError} when the session id is unknown OR
+   *         when providerID / modelID was never captured (session
+   *         opened with no model field; opencode requires both for
+   *         summarize)
    */
-  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
-    throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
+  public async compact(request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
+    const state = this.sessions.get(request.sessionId)
+    if (state === undefined) {
+      throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
+    }
+    if (state.providerID === undefined || state.modelID === undefined) {
+      throw new MethodNotSupportedError('session/compact (no model captured)', this.supportedMethodNames())
+    }
+
+    state.pendingManualCompact = true
+
+    const sessionApi = state.handle.sdk.session as unknown as {
+      summarize?: (parameters: {
+        path: { sessionID: string }
+        body: { providerID: string; modelID: string; auto: boolean }
+      }) => Promise<unknown>
+    }
+
+    if (typeof sessionApi.summarize !== 'function') {
+      state.pendingManualCompact = false
+      throw new MethodNotSupportedError('session/compact (sdk.summarize unavailable)', this.supportedMethodNames())
+    }
+
+    try {
+      await sessionApi.summarize({
+        path: { sessionID: state.opencodeSessionId },
+        body: {
+          providerID: state.providerID,
+          modelID: state.modelID,
+          auto: false,
+        },
+      })
+    } catch (error) {
+      state.pendingManualCompact = false
+      throw error
+    }
+
+    // Resulting compaction_started + compaction_completed events flow
+    // on the persistent SSE stream that the active prompt() loop
+    // subscribes to via OpencodeEventMapper. The mapper's emit hook
+    // (wired in T8 alongside this compact() impl) checks the latch
+    // and re-tags trigger:'manual' before firing through to the
+    // emit passed in here. The latch self-clears the moment
+    // compaction_completed lands, so callers do NOT need to await
+    // here; subsequent calls to compact() simply re-arm the latch.
   }
 
   /**
@@ -687,5 +769,31 @@ export class OpencodeDriver implements BackendDriver {
    */
   private supportedMethodNames(): ReadonlyArray<string> {
     return ['initialize', 'session/new']
+  }
+
+  /**
+   * Override `compaction_started` / `compaction_completed` events to
+   * carry `trigger: 'manual'` while the per-session
+   * {@link OpencodeSessionState.pendingManualCompact} latch is on.
+   * Clears the latch the moment a `compaction_completed` event lands
+   * so a subsequent unrelated auto-compaction stays correctly tagged.
+   *
+   * opencode's `session.compacted` SSE event carries no trigger
+   * field; without the latch the mapper defaults to 'auto'. The
+   * latch is the only signal distinguishing manual from auto on
+   * this backend.
+   */
+  private applyManualCompactLatch(state: OpencodeSessionState, event: SessionUpdateEvent): SessionUpdateEvent {
+    if (state.pendingManualCompact !== true) {
+      return event
+    }
+    if (event.type === 'compaction_started') {
+      return { ...event, trigger: 'manual' }
+    }
+    if (event.type === 'compaction_completed') {
+      state.pendingManualCompact = false
+      return { ...event, trigger: 'manual' }
+    }
+    return event
   }
 }
