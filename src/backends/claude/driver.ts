@@ -20,9 +20,10 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { MethodNotSupportedError, SessionNotFoundError } from '../../server/errors.ts'
+import { SessionNotFoundError } from '../../server/errors.ts'
 import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
+import type { SessionUpdateEvent } from '../../wire/events.ts'
 import type {
   CancelRequest,
   CompactSessionRequest,
@@ -243,6 +244,18 @@ interface SessionState {
    * the outbound permission RPC.
    */
   inactivityThresholdMs?: number
+  /**
+   * Latch that flips true when {@link ClaudeDriver.compact} dispatches
+   * the synthetic `/compact` prompt + flips back to false the moment
+   * the matching `compact_boundary` event arrives. While true, the
+   * event-mapper override re-tags `compaction_started` +
+   * `compaction_completed` events with `trigger: 'manual'` (the SDK's
+   * `compact_metadata` already says 'manual' on the boundary itself,
+   * but the preceding `system status: 'compacting'` carries no
+   * trigger field, so the mapper defaults to 'auto' without this
+   * latch).
+   */
+  pendingManualCompact?: boolean
 }
 
 const FULL_CAPABILITIES: DriverCapabilities = {
@@ -351,23 +364,36 @@ export class ClaudeDriver implements BackendDriver {
   }
 
   /**
-   * `session/compact`: T2 stub. Real implementation lands in T4
-   * (Claude SDK `/compact` slash-command dispatch + per-session
-   * `pendingManualCompact` latch + event-mapper trigger override).
+   * `session/compact`: dispatches the SDK's `/compact` slash command
+   * as a synthetic prompt turn. Sets `pendingManualCompact` on the
+   * session state before the dispatch so the event-mapper override
+   * re-tags the resulting `compaction_started` /
+   * `compaction_completed` events with `trigger: 'manual'` (the SDK's
+   * `system status: 'compacting'` carries no trigger field, so the
+   * default would be 'auto' without the latch).
    *
-   * @throws {MethodNotSupportedError} unconditionally until T4 lands
+   * The latch clears the moment a `compaction_completed` event lands
+   * (whether or not the compaction succeeded). Back-to-back compact()
+   * calls re-arm the latch each time.
+   *
+   * @throws {SessionNotFoundError} when the session id is unknown
    */
-  public async compact(_request: CompactSessionRequest, _emit: EventEmitter): Promise<void> {
-    throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
-  }
+  public async compact(request: CompactSessionRequest, emit: EventEmitter): Promise<void> {
+    const state = this.sessions.get(request.sessionId)
+    if (state === undefined) {
+      throw new SessionNotFoundError(request.sessionId)
+    }
 
-  /**
-   * Whitelist of fully-implemented method names. Currently surfaces
-   * inside {@link MethodNotSupportedError.data} for the T2 compact
-   * stub; T4 deletes this once the throw goes away.
-   */
-  private supportedMethodNames(): string[] {
-    return ['initialize', 'session/new', 'session/prompt', 'session/cancel', 'session/load', 'session/fork']
+    state.pendingManualCompact = true
+
+    await this.prompt(
+      request.sessionId,
+      {
+        sessionId: request.sessionId,
+        prompt: [{ type: 'text', text: '/compact' }],
+      },
+      emit,
+    )
   }
 
   public async prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult> {
@@ -583,7 +609,8 @@ export class ClaudeDriver implements BackendDriver {
           }
         }
         tracker.observe(message)
-        const events = tracker.rewrite(mapSdkMessage(sessionId, message))
+        const rawEvents = tracker.rewrite(mapSdkMessage(sessionId, message))
+        const events = this.applyManualCompactLatch(state, rawEvents)
         for (const event of events) {
           emit.send(event)
         }
@@ -937,5 +964,39 @@ export class ClaudeDriver implements BackendDriver {
       }
     }
     return text.join('\n')
+  }
+
+  /**
+   * Override `compaction_started` / `compaction_completed` events to
+   * carry `trigger: 'manual'` while the per-session
+   * {@link SessionState.pendingManualCompact} latch is on. Clears
+   * the latch the moment a `compaction_completed` event lands so a
+   * subsequent unrelated auto-compact does not get mis-tagged.
+   *
+   * The SDK does NOT include a `trigger` field on the preceding
+   * `system status: 'compacting'` message so the mapper defaults to
+   * 'auto'. The matching `compact_boundary` carries authoritative
+   * metadata, but only on success; failures surface as
+   * `system status: null + compact_result: 'failed'` which also
+   * defaults to 'auto'. The latch covers both paths.
+   *
+   * @param state - the session this event batch belongs to (carries the latch)
+   * @param events - events freshly produced by mapSdkMessage() in this turn
+   * @returns the same list with trigger overrides applied (and latch consumed on completion)
+   */
+  private applyManualCompactLatch(state: SessionState, events: SessionUpdateEvent[]): SessionUpdateEvent[] {
+    if (state.pendingManualCompact !== true) {
+      return events
+    }
+    return events.map((event) => {
+      if (event.type === 'compaction_started') {
+        return { ...event, trigger: 'manual' }
+      }
+      if (event.type === 'compaction_completed') {
+        state.pendingManualCompact = false
+        return { ...event, trigger: 'manual' }
+      }
+      return event
+    })
   }
 }
