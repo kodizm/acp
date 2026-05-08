@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   CancelRequestSchema,
+  CompactSessionRequestSchema,
   ForkSessionRequestSchema,
   InitializeRequestSchema,
   LoadSessionRequestSchema,
@@ -437,6 +438,28 @@ describe('LoadSessionRequestSchema', () => {
       cwd: 'workspace',
       mcpServers: [],
     })
+    expect(result.success).toBe(false)
+  })
+})
+
+describe('CompactSessionRequestSchema', () => {
+  test('accepts a sessionId-only compact request', () => {
+    const result = CompactSessionRequestSchema.safeParse({ sessionId: 's1' })
+    expect(result.success).toBe(true)
+  })
+
+  test('rejects a missing sessionId', () => {
+    const result = CompactSessionRequestSchema.safeParse({})
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects a non-string sessionId', () => {
+    const result = CompactSessionRequestSchema.safeParse({ sessionId: 42 })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects an empty-string sessionId', () => {
+    const result = CompactSessionRequestSchema.safeParse({ sessionId: '' })
     expect(result.success).toBe(false)
   })
 })

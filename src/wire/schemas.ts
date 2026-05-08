@@ -217,6 +217,18 @@ export const LoadSessionRequestSchema = z
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
 
 /**
+ * `session/compact` request: orchestrator asks the backend driver to
+ * trigger a manual context compaction for the session. Drivers that
+ * lack a manual compact RPC (every backend except Claude/codex/opencode
+ * today) raise {@link MethodNotSupportedError} when the dispatcher
+ * calls them. The matching `compaction_started` + `compaction_completed`
+ * sessionUpdate events still flow on the existing wire.
+ */
+export const CompactSessionRequestSchema = z.object({
+  sessionId: z.string().min(1),
+})
+
+/**
  * `session/fork` request: branch an existing session with optional
  * overrides. systemPrompt + model overrides apply to the new branch
  * only; the source session remains untouched.
