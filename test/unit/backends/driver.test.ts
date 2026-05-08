@@ -12,6 +12,7 @@ import {
 import { MethodNotSupportedError } from '@/server/errors.ts'
 import type {
   CancelRequest,
+  CompactSessionRequest,
   ForkSessionRequest,
   InitializeRequest,
   LoadSessionRequest,
@@ -58,6 +59,10 @@ class StubDriver implements BackendDriver {
   public async forkSession(_params: ForkSessionRequest): Promise<NewSessionResult> {
     return { sessionId: 'stub-fork' }
   }
+
+  public async compact(_request: CompactSessionRequest): Promise<void> {
+    // no-op
+  }
 }
 
 describe('BackendDriver contract', () => {
@@ -91,6 +96,7 @@ describe('BackendDriver contract', () => {
     await driver.cancel({ sessionId: session.sessionId })
     await driver.loadSession({ sessionId: 's1', cwd: '/x', mcpServers: [] })
     await driver.forkSession({ sourceSessionId: 's1', cwd: '/x', mcpServers: [] })
+    await driver.compact({ sessionId: session.sessionId })
   })
 
   test('capabilities() returns the advertised feature set', () => {

@@ -11,6 +11,7 @@ import type { z } from 'zod'
 
 import type {
   CancelRequestSchema,
+  CompactSessionRequestSchema,
   ForkSessionRequestSchema,
   InitializeRequestSchema,
   LoadSessionRequestSchema,
@@ -26,3 +27,4 @@ export type PromptRequest = z.infer<typeof PromptRequestSchema>
 export type CancelRequest = z.infer<typeof CancelRequestSchema>
 export type LoadSessionRequest = z.infer<typeof LoadSessionRequestSchema>
 export type ForkSessionRequest = z.infer<typeof ForkSessionRequestSchema>
+export type CompactSessionRequest = z.infer<typeof CompactSessionRequestSchema>

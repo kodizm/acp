@@ -92,6 +92,7 @@ function makeMockDriver(caps: Partial<DriverCapabilities> = {}): {
     cancel: [],
     loadSession: [],
     forkSession: [],
+    compact: [],
   }
 
   const fullCaps: DriverCapabilities = {
@@ -135,6 +136,9 @@ function makeMockDriver(caps: Partial<DriverCapabilities> = {}): {
     forkSession: async (params) => {
       calls.forkSession?.push(params)
       return { sessionId: 'forked-session' }
+    },
+    compact: async (request) => {
+      calls.compact?.push(request)
     },
   }
 
@@ -336,6 +340,55 @@ describe('createAcpServer with backend wiring', () => {
       jsonrpc: '2.0',
       id: 8,
       error: { code: -32601 },
+    })
+  })
+
+  test('session/compact dispatches to backend.compact and returns empty result', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const { driver, calls } = makeMockDriver()
+    const server = createAcpServer({ transport, backend: driver })
+    const serving = server.serve()
+
+    injectFrame({
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'session/compact',
+      params: { sessionId: 's1' },
+    })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    expect(calls.compact).toHaveLength(1)
+    expect(calls.compact?.[0]).toMatchObject({ sessionId: 's1' })
+    expect(outbound[0]).toMatchObject({
+      jsonrpc: '2.0',
+      id: 11,
+      result: {},
+    })
+  })
+
+  test('session/compact rejected with -32602 when sessionId missing', async () => {
+    const { transport, injectFrame, injectClose, outbound } = createTestTransport()
+    const { driver, calls } = makeMockDriver()
+    const server = createAcpServer({ transport, backend: driver })
+    const serving = server.serve()
+
+    injectFrame({
+      jsonrpc: '2.0',
+      id: 12,
+      method: 'session/compact',
+      params: {},
+    })
+    await waitForOutbound(outbound, 1)
+    injectClose()
+    await serving
+
+    expect(calls.compact).toHaveLength(0)
+    expect(outbound[0]).toMatchObject({
+      jsonrpc: '2.0',
+      id: 12,
+      error: { code: -32602 },
     })
   })
 

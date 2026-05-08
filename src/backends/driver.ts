@@ -15,6 +15,7 @@ import { MethodNotSupportedError } from '../server/errors.ts'
 import type { SessionFailedReason, SessionUpdateEvent } from '../wire/events.ts'
 import type {
   CancelRequest,
+  CompactSessionRequest,
   ForkSessionRequest,
   InitializeRequest,
   LoadSessionRequest,
@@ -169,6 +170,21 @@ export interface BackendDriver {
    * overrides. Gated on `capabilities().fork`.
    */
   forkSession(params: ForkSessionRequest): Promise<NewSessionResult>
+
+  /**
+   * `session/compact`: orchestrator-driven manual context compaction.
+   * Drivers translate to their backend's native lever (Claude SDK
+   * `/compact` slash command, codex `thread/compact/start`,
+   * opencode `session.summarize({auto: false})`). Implementations
+   * MUST set a per-session `pendingManualCompact` latch before
+   * dispatching so the matching `compaction_started` /
+   * `compaction_completed` events can be re-tagged
+   * `trigger: 'manual'` on the way back out. Drivers without a
+   * manual compact lever throw {@link MethodNotSupportedError}.
+   *
+   * @throws {MethodNotSupportedError} when the backend has no manual compact lever
+   */
+  compact(request: CompactSessionRequest): Promise<void>
 }
 
 /**

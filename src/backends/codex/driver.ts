@@ -27,6 +27,7 @@ import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
 import type {
   CancelRequest,
+  CompactSessionRequest,
   ForkSessionRequest,
   InitializeRequest,
   LoadSessionRequest,
@@ -1088,5 +1089,23 @@ export class CodexDriver implements BackendDriver {
       configPath: sourceState.configPath,
     })
     return { sessionId: newSessionId }
+  }
+
+  /**
+   * `session/compact`: T2 stub. Real implementation lands in T6
+   * (codex `thread/compact/start` JSON-RPC + `pendingManualCompact`
+   * latch + event-mapper trigger override on `ContextCompaction`).
+   *
+   * @throws {MethodNotSupportedError} unconditionally until T6 lands
+   */
+  public async compact(_request: CompactSessionRequest): Promise<void> {
+    throw new MethodNotSupportedError('session/compact', [
+      'initialize',
+      'session/new',
+      'session/prompt',
+      'session/cancel',
+      'session/load',
+      'session/fork',
+    ])
   }
 }

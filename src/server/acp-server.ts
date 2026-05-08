@@ -23,6 +23,7 @@ import type { BackendDriver, EventEmitter } from '../backends/driver.ts'
 import { ensureCapability } from '../backends/driver.ts'
 import {
   CancelRequestSchema,
+  CompactSessionRequestSchema,
   ForkSessionRequestSchema,
   InitializeRequestSchema,
   LoadSessionRequestSchema,
@@ -245,6 +246,17 @@ function wireBackendHandlers(server: AcpServer, backend: BackendDriver): void {
     ensureCapability(backend.capabilities(), 'fork', 'session/fork')
     const validated = validateOrThrow(ForkSessionRequestSchema, params)
     return await backend.forkSession(validated)
+  })
+
+  // 7. session/compact: manual context-compaction trigger. Driver-level
+  //    MethodNotSupported throws fall through the dispatcher's catch
+  //    and surface as -32601 to the orchestrator (no static capability
+  //    flag yet — the wire shape is uniform across backends, only the
+  //    underlying lever differs).
+  server.on('session/compact', async (params) => {
+    const validated = validateOrThrow(CompactSessionRequestSchema, params)
+    await backend.compact(validated)
+    return {}
   })
 }
 

@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto'
 import { MethodNotSupportedError } from '../../server/errors.ts'
 import type {
   CancelRequest,
+  CompactSessionRequest,
   ForkSessionRequest,
   InitializeRequest,
   LoadSessionRequest,
@@ -665,6 +666,18 @@ export class OpencodeDriver implements BackendDriver {
       return direct
     }
     throw new Error('opencode session.create returned no session id')
+  }
+
+  /**
+   * `session/compact`: T2 stub. Real implementation lands in T8
+   * (opencode `sdk.session.summarize({auto: false})` +
+   * `pendingManualCompact` latch + event-mapper override on
+   * `session.compacted` SSE).
+   *
+   * @throws {MethodNotSupportedError} unconditionally until T8 lands
+   */
+  public async compact(_request: CompactSessionRequest): Promise<void> {
+    throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
   }
 
   /**

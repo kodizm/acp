@@ -20,11 +20,12 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { SessionNotFoundError } from '../../server/errors.ts'
+import { MethodNotSupportedError, SessionNotFoundError } from '../../server/errors.ts'
 import { HeartbeatTimer } from '../../server/heartbeat.ts'
 import type { DeferredPermissionStore } from '../../session/deferred-store.ts'
 import type {
   CancelRequest,
+  CompactSessionRequest,
   ForkSessionRequest,
   InitializeRequest,
   LoadSessionRequest,
@@ -347,6 +348,26 @@ export class ClaudeDriver implements BackendDriver {
       parentSessionId: params.sourceSessionId,
     })
     return { sessionId }
+  }
+
+  /**
+   * `session/compact`: T2 stub. Real implementation lands in T4
+   * (Claude SDK `/compact` slash-command dispatch + per-session
+   * `pendingManualCompact` latch + event-mapper trigger override).
+   *
+   * @throws {MethodNotSupportedError} unconditionally until T4 lands
+   */
+  public async compact(_request: CompactSessionRequest): Promise<void> {
+    throw new MethodNotSupportedError('session/compact', this.supportedMethodNames())
+  }
+
+  /**
+   * Whitelist of fully-implemented method names. Currently surfaces
+   * inside {@link MethodNotSupportedError.data} for the T2 compact
+   * stub; T4 deletes this once the throw goes away.
+   */
+  private supportedMethodNames(): string[] {
+    return ['initialize', 'session/new', 'session/prompt', 'session/cancel', 'session/load', 'session/fork']
   }
 
   public async prompt(sessionId: string, params: PromptRequest, emit: EventEmitter): Promise<PromptResult> {
