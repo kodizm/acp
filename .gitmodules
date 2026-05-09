@@ -1,0 +1,21 @@
+[submodule "references/claude-code-cli-source-code"]
+	path = references/claude-code-cli-source-code
+	url = git@github.com:anilcancakir/claude-code-cli-source-code.git
+[submodule "references/claude-agent-acp"]
+	path = references/claude-agent-acp
+	url = https://github.com/agentclientprotocol/claude-agent-acp.git
+[submodule "references/cc-connect"]
+	path = references/cc-connect
+	url = https://github.com/chenhg5/cc-connect.git
+[submodule "references/codex"]
+	path = references/codex
+	url = https://github.com/openai/codex.git
+[submodule "references/codex-acp"]
+	path = references/codex-acp
+	url = https://github.com/zed-industries/codex-acp.git
+[submodule "references/opencode"]
+	path = references/opencode
+	url = https://github.com/anomalyco/opencode.git
+[submodule "references/typescript-sdk"]
+	path = references/typescript-sdk
+	url = https://github.com/agentclientprotocol/typescript-sdk.git
