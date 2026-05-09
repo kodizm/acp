@@ -81,3 +81,17 @@ The published bin (`src/index.ts`) only wires `KODIZM_BACKEND=claude`. `codex` a
 - `test/e2e/` exercises the full ACP roundtrip with a mocked SDK.
 - `test/integration/` holds smoke suites grouped by backend prefix (`claude-*`, `codex-*`, `opencode-*`). Each suite probes its own auth at module load and skips cleanly when credentials are absent. Real-CLI suites need the matching binary on `PATH`.
 - New tests reuse helpers from `test/integration/_helpers.ts` (claude), `test/integration/_codex-fake-process.ts` (deterministic codex), `test/integration/_mcp-fixture.ts` (in-process MCP server).
+
+## References
+
+Upstream sources are git submodules under `references/`. Investigation order when a backend fact is uncertain: `src/` (this package) -> matching `references/<upstream>/` -> only then web. Submodules are pinned to specific SHAs; bumping is an explicit `git submodule update --remote` per ref.
+
+| Path | Purpose |
+|------|---------|
+| `references/claude-code-cli-source-code/` | Claude Code CLI source. First stop for anything claude-driver related (SDK option shapes, tool dispatch, permission plugin). |
+| `references/claude-agent-acp/` | Reference ACP agent implementation against Claude Code. Working example when wiring a new feature. |
+| `references/cc-connect/` | Multi-CLI bridge that already speaks ACP. Prior-art for cross-backend coupling decisions. |
+| `references/codex/` | Codex CLI source. First stop for codex-driver questions (app-server protocol, item types, approval shapes, feature flags). |
+| `references/codex-acp/` | Codex ACP integration source. |
+| `references/opencode/` | Opencode CLI source. First stop for opencode-driver questions (Question.Service, permission ruleset, MCP naming, /event SSE shape). |
+| `references/typescript-sdk/` | ACP protocol TypeScript SDK source. Authoritative for `@agentclientprotocol/sdk` types and method names. |
