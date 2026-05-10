@@ -297,9 +297,8 @@ async function bootBackend(kind: SupportedBackend): Promise<import('./backends/d
       return built.driver
     }
     case 'opencode': {
-      throw new Error(
-        `KODIZM_BACKEND=${kind} requires the bin's ${kind}-backend wire (deferred follow-up). Use KODIZM_BACKEND=claude for now.`,
-      )
+      const built = await buildOpencodeBackend()
+      return built.driver
     }
   }
 }
@@ -318,6 +317,28 @@ async function buildCodexBackend(): Promise<{
   const driver = new CodexDriver({
     agentInfo: { version: '0.5.4' },
     ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME }),
+  })
+
+  return { driver }
+}
+
+/**
+ * Build the Opencode backend driver. Each newSession() call boots its
+ * own `opencode serve` subprocess via OpencodeHttpBridge; the bridge
+ * reads `OPENCODE_AUTH_CONTENT` (or falls back to
+ * `~/.local/share/opencode/auth.json`) when starting the subprocess.
+ * Per `kodizm-acp/CLAUDE.md`, `OPENCODE_AUTH_CONTENT` is layered onto
+ * subprocess env only for the duration of `bridge.start()` and
+ * restored afterwards; the driver handles that lifecycle internally,
+ * so the bin only constructs the driver.
+ */
+async function buildOpencodeBackend(): Promise<{
+  driver: import('./backends/opencode/driver.ts').OpencodeDriver
+}> {
+  const { OpencodeDriver } = await import('./backends/opencode/driver.ts')
+
+  const driver = new OpencodeDriver({
+    agentInfo: { version: '0.5.4' },
   })
 
   return { driver }
