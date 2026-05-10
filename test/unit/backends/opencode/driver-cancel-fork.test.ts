@@ -98,7 +98,11 @@ describe('OpencodeDriver cwd passthrough (with fake bridge)', () => {
     const driver = new OpencodeDriver({
       agentInfo: { version: '0.0.1-cwd' },
       bridgeFactory: (): OpencodeHttpBridge =>
-        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+        ({
+          start: fakeStart,
+          stop: mock(async () => undefined),
+          isRunning: () => true,
+        }) as unknown as OpencodeHttpBridge,
     })
 
     await driver.newSession({ cwd: '/tmp/probe-cwd-create', mcpServers: [] })
@@ -127,7 +131,11 @@ describe('OpencodeDriver cwd passthrough (with fake bridge)', () => {
     const driver = new OpencodeDriver({
       agentInfo: { version: '0.0.1-cwd-fork' },
       bridgeFactory: (): OpencodeHttpBridge =>
-        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+        ({
+          start: fakeStart,
+          stop: mock(async () => undefined),
+          isRunning: () => true,
+        }) as unknown as OpencodeHttpBridge,
     })
 
     const parent = await driver.newSession({ cwd: '/tmp/probe-cwd-parent', mcpServers: [] })
@@ -162,7 +170,11 @@ describe('OpencodeDriver cwd passthrough (with fake bridge)', () => {
     const driver = new OpencodeDriver({
       agentInfo: { version: '0.0.1-cwd-load' },
       bridgeFactory: (): OpencodeHttpBridge =>
-        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+        ({
+          start: fakeStart,
+          stop: mock(async () => undefined),
+          isRunning: () => true,
+        }) as unknown as OpencodeHttpBridge,
     })
 
     await driver.loadSession({
