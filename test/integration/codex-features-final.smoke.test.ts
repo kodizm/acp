@@ -474,15 +474,17 @@ describe('B4, thinking_chunk routing (reasoning subtype delta)', () => {
 
 // ====== C-group: capability claims + production-readiness ======
 
-describe('C1, document content block via base64 data URL', () => {
-  test('image canonical block with data: URL is forwarded, document block gracefully ignored', async () => {
+describe('C1, image url + document block via canonical content blocks', () => {
+  test('image url forwarded as image{url}; document degrades to a labeled text marker', async () => {
+    let capturedInputs: unknown = null
     const fakeBin = await buildFakeCodex({
       onTurn: `
-        notify('input_seen', { input: frame.params?.input })
+        try {
+          const fs = require('node:fs')
+          fs.writeFileSync('/tmp/codex-c1-input.json', JSON.stringify(frame.params?.input ?? null))
+        } catch (e) {}
         sendResp(frame.id, { turn: { id: 'turn_c1', status: 'running' } })
         notify('turn/started', { thread_id: 't_fake', turn: { id: 'turn_c1' } })
-        // Emit token usage so the driver's event-mapper has a value
-        // to roll into the canonical 'usage' event at turn close.
         notify('thread/tokenUsage/updated', {
           threadId: 't_fake', turnId: 'turn_c1',
           tokenUsage: { total: { totalTokens: 5, inputTokens: 3, outputTokens: 2, cachedInputTokens: 0 } },
@@ -498,23 +500,103 @@ describe('C1, document content block via base64 data URL', () => {
         toolPolicy: { defaultMode: 'bypassPermissions' },
       })
       const { emit, events } = recorder()
-      // Document blocks are not in the codex UserInput union; the
-      // driver currently silently drops them. Image with file:// path
-      // converts to localImage; image with https URL converts to image.
       await driver.prompt(
         sessionId,
         {
           sessionId,
           prompt: [
             { type: 'text', text: 'check' },
-            { type: 'image', uri: 'https://example.com/x.png' },
-            { type: 'document', uri: 'file:///tmp/x.pdf' },
+            { type: 'image', source: { type: 'url', url: 'https://example.com/x.png' } },
+            {
+              type: 'document',
+              source: { type: 'url', url: 'https://example.com/spec.pdf' },
+              title: 'spec.pdf',
+            },
           ],
         },
         emit,
       )
-      // Turn completes cleanly even with unsupported document block.
+      capturedInputs = JSON.parse(readFileSync('/tmp/codex-c1-input.json', 'utf8'))
+      const items = capturedInputs as Array<{ type: string; url?: string; text?: string }>
+      expect(items.length).toBe(3)
+      expect(items[0]).toEqual({ type: 'text', text: 'check', text_elements: [] })
+      expect(items[1]).toEqual({ type: 'image', url: 'https://example.com/x.png' })
+      expect(items[2]?.type).toBe('text')
+      expect(items[2]?.text).toContain('spec.pdf')
+      expect(items[2]?.text).toContain('codex backend cannot ingest documents directly')
       expect(events.some((e) => e.type === 'usage')).toBe(true)
+    } finally {
+      await cleanup()
+    }
+  }, 10_000)
+
+  test('image content block materialises and cleans up: localImage path written + unlinked after turn', async () => {
+    const fakeBin = await buildFakeCodex({
+      onTurn: `
+        try {
+          const fs = require('node:fs')
+          const input = frame.params?.input ?? []
+          // Capture the localImage path + file content into a JSON
+          // sidecar so the test can assert on both the wire shape and
+          // the materialised bytes BEFORE the driver's finally-block
+          // unlinks the temp file.
+          let snapshot = { input, localFileExisted: false, localFileBytes: null }
+          for (const item of input) {
+            if (item && item.type === 'localImage' && typeof item.path === 'string') {
+              snapshot.localFileExisted = fs.existsSync(item.path)
+              if (snapshot.localFileExisted) {
+                snapshot.localFileBytes = fs.readFileSync(item.path).toString('base64')
+              }
+            }
+          }
+          fs.writeFileSync('/tmp/codex-c1-image-snapshot.json', JSON.stringify(snapshot))
+        } catch (e) {}
+        sendResp(frame.id, { turn: { id: 'turn_img1', status: 'running' } })
+        notify('turn/started', { thread_id: 't_fake', turn: { id: 'turn_img1' } })
+        notify('thread/tokenUsage/updated', {
+          threadId: 't_fake', turnId: 'turn_img1',
+          tokenUsage: { total: { totalTokens: 4, inputTokens: 2, outputTokens: 2, cachedInputTokens: 0 } },
+        })
+        notify('turn/completed', { thread_id: 't_fake', turn: { id: 'turn_img1', status: 'completed' } })
+      `,
+    })
+    const { driver, cleanup } = await makeFakeDriver(fakeBin)
+    const FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+    try {
+      const { sessionId } = await driver.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        toolPolicy: { defaultMode: 'bypassPermissions' },
+      })
+      const { emit } = recorder()
+      await driver.prompt(
+        sessionId,
+        {
+          sessionId,
+          prompt: [
+            { type: 'text', text: 'see image' },
+            { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: FAKE_PNG_B64 } },
+          ],
+        },
+        emit,
+      )
+
+      const snapshot = JSON.parse(readFileSync('/tmp/codex-c1-image-snapshot.json', 'utf8')) as {
+        input: Array<{ type: string; path?: string; text?: string }>
+        localFileExisted: boolean
+        localFileBytes: string | null
+      }
+      expect(snapshot.input.length).toBe(2)
+      expect(snapshot.input[0]?.type).toBe('text')
+      expect(snapshot.input[1]?.type).toBe('localImage')
+      const localPath = snapshot.input[1]?.path as string
+      expect(localPath).toMatch(/kodizm-acp-attachments\/[0-9a-f-]+\/[0-9a-f-]+\.png$/)
+      expect(snapshot.localFileExisted).toBe(true)
+      expect(snapshot.localFileBytes).toBe(FAKE_PNG_B64)
+
+      // After the prompt resolved, the driver's finally must have
+      // unlinked the temp file (best-effort cleanup contract).
+      expect(existsSync(localPath)).toBe(false)
     } finally {
       await cleanup()
     }
