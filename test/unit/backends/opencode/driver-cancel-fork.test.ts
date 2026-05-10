@@ -78,6 +78,106 @@ describe('OpencodeDriver.cancel (with fake bridge)', () => {
   })
 })
 
+describe('OpencodeDriver cwd passthrough (with fake bridge)', () => {
+  test('newSession passes params.cwd as directory to sdk.session.create', async () => {
+    const createCalls: Array<Record<string, unknown>> = []
+    const fakeStart = mock(async () => ({
+      url: 'http://127.0.0.1:0',
+      port: 0,
+      sdk: {
+        session: {
+          create: mock(async (parameters: Record<string, unknown>) => {
+            createCalls.push(parameters)
+            return { data: { id: 'fake-opencode-id' } }
+          }),
+          abort: mock(async () => ({})),
+        },
+      },
+    }))
+
+    const driver = new OpencodeDriver({
+      agentInfo: { version: '0.0.1-cwd' },
+      bridgeFactory: (): OpencodeHttpBridge =>
+        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+    })
+
+    await driver.newSession({ cwd: '/tmp/probe-cwd-create', mcpServers: [] })
+
+    expect(createCalls.length).toBe(1)
+    expect(createCalls[0]?.directory).toBe('/tmp/probe-cwd-create')
+  })
+
+  test('forkSession passes params.cwd as directory to sdk.session.fork', async () => {
+    const forkCalls: Array<Record<string, unknown>> = []
+    const fakeStart = mock(async () => ({
+      url: 'http://127.0.0.1:0',
+      port: 0,
+      sdk: {
+        session: {
+          create: mock(async () => ({ data: { id: 'parent-opencode-id' } })),
+          fork: mock(async (parameters: Record<string, unknown>) => {
+            forkCalls.push(parameters)
+            return { data: { id: 'fork-opencode-id' } }
+          }),
+          abort: mock(async () => ({})),
+        },
+      },
+    }))
+
+    const driver = new OpencodeDriver({
+      agentInfo: { version: '0.0.1-cwd-fork' },
+      bridgeFactory: (): OpencodeHttpBridge =>
+        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+    })
+
+    const parent = await driver.newSession({ cwd: '/tmp/probe-cwd-parent', mcpServers: [] })
+    await driver.forkSession({
+      sourceSessionId: parent.sessionId,
+      cwd: '/tmp/probe-cwd-fork',
+      mcpServers: [],
+    })
+
+    expect(forkCalls.length).toBe(1)
+    expect(forkCalls[0]?.directory).toBe('/tmp/probe-cwd-fork')
+    expect(forkCalls[0]?.sessionID).toBe('parent-opencode-id')
+  })
+
+  test('loadSession passes params.cwd as directory to sdk.session.get', async () => {
+    const getCalls: Array<Record<string, unknown>> = []
+    const fakeStart = mock(async () => ({
+      url: 'http://127.0.0.1:0',
+      port: 0,
+      sdk: {
+        session: {
+          create: mock(async () => ({ data: { id: 'unused' } })),
+          get: mock(async (parameters: Record<string, unknown>) => {
+            getCalls.push(parameters)
+            return { data: { id: parameters.sessionID } }
+          }),
+          abort: mock(async () => ({})),
+        },
+      },
+    }))
+
+    const driver = new OpencodeDriver({
+      agentInfo: { version: '0.0.1-cwd-load' },
+      bridgeFactory: (): OpencodeHttpBridge =>
+        ({ start: fakeStart, stop: mock(async () => undefined), isRunning: () => true }) as unknown as OpencodeHttpBridge,
+    })
+
+    await driver.loadSession({
+      sessionId: 'kodizm-session-id',
+      cwd: '/tmp/probe-cwd-load',
+      mcpServers: [],
+      _meta: { opencodeSessionId: 'opencode-load-id' },
+    })
+
+    expect(getCalls.length).toBe(1)
+    expect(getCalls[0]?.directory).toBe('/tmp/probe-cwd-load')
+    expect(getCalls[0]?.sessionID).toBe('opencode-load-id')
+  })
+})
+
 describe.skipIf(!HAS_OPENCODE)('OpencodeDriver.forkSession', () => {
   test('fork returns a fresh Kodizm sessionId pointing at a new opencode session', async () => {
     const driver = new OpencodeDriver({ agentInfo: { version: '0.0.1-fork' } })

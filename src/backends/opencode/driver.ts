@@ -222,9 +222,13 @@ export class OpencodeDriver implements BackendDriver {
     //    prompt / cancel routing. The `permission` ruleset comes from
     //    the policy translator (D5); when the orchestrator omits
     //    toolPolicy the ruleset is empty and opencode falls back to
-    //    its own per-tool ask flow.
+    //    its own per-tool ask flow. `directory` is the per-session
+    //    project root opencode walks for AGENTS.md / CLAUDE.md / CONTEXT.md
+    //    (`references/opencode/packages/opencode/src/session/instruction.ts:79,121`).
+    //    Mirrors the upstream ACP impl at
+    //    `references/opencode/packages/opencode/src/acp/session.ts:24`.
     const ruleset = buildOpencodeRuleset(params.toolPolicy)
-    const createParams: Record<string, unknown> = {}
+    const createParams: Record<string, unknown> = { directory: params.cwd }
     if (ruleset.length > 0) {
       createParams.permission = ruleset
     }
@@ -549,11 +553,11 @@ export class OpencodeDriver implements BackendDriver {
     const handle = await bridge.start({})
 
     const sessionApi = handle.sdk.session as unknown as {
-      get?: (parameters: { sessionID: string }) => Promise<unknown>
+      get?: (parameters: { sessionID: string; directory?: string }) => Promise<unknown>
     }
     if (typeof sessionApi.get === 'function') {
       try {
-        await sessionApi.get({ sessionID: meta.opencodeSessionId })
+        await sessionApi.get({ sessionID: meta.opencodeSessionId, directory: params.cwd })
       } catch (err) {
         await bridge.stop().catch(() => undefined)
         throw err
@@ -587,6 +591,7 @@ export class OpencodeDriver implements BackendDriver {
     const sessionApi = source.handle.sdk.session as unknown as {
       fork?: (parameters: {
         sessionID: string
+        directory?: string
         messageID?: string
       }) => Promise<{ data?: { id?: string }; id?: string }>
     }
@@ -595,7 +600,10 @@ export class OpencodeDriver implements BackendDriver {
       throw new MethodNotSupportedError('session/fork', this.supportedMethodNames())
     }
 
-    const forkResult = await sessionApi.fork({ sessionID: source.opencodeSessionId })
+    const forkResult = await sessionApi.fork({
+      sessionID: source.opencodeSessionId,
+      directory: params.cwd,
+    })
     const forkedOpencodeId = this.extractSessionId(forkResult)
 
     this.sessions.set(newSessionId, {
