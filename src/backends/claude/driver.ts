@@ -49,6 +49,7 @@ import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
 import { buildCanUseTool } from './permission-bridge.ts'
 import { translateToolPolicyToClaude } from './policy.ts'
+import { type ClaudeSdkUserMessage, buildClaudePromptInput } from './prompt-input.ts'
 import { SubagentTracker } from './subagent.ts'
 
 /**
@@ -129,7 +130,10 @@ export interface SdkAdapter {
    * SDK messages until the turn settles (assistant emits a stop
    * reason or the abort controller fires).
    */
-  query(options: { prompt: string; options: ClaudeSdkOptions }): AsyncIterable<SdkMessage>
+  query(options: {
+    prompt: string | AsyncIterable<ClaudeSdkUserMessage>
+    options: ClaudeSdkOptions
+  }): AsyncIterable<SdkMessage>
 }
 
 /**
@@ -546,11 +550,11 @@ export class ClaudeDriver implements BackendDriver {
     let failureReason: PromptResult['failureReason']
     let failureDetail: PromptResult['failureDetail']
 
-    const promptText = this.serializePrompt(params)
-    const finalPrompt =
+    const resumePrefix =
       resumeAnswer !== undefined && resumeToolUseId !== undefined
-        ? this.injectDeferredResumePrefix(promptText, resumeAnswer.behavior, resumeToolUseId)
-        : promptText
+        ? this.buildDeferredResumePrefix(resumeAnswer.behavior, resumeToolUseId)
+        : undefined
+    const finalPrompt = buildClaudePromptInput(params, resumePrefix)
 
     // Phase 1.7 lifecycle timers. Heartbeat fires while prompt runs;
     // inactivity probe fires when SDK message gap exceeds threshold.
@@ -721,12 +725,10 @@ export class ClaudeDriver implements BackendDriver {
    *
    * Locked decision 2 from `phase-01c-deferred-permission.md`.
    */
-  private injectDeferredResumePrefix(originalPrompt: string, decision: 'allow' | 'deny', toolUseId: string): string {
-    const prefix =
-      decision === 'allow'
-        ? `User has approved the deferred permission. Please re-issue the deferred tool call (id: ${toolUseId}) with the same arguments so the transcript records the result. Original user request: `
-        : `User has denied the deferred permission (id: ${toolUseId}). The tool will not run; please acknowledge the denial and continue without retrying it. Original user request: `
-    return `${prefix}${originalPrompt}`
+  private buildDeferredResumePrefix(decision: 'allow' | 'deny', toolUseId: string): string {
+    return decision === 'allow'
+      ? `User has approved the deferred permission. Please re-issue the deferred tool call (id: ${toolUseId}) with the same arguments so the transcript records the result. Original user request: `
+      : `User has denied the deferred permission (id: ${toolUseId}). The tool will not run; please acknowledge the denial and continue without retrying it. Original user request: `
   }
 
   /**
@@ -946,24 +948,6 @@ export class ClaudeDriver implements BackendDriver {
       return input
     }
     return { type: 'preset', preset: 'claude_code', append: input.append }
-  }
-
-  /**
-   * Serialize the canonical prompt[] (content blocks) into the SDK's
-   * input format. The SDK's query() accepts either a string OR an
-   * iterable of UserMessage objects; for phase 1 we string-flatten
-   * text blocks and rely on the SDK's own content-block roundtrip
-   * for image/document blocks (set on options as a separate field
-   * in T21's content-mapper extension).
-   */
-  private serializePrompt(params: PromptRequest): string {
-    const text: string[] = []
-    for (const block of params.prompt) {
-      if (typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text') {
-        text.push((block as { text: string }).text)
-      }
-    }
-    return text.join('\n')
   }
 
   /**
