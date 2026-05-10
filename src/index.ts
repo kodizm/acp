@@ -28,7 +28,7 @@ import type { AcpServerLike } from './backends/claude/permission-bridge.ts'
 import { createAcpServer } from './server/acp-server.ts'
 import { BackendNotConfiguredError, UnknownBackendError } from './server/errors.ts'
 import { runShutdown } from './server/shutdown.ts'
-import { createNdjsonTransport, type NdjsonTransport } from './server/transport.ts'
+import { type NdjsonTransport, createNdjsonTransport } from './server/transport.ts'
 import type { DebugRecorder } from './util/debug-recorder.ts'
 
 /**
@@ -277,6 +277,31 @@ async function buildClaudeBackend(): Promise<{
 }
 
 /**
+ * Boot the matching backend driver for the given identifier. The
+ * dispatcher is the single seam every backend goes through; new backends
+ * extend the switch + the {@link SupportedBackend} union.
+ *
+ * @throws when the requested backend has not been wired into the bin
+ *         yet. Steps 14 + 15 of the acp-attachments plan replace the
+ *         codex / opencode placeholder branches with real boot
+ *         sequences.
+ */
+async function bootBackend(kind: SupportedBackend): Promise<import('./backends/driver.ts').BackendDriver> {
+  switch (kind) {
+    case 'claude': {
+      const built = await buildClaudeBackend()
+      return built.driver
+    }
+    case 'codex':
+    case 'opencode': {
+      throw new Error(
+        `KODIZM_BACKEND=${kind} requires the bin's ${kind}-backend wire (deferred follow-up). Use KODIZM_BACKEND=claude for now.`,
+      )
+    }
+  }
+}
+
+/**
  * Bin entrypoint side-effect runner. Resolves the backend, builds the
  * matching driver + the NDJSON transport, wires the AcpServer, and
  * awaits its serve loop until the transport's read stream ends.
@@ -287,21 +312,20 @@ export async function main(): Promise<void> {
 
   process.stderr.write(`${JSON.stringify({ level: 'info', message: 'kodizm-acp resolved backend', backend })}\n`)
 
-  // 1. Build the driver. Codex / opencode wires land in their own
-  //    follow-up plans; for now they are recognised by env but throw
-  //    a clear "not yet wired" error so the orchestrator surfaces
-  //    SessionFailureReason::AuthError rather than a stub-bin EOF.
+  // 1. Build the driver. Codex / opencode wires land in steps 14 + 15
+  //    of the acp-attachments plan; until then the dispatcher throws a
+  //    clear "not yet wired" error.
   let driver: import('./backends/driver.ts').BackendDriver
-  if (backend === 'claude') {
-    const built = await buildClaudeBackend()
-    driver = built.driver
-  } else {
+  try {
+    driver = await bootBackend(backend)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
     process.stderr.write(
       `${JSON.stringify({
         level: 'error',
         message: 'kodizm-acp backend not yet wired in bin',
         backend,
-        hint: `KODIZM_BACKEND=${backend} requires the bin's ${backend}-backend wire (deferred follow-up). Use KODIZM_BACKEND=claude for now.`,
+        hint: message,
       })}\n`,
     )
     process.exit(2)
