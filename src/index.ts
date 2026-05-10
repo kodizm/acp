@@ -241,7 +241,7 @@ async function buildClaudeBackend(): Promise<{
 
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.4' },
+    agentInfo: { version: '0.5.5' },
     sdk: {
       // Real-SDK adapter: forwards prompt + options to the SDK's
       // query() iterator. Force `settingSources: []` so the SDK does
@@ -315,7 +315,7 @@ async function buildCodexBackend(): Promise<{
   const { CodexDriver } = await import('./backends/codex/driver.ts')
 
   const driver = new CodexDriver({
-    agentInfo: { version: '0.5.4' },
+    agentInfo: { version: '0.5.5' },
     ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME }),
   })
 
@@ -338,7 +338,7 @@ async function buildOpencodeBackend(): Promise<{
   const { OpencodeDriver } = await import('./backends/opencode/driver.ts')
 
   const driver = new OpencodeDriver({
-    agentInfo: { version: '0.5.4' },
+    agentInfo: { version: '0.5.5' },
   })
 
   return { driver }
