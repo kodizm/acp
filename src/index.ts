@@ -243,15 +243,16 @@ async function buildClaudeBackend(): Promise<{
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
     agentInfo: { version: '0.5.5' },
     sdk: {
-      // Real-SDK adapter: forwards prompt + options to the SDK's
-      // query() iterator. Force `settingSources: []` so the SDK does
-      // not read the container-baked /home/agent/.claude/settings.json
-      // (which carries Kodizm's curated CC defaults: hooks, model,
-      // enabledPlugins, etc.) — those defaults are meant for when a
-      // human runs Claude Code interactively. The orchestrator owns
-      // the session config it ships through `session/new`; layering
-      // a stale settings.json on top creates surprising hangs (the
-      // SDK can wait on hooks the container has not provisioned).
+      // Real-SDK adapter: forwards the driver-built options to the SDK's
+      // query() iterator and pins the claude CLI path. settingSources is
+      // NOT forced here: the orchestrator owns it via the canonical wire
+      // field (`NewSessionRequest.settingSources`). When the wire omits
+      // it the driver passes nothing through, so the SDK's own default
+      // (`user, project, local`, matching standalone CC CLI) fires.
+      // Explicit options the driver still sets (`permissionMode`, `model`)
+      // win over anything in the container-baked
+      // /home/agent/.claude/settings.json; settings.json's deny rules and
+      // hooks cleanly stack on top of the driver's policy.
       // biome-ignore lint/suspicious/useAwait: AsyncGenerator wrapper requires async signature
       async *query(args) {
         const optsIn = (args as { options?: unknown }).options as Record<string, unknown> | undefined
@@ -259,7 +260,6 @@ async function buildClaudeBackend(): Promise<{
           prompt: (args as { prompt: unknown }).prompt,
           options: {
             ...(optsIn ?? {}),
-            settingSources: [],
             // Force the SDK to spawn the system-installed claude CLI
             // instead of trying to resolve cli.js via import.meta.url
             // (which the bundle breaks).

@@ -922,6 +922,16 @@ export class ClaudeDriver implements BackendDriver {
           }
         : {}
 
+    // settingSources: orchestrator opt-out for fs config layering.
+    // Undefined means pass nothing to the SDK so its built-in default
+    // (`user, project, local`, matching standalone Claude Code CLI)
+    // fires. Explicit `[]` disables every fs scope; selective subsets
+    // are honored verbatim.
+    const settingSourcesOpt =
+      'settingSources' in params && params.settingSources !== undefined
+        ? { settingSources: [...params.settingSources] }
+        : {}
+
     return {
       cwd: params.cwd,
       mcpServers: translateMcpServers(params.mcpServers),
@@ -929,6 +939,7 @@ export class ClaudeDriver implements BackendDriver {
       ...skills,
       ...policyOptions,
       ...compactEnv,
+      ...settingSourcesOpt,
     }
   }
 

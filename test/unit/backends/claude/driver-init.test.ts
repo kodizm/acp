@@ -159,4 +159,44 @@ describe('ClaudeDriver.newSession + buildSdkOptions', () => {
 
     expect(options.model).toBeUndefined()
   })
+
+  test('settingSources undefined => SDK options carries no key', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({ cwd: '/workspace', mcpServers: [] })
+
+    expect('settingSources' in options).toBe(false)
+  })
+
+  test('settingSources: [] => SDK options carries an empty array verbatim', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      settingSources: [],
+    })
+
+    expect(options.settingSources).toEqual([])
+  })
+
+  test('settingSources: ["project"] => SDK options carries the selective subset', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      settingSources: ['project'],
+    })
+
+    expect(options.settingSources).toEqual(['project'])
+  })
+
+  test('settingSources: ["user","project","local"] => full CC CLI scope passes through', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      settingSources: ['user', 'project', 'local'],
+    })
+
+    expect(options.settingSources).toEqual(['user', 'project', 'local'])
+  })
 })

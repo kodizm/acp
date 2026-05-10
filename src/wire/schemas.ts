@@ -86,7 +86,19 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'debugCaptureRpc',
   'heartbeatIntervalMs',
   'inactivityThresholdMs',
+  'settingSources',
 ] as const
+
+/**
+ * Filesystem setting scopes the SDK reads from (claude only). Mirrors
+ * `@anthropic-ai/claude-agent-sdk`'s `settingSources` Option. When the
+ * orchestrator omits the field the driver passes nothing through, so
+ * the SDK's own default (`user, project, local`, matching standalone
+ * Claude Code CLI) fires. An explicit empty array disables all fs
+ * scopes; selective subsets are honored verbatim. Codex / opencode
+ * have no parallel concept and ignore this field.
+ */
+const SettingSourcesSchema = z.array(z.enum(['user', 'project', 'local']))
 
 /**
  * Canonical permissionMode enum mirrors the Claude SDK shape exactly
@@ -168,6 +180,7 @@ export const NewSessionRequestSchema = z
     debugCaptureRpc: z.boolean().optional(),
     heartbeatIntervalMs: z.number().int().positive().optional(),
     inactivityThresholdMs: z.number().int().positive().optional(),
+    settingSources: SettingSourcesSchema.optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
@@ -212,6 +225,7 @@ export const LoadSessionRequestSchema = z
     sessionId: z.string().min(1),
     cwd: AbsolutePathSchema,
     mcpServers: z.array(McpServerSchema),
+    settingSources: SettingSourcesSchema.optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
@@ -241,6 +255,7 @@ export const ForkSessionRequestSchema = z
     systemPrompt: SystemPromptSchema.optional(),
     model: z.string().optional(),
     additionalDirectories: z.array(AbsolutePathSchema).optional(),
+    settingSources: SettingSourcesSchema.optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
