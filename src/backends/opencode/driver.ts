@@ -55,6 +55,7 @@ import { OpencodeHttpBridge, type OpencodeHttpBridgeHandle } from './http-bridge
 import { buildOpencodeMcpAdds } from './mcp-mapper.ts'
 import { handleOpencodePermission } from './permission-bridge.ts'
 import { buildOpencodeRuleset } from './policy.ts'
+import { type OpencodePart, buildOpencodeParts } from './prompt-input.ts'
 import { dispatchOpencodeEvent, isTurnComplete } from './prompt-stream.ts'
 
 /**
@@ -340,7 +341,7 @@ export class OpencodeDriver implements BackendDriver {
 
     // 4. Send the actual prompt to opencode. Either v2 prompt or v1
     //    fallback depending on what the SDK exposes.
-    const promptText = this.collectPromptText(params)
+    const parts = buildOpencodeParts(params)
     let stopReason: PromptResult['stopReason'] = 'end_turn'
     let failureDetail: string | undefined
     let failureReason: PromptResult['failureReason']
@@ -365,7 +366,7 @@ export class OpencodeDriver implements BackendDriver {
       await this.sendPrompt({
         handle: state.handle,
         opencodeSessionId: state.opencodeSessionId,
-        text: promptText,
+        parts,
         model: turnModel,
         signal: controller.signal,
       })
@@ -445,7 +446,7 @@ export class OpencodeDriver implements BackendDriver {
   private async sendPrompt(args: {
     handle: OpencodeHttpBridgeHandle
     opencodeSessionId: string
-    text: string
+    parts: OpencodePart[]
     model: string | undefined
     signal: AbortSignal
   }): Promise<void> {
@@ -462,7 +463,7 @@ export class OpencodeDriver implements BackendDriver {
     // forwarding.
     const promptParams: Record<string, unknown> = {
       sessionID: args.opencodeSessionId,
-      parts: [{ type: 'text', text: args.text }],
+      parts: args.parts,
     }
     const parsedModel = this.parseCanonicalModel(args.model)
     if (parsedModel !== undefined) {
@@ -494,16 +495,6 @@ export class OpencodeDriver implements BackendDriver {
       providerID: model.slice(0, slash),
       modelID: model.slice(slash + 1),
     }
-  }
-
-  private collectPromptText(params: PromptRequest): string {
-    const parts: string[] = []
-    for (const block of params.prompt) {
-      if (block === null || typeof block !== 'object') continue
-      const b = block as { type?: string; text?: string }
-      if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
-    }
-    return parts.join('\n')
   }
 
   public async cancel(request: CancelRequest): Promise<void> {
