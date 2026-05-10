@@ -241,7 +241,7 @@ async function buildClaudeBackend(): Promise<{
 
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.5' },
+    agentInfo: { version: '0.5.6' },
     sdk: {
       // Real-SDK adapter: forwards the driver-built options to the SDK's
       // query() iterator and pins the claude CLI path. settingSources is
@@ -314,7 +314,7 @@ async function buildCodexBackend(): Promise<{
   const { CodexDriver } = await import('./backends/codex/driver.ts')
 
   const driver = new CodexDriver({
-    agentInfo: { version: '0.5.5' },
+    agentInfo: { version: '0.5.6' },
     ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME }),
   })
 
@@ -337,7 +337,7 @@ async function buildOpencodeBackend(): Promise<{
   const { OpencodeDriver } = await import('./backends/opencode/driver.ts')
 
   const driver = new OpencodeDriver({
-    agentInfo: { version: '0.5.5' },
+    agentInfo: { version: '0.5.6' },
   })
 
   return { driver }

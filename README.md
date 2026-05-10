@@ -108,12 +108,16 @@ type NewSessionRequest = {
   debugCaptureRpc?: boolean
   heartbeatIntervalMs?: number
   inactivityThresholdMs?: number
+  settingSources?: ('user' | 'project' | 'local')[]  // claude only; opt-out
   _meta?: Record<string, unknown>    // passthrough; canonical fields rejected
 }
 ```
 
 > [!WARNING]
 > `permissionTimeoutMs` and `permissionDeferTimeoutMs` are mutually exclusive. Pick hard-deny on timeout OR soft-defer on timeout, not both. The schema rejects the conflict with a clear error.
+
+> [!NOTE]
+> `settingSources` is the claude-only opt-out for filesystem config layering. When omitted the SDK's own default fires, matching the standalone Claude Code CLI: project `CLAUDE.md` + `.claude/CLAUDE.md` + `.claude/rules/*.md` load from `cwd` walking up; user `~/.claude/CLAUDE.md` + `~/.claude/rules/*.md` and `CLAUDE.local.md` load too. Pass `[]` to disable every fs scope; pass a selective subset like `['project']` to load only project-tracked files. Codex (`AGENTS.md` from `cwd`) and opencode (`AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` from session `directory`) have no parallel field and ignore this option.
 
 ### Tool policy
 
