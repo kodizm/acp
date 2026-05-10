@@ -51,6 +51,7 @@ import { classifyCodexError } from './error-classifier.ts'
 import { CodexEventMapper } from './event-mapper.ts'
 import { handleCodexApproval } from './permission-bridge.ts'
 import { buildSandboxPolicy, mapPermissionMode } from './policy.ts'
+import { type CodexUserInput, buildCodexUserInputs } from './prompt-input.ts'
 
 /**
  * Options the driver passes to {@link CodexDriverDeps.spawnFactory}
@@ -358,14 +359,7 @@ export class CodexDriver implements BackendDriver {
     // 2. Translate canonical content blocks to codex UserInput[].
     //    Pattern B: when resuming with a cached answer, prepend a retry
     //    prefix so the model re-issues the deferred tool call.
-    // Codex's UserInput schema (codex-rs/v2/UserInput.ts):
-    //   { type: 'text', text, text_elements }
-    //   { type: 'image', url }            <- remote URL
-    //   { type: 'localImage', path }      <- local filesystem
-    //   { type: 'skill', name, path }
-    //   { type: 'mention', name, path }
-    // text_elements is non-optional; we ship empty.
-    const inputs: Array<Record<string, unknown>> = []
+    const inputs: CodexUserInput[] = []
     if (resumeAnswer !== undefined && resumeToolUseId !== undefined && resumeToolName !== undefined) {
       inputs.push({
         type: 'text',
@@ -373,27 +367,9 @@ export class CodexDriver implements BackendDriver {
         text_elements: [],
       })
     }
-    for (const block of params.prompt) {
-      if (typeof block !== 'object' || block === null) continue
-      const b = block as { type?: string; text?: string; uri?: string; path?: string; url?: string }
-      if (b.type === 'text' && typeof b.text === 'string') {
-        inputs.push({ type: 'text', text: b.text, text_elements: [] })
-        continue
-      }
-      if (b.type === 'image') {
-        // Canonical: { type: 'image', uri } accepts file://, http(s)://,
-        // or a bare local path. Map to codex's localImage / image.
-        const uri = b.uri ?? b.url ?? b.path
-        if (typeof uri !== 'string') continue
-        if (uri.startsWith('file://')) {
-          inputs.push({ type: 'localImage', path: uri.slice('file://'.length) })
-        } else if (uri.startsWith('http://') || uri.startsWith('https://')) {
-          inputs.push({ type: 'image', url: uri })
-        } else if (uri.startsWith('/')) {
-          inputs.push({ type: 'localImage', path: uri })
-        }
-      }
-    }
+    const built = await buildCodexUserInputs(params, { tmpDir: tmpdir(), sessionId })
+    inputs.push(...built.inputs)
+    const cleanupPaths = built.cleanupPaths
 
     // 3. Phase 1.7 lifecycle timers.
     const promptStartedAt = Date.now()
@@ -806,6 +782,13 @@ export class CodexDriver implements BackendDriver {
       }
       state.abortController = undefined
       state.activeTurnId = undefined
+      // Best-effort cleanup of materialised image temp files. Per-file
+      // catch keeps an unlink failure on one path from masking another
+      // path's success or the prompt outcome.
+      if (cleanupPaths.length > 0) {
+        const fs = await import('node:fs/promises')
+        await Promise.allSettled(cleanupPaths.map((p) => fs.unlink(p).catch(() => undefined)))
+      }
     }
 
     if (stopReason === 'session_failed') {
