@@ -18,7 +18,9 @@ function makeRecordingAdapter(messages: SdkMessage[]): {
   const prompts: string[] = []
   const adapter: SdkAdapter = {
     async *query(args) {
-      prompts.push(args.prompt)
+      if (typeof args.prompt === 'string') {
+        prompts.push(args.prompt)
+      }
       for (const message of messages) {
         yield message
       }

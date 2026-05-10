@@ -26,7 +26,7 @@ function makeRecordingAdapter(
 ): SdkAdapter {
   return {
     async *query(args) {
-      state.capturedPrompt = args.prompt
+      state.capturedPrompt = typeof args.prompt === 'string' ? args.prompt : null
       yield { type: 'system', subtype: 'init', session_id: sdkSessionId } satisfies SdkMessage
       const canUseTool = (args.options as { canUseTool?: unknown }).canUseTool as
         | ((t: string, i: Record<string, unknown>, o: CanUseToolOptions) => Promise<PermissionResult>)
@@ -290,7 +290,7 @@ describe('ClaudeDriver Process B canUseTool wrap + retry prompt injection (T9)',
       sdk: {
         async *query(args) {
           const target = callIdx++ === 0 ? harness1 : harness2
-          target.capturedPrompt = args.prompt
+          target.capturedPrompt = typeof args.prompt === 'string' ? args.prompt : null
           yield { type: 'system', subtype: 'init', session_id: 'sdk_second' } satisfies SdkMessage
           const canUseTool = (args.options as { canUseTool?: unknown }).canUseTool as
             | ((t: string, i: Record<string, unknown>, o: CanUseToolOptions) => Promise<PermissionResult>)

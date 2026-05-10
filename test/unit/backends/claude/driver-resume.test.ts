@@ -104,7 +104,7 @@ describe('ClaudeDriver.loadSession, continue conversation', () => {
     const calls: Array<{ resume?: string; prompt: string }> = []
     const adapter: SdkAdapter = {
       async *query(args) {
-        calls.push({ resume: args.options.resume, prompt: args.prompt })
+        calls.push({ resume: args.options.resume, prompt: typeof args.prompt === 'string' ? args.prompt : '' })
         yield { type: 'result', subtype: 'success' } satisfies SdkMessage
       },
     }
