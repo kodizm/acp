@@ -517,7 +517,12 @@ describe('C1, image url + document block via canonical content blocks', () => {
         emit,
       )
       capturedInputs = JSON.parse(readFileSync('/tmp/codex-c1-input.json', 'utf8'))
-      const items = capturedInputs as Array<{ type: string; url?: string; text?: string }>
+      const items = capturedInputs as Array<{
+        type: string
+        url?: string
+        text?: string
+        text_elements?: unknown[]
+      }>
       expect(items.length).toBe(3)
       expect(items[0]).toEqual({ type: 'text', text: 'check', text_elements: [] })
       expect(items[1]).toEqual({ type: 'image', url: 'https://example.com/x.png' })
