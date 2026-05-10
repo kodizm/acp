@@ -15,9 +15,9 @@
  *   .claude/rules/secret.md -> ZEBRA_TOKEN = 9988
  */
 
-import { homedir, tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { mkdtemp } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ClaudeCredentials } from '@/backends/claude/auth.ts'
@@ -64,7 +64,6 @@ async function runClaudeVariant(
 ): Promise<{ output: string; tools: string[]; threw?: string }> {
   const sdkMod = await import('@anthropic-ai/claude-agent-sdk')
   const adapter: SdkAdapter = {
-    // biome-ignore lint/suspicious/useAwait: AsyncGenerator wrapper requires async signature
     async *query(args) {
       const opts = { ...(args.options as Record<string, unknown>) }
       if (overrideSettingSources === 'empty') opts.settingSources = []
@@ -158,7 +157,7 @@ async function runOpencode(prompt: string): Promise<{ output: string; events?: s
 
 async function main(): Promise<void> {
   const log = (...a: unknown[]): void => {
-    process.stderr.write(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n')
+    process.stderr.write(`${a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')}\n`)
   }
 
   const report: Record<
@@ -211,9 +210,11 @@ async function main(): Promise<void> {
 
   log('\n=== SUMMARY ===')
   for (const [k, v] of Object.entries(report)) {
-    log(`${k.padEnd(20)} pizza=${v.pizzaHit ? 'HIT' : 'miss'} zebra=${v.zebraHit ? 'HIT' : 'miss'}${v.threw ? ' THREW=' + v.threw.slice(0, 80) : ''}`)
+    log(
+      `${k.padEnd(20)} pizza=${v.pizzaHit ? 'HIT' : 'miss'} zebra=${v.zebraHit ? 'HIT' : 'miss'}${v.threw ? ` THREW=${v.threw.slice(0, 80)}` : ''}`,
+    )
   }
-  process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
 }
 
 void main().then(() => process.exit(0))

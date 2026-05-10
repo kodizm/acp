@@ -253,7 +253,6 @@ async function buildClaudeBackend(): Promise<{
       // win over anything in the container-baked
       // /home/agent/.claude/settings.json; settings.json's deny rules and
       // hooks cleanly stack on top of the driver's policy.
-      // biome-ignore lint/suspicious/useAwait: AsyncGenerator wrapper requires async signature
       async *query(args) {
         const optsIn = (args as { options?: unknown }).options as Record<string, unknown> | undefined
         const isolated = {
