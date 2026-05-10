@@ -292,13 +292,35 @@ async function bootBackend(kind: SupportedBackend): Promise<import('./backends/d
       const built = await buildClaudeBackend()
       return built.driver
     }
-    case 'codex':
+    case 'codex': {
+      const built = await buildCodexBackend()
+      return built.driver
+    }
     case 'opencode': {
       throw new Error(
         `KODIZM_BACKEND=${kind} requires the bin's ${kind}-backend wire (deferred follow-up). Use KODIZM_BACKEND=claude for now.`,
       )
     }
   }
+}
+
+/**
+ * Build the Codex backend driver. The driver spawns `codex app-server`
+ * via the default spawn factory; the codex CLI subprocess reads its
+ * own auth from `~/.codex/auth.json` (or `CODEX_HOME` override) so the
+ * bin does not pickup OAuth tokens like the claude path does.
+ */
+async function buildCodexBackend(): Promise<{
+  driver: import('./backends/codex/driver.ts').CodexDriver
+}> {
+  const { CodexDriver } = await import('./backends/codex/driver.ts')
+
+  const driver = new CodexDriver({
+    agentInfo: { version: '0.5.4' },
+    ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME }),
+  })
+
+  return { driver }
 }
 
 /**
