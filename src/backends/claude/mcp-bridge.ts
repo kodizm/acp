@@ -20,6 +20,17 @@ export interface ClaudeSdkMcpServer {
   type: 'http'
   url: string
   headers?: Record<string, string>
+  /**
+   * When true the SDK marks every tool from this server with the
+   * `anthropic/alwaysLoad` _meta flag. The flag bypasses defer-loading
+   * (so the tools land in the initial `tools/list` instead of behind
+   * the SDK's `ToolSearch` discovery layer) AND forces a synchronous
+   * connect during SDK startup capped at the 5s timeout. Kodizm's
+   * runtime relies on the kodizm server being immediately addressable
+   * (memories / tasks / project state are turn-1 affordances), so
+   * `translateMcpServers` always sets this flag.
+   */
+  alwaysLoad?: boolean
 }
 
 /**
@@ -49,6 +60,7 @@ function buildSdkServer(server: McpServer): ClaudeSdkMcpServer {
   const sdkServer: ClaudeSdkMcpServer = {
     type: server.type,
     url: server.url,
+    alwaysLoad: true,
   }
 
   if (server.headers !== undefined && server.headers.length > 0) {

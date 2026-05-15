@@ -71,6 +71,7 @@ describe('ClaudeDriver.newSession + buildSdkOptions', () => {
       kodizm: {
         type: 'http',
         url: 'https://kodizm.com/mcp/internal',
+        alwaysLoad: true,
         headers: { Authorization: 'Bearer kdz-int-jwt.x.y' },
       },
     })

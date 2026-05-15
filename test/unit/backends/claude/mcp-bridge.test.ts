@@ -23,6 +23,7 @@ describe('translateMcpServers', () => {
       kodizm: {
         type: 'http',
         url: 'https://kodizm.com/mcp/internal',
+        alwaysLoad: true,
         headers: { Authorization: 'Bearer kdz-int-jwt.x.y' },
       },
     })
@@ -41,6 +42,7 @@ describe('translateMcpServers', () => {
     expect(sdkServers.public).toEqual({
       type: 'http',
       url: 'https://public.example.com/mcp',
+      alwaysLoad: true,
     })
     expect('headers' in (sdkServers.public ?? {})).toBe(false)
   })
@@ -63,6 +65,26 @@ describe('translateMcpServers', () => {
       Authorization: 'Bearer X',
       'X-Trace-Id': 'trace-abc',
     })
+  })
+
+  test('forces alwaysLoad: true so SDK eager-connects and skips deferred-tool defer', () => {
+    // Without alwaysLoad, the SDK treats MCP tools as deferred and the agent
+    // must discover them via ToolSearch. In Kodizm's deployment the kodizm
+    // server is mandatory (memories / tasks / project-state) so we always
+    // want the tools surfaced in the initial tools/list. The SDK's
+    // `_meta.anthropic/alwaysLoad` flag bypasses defer-loading at registration
+    // time and forces a synchronous connect during SDK startup.
+    const input: McpServer[] = [
+      {
+        type: 'http',
+        name: 'kodizm',
+        url: 'https://kodizm.com/mcp/internal',
+        headers: [{ name: 'Authorization', value: 'Bearer kdz-int-jwt.x.y' }],
+      },
+    ]
+
+    const sdkServers = translateMcpServers(input)
+    expect(sdkServers.kodizm?.alwaysLoad).toBe(true)
   })
 
   test('translates multiple servers into a name-keyed record', () => {
