@@ -76,13 +76,19 @@ export function dispatchOpencodeEvent(event: OpencodeBusEvent, handlers: Dispatc
 }
 
 /**
- * Predicate: does this event signal the end of an assistant turn?
+ * Predicate: does this event signal the end of the whole turn?
  * The driver loops until this returns true, then resolves `prompt()`.
  */
 export function isTurnComplete(event: OpencodeBusEvent): boolean {
-  if (event.type !== 'message.updated') return false
-  const info = (event.properties as { info?: { role?: string; time?: { completed?: number } } }).info
-  if (info === undefined) return false
-  if (info.role !== 'assistant') return false
-  return typeof info.time?.completed === 'number'
+  // `session.idle` is the only signal that the whole turn is over.
+  //
+  // This used to key on the first `message.updated` carrying a
+  // completed assistant message, which is wrong as soon as the turn
+  // calls a tool: the tool-call message completes first, the loop broke
+  // on it, and the assistant's follow-up text never reached the
+  // orchestrator. A production opencode session emitted
+  // tool_call_begin + tool_call_end + usage and no output_chunk at all,
+  // while a tool-free prompt looked perfectly fine because it has only
+  // one assistant message.
+  return event.type === 'session.idle'
 }

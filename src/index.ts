@@ -400,6 +400,17 @@ export async function main(): Promise<void> {
   //    resolves cleanly on EOF; the SIGTERM hook calls process.exit
   //    if the orchestrator drops us mid-prompt.
   await server.serve()
+
+  // 7. Release per-session backend resources on the NORMAL exit too.
+  //    EOF is the usual way this process ends: the orchestrator kills
+  //    its `docker exec` client, stdin closes, serve() resolves and
+  //    main returns. No signal is delivered, so the SIGTERM hook never
+  //    fires and disposal has to happen here as well, or opencode's
+  //    per-session server outlives the bin exactly as it did before
+  //    the hook was wired.
+  if (activeDriver?.disposeAll !== undefined) {
+    await activeDriver.disposeAll()
+  }
 }
 
 // 1. Top-level execution guard: only run main when invoked as the bin,

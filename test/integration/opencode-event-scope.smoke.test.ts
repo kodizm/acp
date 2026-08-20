@@ -85,4 +85,46 @@ describe.skipIf(!HAS_OPENCODE_AUTH)('OpencodeDriver event-stream scope', () => {
       await driver.disposeAll()
     }
   }, 120_000)
+
+  test('a tool-using turn still streams the reply that follows the tool', async () => {
+    // The turn's first assistant message is the one carrying the tool
+    // call, and it completes before the reply exists. Ending the event
+    // loop there truncated every tool-using turn: tool_call_begin,
+    // tool_call_end and usage reached the orchestrator while the answer
+    // did not. `session.idle` is the signal that the whole turn is done.
+    const sessionCwd = mkdtempSync(join(tmpdir(), 'kdz-tool-'))
+    const driver = new OpencodeDriver({ agentInfo: { version: '0.0.1-tool' } })
+
+    try {
+      const { sessionId } = await driver.newSession({
+        cwd: sessionCwd,
+        mcpServers: [],
+        model: MODEL,
+      })
+
+      const events: SessionUpdateEvent[] = []
+      const emit = { send: (e: SessionUpdateEvent) => events.push(e) }
+
+      await driver.prompt(
+        sessionId,
+        {
+          sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'Use your bash tool to run `echo TOOLTEXT-42`, then reply with only what it printed.',
+            },
+          ],
+        },
+        emit,
+      )
+
+      const types = events.map((e) => e.type)
+
+      expect(types).toContain('tool_call_begin')
+      expect(types).toContain('output_chunk')
+    } finally {
+      await driver.disposeAll()
+    }
+  }, 180_000)
 })

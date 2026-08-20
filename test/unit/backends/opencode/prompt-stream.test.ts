@@ -87,34 +87,28 @@ describe('dispatchOpencodeEvent', () => {
 })
 
 describe('isTurnComplete', () => {
-  test('message.updated with role=assistant + time.completed -> true', () => {
+  test('session.idle -> true', () => {
+    expect(isTurnComplete({ type: 'session.idle', properties: { sessionID: 'opencode-1' } })).toBe(true)
+  })
+
+  test('a completed assistant message is NOT the end of the turn', () => {
+    // The tool-call message completes before the assistant's follow-up
+    // text exists. Treating it as the end truncated every tool-using
+    // turn: tool_call_begin + tool_call_end + usage reached the
+    // orchestrator and the reply never did.
     expect(
       isTurnComplete({
         type: 'message.updated',
         properties: { info: { role: 'assistant', time: { completed: 123 } } },
       }),
-    ).toBe(true)
-  })
-
-  test('message.updated without time.completed -> false', () => {
-    expect(
-      isTurnComplete({
-        type: 'message.updated',
-        properties: { info: { role: 'assistant', time: { created: 1 } } },
-      }),
     ).toBe(false)
   })
 
-  test('message.updated role=user -> false', () => {
-    expect(
-      isTurnComplete({
-        type: 'message.updated',
-        properties: { info: { role: 'user', time: { completed: 1 } } },
-      }),
-    ).toBe(false)
+  test('message.part.updated -> false', () => {
+    expect(isTurnComplete({ type: 'message.part.updated', properties: {} })).toBe(false)
   })
 
-  test('any other event type -> false', () => {
-    expect(isTurnComplete({ type: 'message.part.delta', properties: {} })).toBe(false)
+  test('session.updated -> false', () => {
+    expect(isTurnComplete({ type: 'session.updated', properties: {} })).toBe(false)
   })
 })
