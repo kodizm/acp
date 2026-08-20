@@ -16,8 +16,7 @@
 /**
  * Marker text injected into the synthetic tool_result so resume code
  * paths can detect a deferred row in the transcript without false
- * positives. Mirrors codex's same-named constant from
- * `src/backends/codex/deferred-permission.ts`.
+ * positives.
  */
 export const DEFERRED_MARKER: string = '__KODIZM_PERMISSION_DEFERRED__'
 

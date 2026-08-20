@@ -22,8 +22,6 @@ import { join } from 'node:path'
 
 import type { ClaudeCredentials } from '@/backends/claude/auth.ts'
 import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
-import { CodexAppServerProcess } from '@/backends/codex/app-server-spawn.ts'
-import { CodexDriver } from '@/backends/codex/driver.ts'
 import type { EventEmitter } from '@/backends/driver.ts'
 import { OpencodeDriver } from '@/backends/opencode/driver.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
@@ -108,33 +106,6 @@ async function runClaudeVariant(
   }
 }
 
-async function runCodex(prompt: string): Promise<{ output: string; threw?: string }> {
-  try {
-    const cfgDir = await mkdtemp(join(tmpdir(), 'codex-probe-'))
-    const driver = new CodexDriver({
-      agentInfo: { version: '0.0.1-probe' },
-      configDir: cfgDir,
-      spawnFactory: async () => {
-        const proc = new CodexAppServerProcess({
-          binaryPath: 'codex',
-          binaryArgs: ['app-server', '-c', 'model_reasoning_effort="low"', '--listen', 'stdio://'],
-        })
-        await proc.spawn()
-        return proc
-      },
-    })
-    const { sessionId } = await driver.newSession({
-      cwd: WS,
-      mcpServers: [],
-    })
-    const { events, emit } = recorder()
-    await driver.prompt(sessionId, { sessionId, prompt: [{ type: 'text', text: prompt }] }, emit)
-    return { output: joinOutput(events).trim() }
-  } catch (e) {
-    return { output: '', threw: e instanceof Error ? e.message : String(e) }
-  }
-}
-
 async function runOpencode(prompt: string): Promise<{ output: string; events?: string; threw?: string }> {
   try {
     const auth = readFileSync(`${homedir()}/.local/share/opencode/auth.json`, 'utf8')
@@ -183,18 +154,6 @@ async function main(): Promise<void> {
   await probeClaude('B', 'empty')
   await probeClaude('C', 'project')
   await probeClaude('D', 'all')
-
-  log('--- Codex default driver (cwd=ws) ---')
-  {
-    const r = await runCodex(PROMPT_PIZZA)
-    report.codex = {
-      output: r.output,
-      pizzaHit: r.output.includes('4242'),
-      zebraHit: r.output.includes('9988'),
-      ...(r.threw !== undefined ? { threw: r.threw } : {}),
-    }
-    log('  ', report.codex)
-  }
 
   log('--- Opencode default driver (cwd=ws) ---')
   {

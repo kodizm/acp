@@ -9,7 +9,7 @@
  * the driver's catch block handles it before reaching the
  * classifier.
  *
- * Phase 1.7 T11. Phases 2 (codex) + 3 (opencode) provide their own
+ * The opencode backend provides its own
  * error-classifier modules; the return type is shared so the driver
  * code path stays uniform.
  */

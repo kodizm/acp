@@ -16,9 +16,9 @@ describe('resolveBackendFromEnv', () => {
     expect(result).toBe('claude')
   })
 
-  test('accepts codex as a valid backend value', () => {
-    const result = resolveBackendFromEnv({ KODIZM_BACKEND: 'codex' })
-    expect(result).toBe('codex')
+  test('accepts opencode as a valid backend value', () => {
+    const result = resolveBackendFromEnv({ KODIZM_BACKEND: 'opencode' })
+    expect(result).toBe('opencode')
   })
 
   test('rejects unknown backend values', () => {

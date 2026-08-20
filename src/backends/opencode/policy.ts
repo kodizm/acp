@@ -21,7 +21,7 @@ import { parseCanonicalPattern } from '../../wire/policy.ts'
 import type { ToolPolicySchema } from '../../wire/schemas.ts'
 
 /**
- * Canonical tool-policy alias. Mirrors `CodexDriverDeps`-style
+ * Canonical tool-policy alias. Mirrors the driver-deps
  * translator pattern.
  */
 export type CanonicalToolPolicy = z.infer<typeof ToolPolicySchema>

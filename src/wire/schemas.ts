@@ -24,7 +24,7 @@ const AbsolutePathSchema = z.string().regex(/^\//, 'path must be absolute (start
 
 /**
  * MCP server entry passed inline on `session/new`. Phase 1 supports
- * the `http` transport only; codex / opencode phases may add more
+ * the `http` transport only; a later backend may add more
  * (sse, stdio) which extend this discriminator.
  */
 export const McpServerSchema = z.object({
@@ -95,7 +95,7 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
  * orchestrator omits the field the driver passes nothing through, so
  * the SDK's own default (`user, project, local`, matching standalone
  * Claude Code CLI) fires. An explicit empty array disables all fs
- * scopes; selective subsets are honored verbatim. Codex / opencode
+ * scopes; selective subsets are honored verbatim. Opencode
  * have no parallel concept and ignore this field.
  */
 const SettingSourcesSchema = z.array(z.enum(['user', 'project', 'local']))
@@ -103,7 +103,7 @@ const SettingSourcesSchema = z.array(z.enum(['user', 'project', 'local']))
 /**
  * Canonical permissionMode enum mirrors the Claude SDK shape exactly
  * so a translator-free pass-through is possible. Every backend driver
- * is responsible for mapping unsupported modes (codex / opencode may
+ * is responsible for mapping unsupported modes (opencode may
  * not have all five) to its closest native equivalent.
  */
 const PermissionModeSchema = z.enum(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'])
@@ -233,7 +233,7 @@ export const LoadSessionRequestSchema = z
 /**
  * `session/compact` request: orchestrator asks the backend driver to
  * trigger a manual context compaction for the session. Drivers that
- * lack a manual compact RPC (every backend except Claude/codex/opencode
+ * lack a manual compact RPC (every backend except Claude/opencode
  * today) raise {@link MethodNotSupportedError} when the dispatcher
  * calls them. The matching `compaction_started` + `compaction_completed`
  * sessionUpdate events still flow on the existing wire.

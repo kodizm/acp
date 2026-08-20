@@ -1,12 +1,12 @@
 # kodizm-acp
 
-ACP bridge that drives Claude Code, codex, and opencode CLIs through one canonical wire.
+ACP bridge that drives the Claude Code and opencode CLIs through one canonical wire.
 
 ## What it is
 
 `@kodizm/acp` is the Kodizm runtime's Agent Client Protocol bridge. It speaks one canonical JSON-RPC surface to the orchestrator, then translates each turn down to whichever CLI backend the session was opened against. The orchestrator never branches on backend; the same `session/new`, `session/prompt`, and `sessionUpdate` shapes carry every feature across all three.
 
-Three CLIs are supported today: Claude Code (via `@anthropic-ai/claude-agent-sdk`), codex (via `codex app-server` subprocess), and opencode (via `createOpencodeServer` from `@opencode-ai/sdk`).
+Two CLIs are supported: Claude Code (via `@anthropic-ai/claude-agent-sdk`) as the primary backend, and opencode (via `createOpencodeServer` from `@opencode-ai/sdk`) as the secondary one.
 
 ## How it works
 
@@ -25,27 +25,27 @@ The driver contract is a single TypeScript interface with seven methods. The ser
 
 ## Backend support
 
-| Feature | Claude | codex | opencode |
-|---------|:------:|:-----:|:--------:|
-| `session/new`, `session/prompt`, `session/cancel` | yes | yes | yes |
-| `session/load` (resume) | yes | yes | yes |
-| `session/fork` | yes | yes | yes |
-| `session/compact` (manual) | yes | yes | yes |
-| Image content blocks | yes | yes | yes |
-| Token + cost rollup (`usage` event) | yes | yes | yes |
-| `additionalDirectories` (sandbox) | yes | yes | n/a |
-| `mcpServers` injection | yes | yes | yes |
-| `systemPrompt` replace + append | yes | yes | yes |
-| `skills` pre-load | yes | n/a | n/a |
-| Permissions (`permission_request`) | yes | yes | yes |
-| `askUserQuestion` | yes | yes | yes |
-| Subagent events | yes | yes | yes |
-| Thinking events | yes | yes | yes |
-| Cross-process Pattern B resume | yes | yes | yes |
-| Debug capture | yes | yes | yes |
+| Feature | Claude | opencode |
+|---------|:------:|:--------:|
+| `session/new`, `session/prompt`, `session/cancel` | yes | yes |
+| `session/load` (resume) | yes | yes |
+| `session/fork` | yes | yes |
+| `session/compact` (manual) | yes | yes |
+| Image content blocks | yes | yes |
+| Token + cost rollup (`usage` event) | yes | yes |
+| `additionalDirectories` (sandbox) | yes | n/a |
+| `mcpServers` injection | yes | yes |
+| `systemPrompt` replace + append | yes | yes |
+| `skills` pre-load | yes | n/a |
+| Permissions (`permission_request`) | yes | yes |
+| `askUserQuestion` | yes | yes |
+| Subagent events | yes | yes |
+| Thinking events | yes | yes |
+| Cross-process Pattern B resume | yes | yes |
+| Debug capture | yes | yes |
 
 > [!NOTE]
-> The published bin (`kodizm-acp` from `dist/index.js`) currently wires only `KODIZM_BACKEND=claude`. Codex and opencode drivers are fully implemented and tested, but reaching them today requires programmatic embedding (see [API reference](#api-reference)).
+> The published bin (`kodizm-acp` from `dist/index.js`) wires both backends: set `KODIZM_BACKEND` to `claude` or `opencode` and the bin resolves the matching driver itself.
 
 ## Install
 
@@ -53,7 +53,7 @@ The driver contract is a single TypeScript interface with seven methods. The ser
 bun add @kodizm/acp
 ```
 
-Requires Bun >= 1.1.0. The `codex` and `opencode` CLIs must be installed separately when you use those backends.
+Requires Bun >= 1.1.0. The `opencode` CLI must be installed separately when you use that backend.
 
 ## Quick start
 
@@ -75,17 +75,16 @@ Replace the credential pair with `ANTHROPIC_API_KEY=...` for the api-key path.
 
 | Variable | Required | Description |
 |----------|:--------:|-------------|
-| `KODIZM_BACKEND` | yes | `claude` / `codex` / `opencode` |
+| `KODIZM_BACKEND` | yes | `claude` / `opencode` |
 | `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CODE_REMOTE=1` | claude (sub) | Subscription auth |
 | `ANTHROPIC_API_KEY` | claude (api) | API key auth |
 | `CLAUDE_CODE_PATH` | optional | Path to claude binary (default `/usr/local/bin/claude`) |
-| `OPENAI_API_KEY` or `CODEX_API_KEY` | codex (api) | api-key path. Without it, codex falls back to chatgpt-mode auth in `~/.codex/auth.json` |
 | `OPENCODE_AUTH_CONTENT` | opencode (env) | JSON keyed by providerID. Layered onto subprocess env for the bridge lifetime only. Without it, opencode reads `~/.local/share/opencode/auth.json` |
 | `KODIZM_LOG_LEVEL` | optional | `debug` / `info` / `warn` / `error`. Default `info` |
 | `KODIZM_DEBUG` | optional | `1` enables process-wide debug capture |
 | `KODIZM_DEBUG_DIR` | optional | Forensic JSONL dir, default `/tmp/kodizm-debug` |
 | `KODIZM_DEBUG_RAW_SECRETS` | incident-only | `1` disables redaction. Never set in production |
-| `KODIZM_ACP_FORWARD_STDERR` | optional | `1` tees codex subprocess stderr to parent stderr |
+| `KODIZM_ACP_FORWARD_STDERR` | optional | `1` tees a spawned backend subprocess's stderr to parent stderr |
 
 Stdout is reserved for ACP frames. Logs go to stderr.
 
@@ -117,7 +116,7 @@ type NewSessionRequest = {
 > `permissionTimeoutMs` and `permissionDeferTimeoutMs` are mutually exclusive. Pick hard-deny on timeout OR soft-defer on timeout, not both. The schema rejects the conflict with a clear error.
 
 > [!NOTE]
-> `settingSources` is the claude-only opt-out for filesystem config layering. When omitted the SDK's own default fires, matching the standalone Claude Code CLI: project `CLAUDE.md` + `.claude/CLAUDE.md` + `.claude/rules/*.md` load from `cwd` walking up; user `~/.claude/CLAUDE.md` + `~/.claude/rules/*.md` and `CLAUDE.local.md` load too. Pass `[]` to disable every fs scope; pass a selective subset like `['project']` to load only project-tracked files. Codex (`AGENTS.md` from `cwd`) and opencode (`AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` from session `directory`) have no parallel field and ignore this option.
+> `settingSources` is the claude-only opt-out for filesystem config layering. When omitted the SDK's own default fires, matching the standalone Claude Code CLI: project `CLAUDE.md` + `.claude/CLAUDE.md` + `.claude/rules/*.md` load from `cwd` walking up; user `~/.claude/CLAUDE.md` + `~/.claude/rules/*.md` and `CLAUDE.local.md` load too. Pass `[]` to disable every fs scope; pass a selective subset like `['project']` to load only project-tracked files. Opencode (`AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` from session `directory`) has no parallel field and ignores this option.
 
 ### Tool policy
 
@@ -143,7 +142,7 @@ type McpServer = {
 }
 ```
 
-Phase 1 ships the `http` transport. The codex driver writes per-server entries into a temporary `~/.codex/config.toml`; opencode adds servers via `sdk.mcp.add` per session.
+The `http` transport ships today. Opencode adds servers via `sdk.mcp.add` per session.
 
 ## API reference
 
@@ -183,7 +182,7 @@ The bin (`src/index.ts`) is the only public surface. Importers get the runtime h
 
 | Export | Purpose |
 |--------|---------|
-| `SupportedBackend` | `'claude' \| 'codex' \| 'opencode'` |
+| `SupportedBackend` | `'claude' \| 'opencode'` |
 | `BackendNotConfiguredError`, `UnknownBackendError` | startup-time errors |
 | `resolveBackendFromEnv(env)` | parse `KODIZM_BACKEND` from a captured env |
 | `installShutdownHook()` | wire SIGTERM + SIGINT to graceful shutdown |
@@ -217,7 +216,7 @@ const server = createAcpServer({
 await server.serve()
 ```
 
-The `codex` and `opencode` drivers follow the same shape; their constructors take backend-specific factories (`spawnFactory` for codex, no factory for opencode since the SDK helper handles it).
+The `opencode` driver follows the same shape; it takes no spawn factory, since the SDK helper handles the subprocess.
 
 ## Wire reference
 
@@ -251,7 +250,7 @@ The `SessionUpdateEvent` discriminated union has 21 variants:
 | `subagent_spawn` / `subagent_complete` | nested agent lifecycle |
 | `skill_activation` | a skill loaded mid-turn (claude only) |
 | `model_advertisement` | the actual model the backend chose |
-| `process_died` | subprocess crash (codex / opencode) |
+| `process_died` | subprocess crash (opencode) |
 | `cancelled` | turn was cancelled |
 | `compaction_started` / `compaction_completed` | context compaction; `trigger: 'manual' \| 'auto'` |
 | `debug_log` | one of 10 stages: `rpc.in`, `rpc.out`, `sdk.message`, `sdk.error`, `tool.permission_request`, `tool.permission_response`, `session.config`, `driver.state_change`, `transport.spawn`, `transport.exit` |
@@ -265,8 +264,6 @@ The `SessionUpdateEvent` discriminated union has 21 variants:
 | `sessionUpdate` | every event above flows as a notification |
 | `session/request_permission` | orchestrator decides on a `permission_request` |
 | `session/ask_user_question` | orchestrator answers a `question_request` |
-| `session/dynamic_tool_call` | codex orchestrator-hosted tool dispatch |
-| `session/codex_chatgpt_token_refresh` | codex chatgpt-mode token rotation |
 | `session/permission_deferred_persist` | Pattern B write fallback when no `deferredStore` |
 | `session/permission_deferred_state` | Pattern B read fallback when no `deferredStore` |
 
@@ -277,7 +274,6 @@ The permission and ask-question RPC names have legacy aliases (`requestPermissio
 A driver instance can resume a session that an earlier process started. Useful when a container restart, deploy, or crash interrupts an active turn.
 
 - **claude**: standard `session/load` against the SDK's resume mode; the JSONL transcript on disk is authoritative.
-- **codex**: `CodexDriver.hydrateSession({ sessionId, codexThreadId, ... })` replays codex's `thread/resume` against the persisted threadId.
 - **opencode**: `OpencodeDriver.loadSession({ sessionId, _meta: { opencodeSessionId } })`; opencode's SQLite persistence survives process death.
 
 Deferred permissions (the orchestrator decided to "ask later" on a tool gate) are persisted via either an injected `DeferredPermissionStore` or the `session/permission_deferred_persist` outbound RPC. The next process picks up where the prior one left off and emits `permission_resumed`.

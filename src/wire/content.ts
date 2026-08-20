@@ -5,7 +5,6 @@
  * tool_use, tool_result) but lives at the Kodizm wire boundary. Every
  * backend driver translates these to its native shape:
  *   - Claude SDK: passes through with light renaming
- *   - Codex: maps to its multi-turn content array
  *   - Opencode: maps to its prompt parts
  *
  * Inline binary attachments (base64) are capped to 5MB to keep the

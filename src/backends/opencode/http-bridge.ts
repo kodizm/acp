@@ -7,7 +7,7 @@
  * hood, waits for the `opencode server listening on …` stdout marker,
  * and resolves with the resulting URL. One bridge per Kodizm session;
  * `stop()` is the canonical session termination signal (mirrors the
- * codex backend's one-subprocess-per-session invariant).
+ * one subprocess per session).
  *
  * The SDK helper layers the cross-spawn subprocess; we add `start()`
  * idempotence + a typed sdk client + cleanup so the driver code can

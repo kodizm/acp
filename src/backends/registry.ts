@@ -3,8 +3,8 @@
  *
  * The bin reads `KODIZM_BACKEND` from process.env at startup and
  * resolves the matching {@link BackendDriver} through this registry.
- * Phase 1 only registers `claude`; phases 2 and 3 add `codex` and
- * `opencode` by extending the registry from the relevant boot module.
+ * The bin registers `claude` and `opencode` by extending the registry
+ * from the relevant boot module.
  *
  * The registry is intentionally small: a name -> driver map, plus
  * env-aware resolution that surfaces the canonical

@@ -32,14 +32,14 @@ import { type NdjsonTransport, createNdjsonTransport } from './server/transport.
 import type { DebugRecorder } from './util/debug-recorder.ts'
 
 /**
- * Backend identifier accepted at runtime. Phase 1 ships `claude`,
- * Phase 2 adds `codex`, Phase 3 adds `opencode`. New backends extend
- * the union here and append to {@link KNOWN_BACKENDS}; the registry
+ * Backend identifier accepted at runtime. `claude` is the primary
+ * backend and `opencode` the secondary one. New backends extend the
+ * union here and append to {@link KNOWN_BACKENDS}; the registry
  * construction happens externally so this module stays import-light.
  */
-export type SupportedBackend = 'claude' | 'codex' | 'opencode'
+export type SupportedBackend = 'claude' | 'opencode'
 
-const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'codex', 'opencode']
+const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'opencode']
 
 export { BackendNotConfiguredError, UnknownBackendError }
 
@@ -280,10 +280,9 @@ async function buildClaudeBackend(): Promise<{
  * dispatcher is the single seam every backend goes through; new backends
  * extend the switch + the {@link SupportedBackend} union.
  *
- * @throws when the requested backend has not been wired into the bin
- *         yet. Steps 14 + 15 of the acp-attachments plan replace the
- *         codex / opencode placeholder branches with real boot
- *         sequences.
+ * @throws when the driver module for the requested backend fails to
+ *         load. Both backends have real boot sequences; a throw here
+ *         means an import or construction failure, not a missing wire.
  */
 async function bootBackend(kind: SupportedBackend): Promise<import('./backends/driver.ts').BackendDriver> {
   switch (kind) {
@@ -291,34 +290,11 @@ async function bootBackend(kind: SupportedBackend): Promise<import('./backends/d
       const built = await buildClaudeBackend()
       return built.driver
     }
-    case 'codex': {
-      const built = await buildCodexBackend()
-      return built.driver
-    }
     case 'opencode': {
       const built = await buildOpencodeBackend()
       return built.driver
     }
   }
-}
-
-/**
- * Build the Codex backend driver. The driver spawns `codex app-server`
- * via the default spawn factory; the codex CLI subprocess reads its
- * own auth from `~/.codex/auth.json` (or `CODEX_HOME` override) so the
- * bin does not pickup OAuth tokens like the claude path does.
- */
-async function buildCodexBackend(): Promise<{
-  driver: import('./backends/codex/driver.ts').CodexDriver
-}> {
-  const { CodexDriver } = await import('./backends/codex/driver.ts')
-
-  const driver = new CodexDriver({
-    agentInfo: { version: '0.5.6' },
-    ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME }),
-  })
-
-  return { driver }
 }
 
 /**
@@ -354,9 +330,8 @@ export async function main(): Promise<void> {
 
   process.stderr.write(`${JSON.stringify({ level: 'info', message: 'kodizm-acp resolved backend', backend })}\n`)
 
-  // 1. Build the driver. Codex / opencode wires land in steps 14 + 15
-  //    of the acp-attachments plan; until then the dispatcher throws a
-  //    clear "not yet wired" error.
+  // 1. Build the driver. A throw here is an import or construction
+  //    failure for a wired backend, not a missing branch.
   let driver: import('./backends/driver.ts').BackendDriver
   try {
     driver = await bootBackend(backend)
@@ -365,7 +340,7 @@ export async function main(): Promise<void> {
     process.stderr.write(
       `${JSON.stringify({
         level: 'error',
-        message: 'kodizm-acp backend not yet wired in bin',
+        message: 'kodizm-acp failed to build the backend driver',
         backend,
         hint: message,
       })}\n`,

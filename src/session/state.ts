@@ -3,7 +3,7 @@
  *
  * Generic enough to span every backend driver: each driver lays its
  * own typed `sdkOptions` shape into this struct (Claude uses
- * {@link ClaudeSdkOptions}; codex / opencode will plug in their own
+ * {@link ClaudeSdkOptions}; opencode plugs in its own
  * once phases 2-3 land). The shared fields ({@link sessionId},
  * {@link backend}, {@link createdAt}, {@link abortController},
  * {@link parentChildMap}) belong to every driver and live here.
@@ -13,7 +13,7 @@
  * Backend identifier that produced this session. Mirrors the
  * `KODIZM_BACKEND` env value used at process boot.
  */
-export type BackendName = 'claude' | 'codex' | 'opencode'
+export type BackendName = 'claude' | 'opencode'
 
 /**
  * Session lifecycle struct. The session manager holds one of these
@@ -32,7 +32,7 @@ export interface SessionState {
   backend: BackendName
   /**
    * Driver-shaped options the backend driver hands to its SDK on each
-   * turn. Untyped at the manager seam so codex / opencode can each
+   * turn. Untyped at the manager seam so each backend can
    * carry their own option shapes.
    */
   sdkOptions: unknown

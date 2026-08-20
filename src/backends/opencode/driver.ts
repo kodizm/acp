@@ -3,7 +3,7 @@
  *
  * Drives the opencode HTTP server via the official
  * `createOpencodeServer()` SDK helper (one server per Kodizm session,
- * same one-process-per-session invariant as codex). The driver
+ * one process per session). The driver
  * translates Kodizm canonical wire shapes (NewSessionRequest,
  * PromptRequest, etc.) to opencode's native REST + SSE protocol; the
  * orchestrator never sees opencode shapes.
@@ -62,7 +62,7 @@ import { dispatchOpencodeEvent, isTurnComplete } from './prompt-stream.ts'
  * Construction-time dependencies for the opencode driver. Phase 3 T2+
  * extends this with `server` (AcpServerLike for outbound RPCs),
  * `deferredStore`, and `opencodeDataDir` overrides (mirrors
- * `CodexDriverDeps`).
+ * the claude driver's deps shape).
  */
 export interface OpencodeDriverDeps {
   /**
@@ -87,8 +87,8 @@ export interface OpencodeDriverDeps {
 }
 
 /**
- * Per-session state held by the driver. Mirrors codex's
- * `CodexSessionState` shape so future Phase 1.7 lifecycle modules
+ * Per-session state held by the driver. Mirrors the claude driver's
+ * per-session state shape so future lifecycle modules
  * (heartbeat, inactivity probe, debug recorder, error classifier)
  * plug in unchanged.
  */
@@ -358,7 +358,7 @@ export class OpencodeDriver implements BackendDriver {
 
       // One-shot model_advertisement at first prompt with a known
       // model (or when the per-turn override changes it). Mirrors the
-      // codex driver's modelAdvertised latch.
+      // the claude driver's modelAdvertised latch.
       if (turnModel !== undefined && state.modelAdvertised !== true) {
         state.modelAdvertised = true
         emit.send({
@@ -701,7 +701,7 @@ export class OpencodeDriver implements BackendDriver {
    * with `trigger: 'manual'` (opencode's `session.compacted` SSE
    * event carries no trigger field).
    *
-   * Unlike Claude/codex, opencode's compaction is fire-and-track:
+   * Unlike Claude, opencode's compaction is fire-and-track:
    * the SDK call returns immediately with a 202; the actual
    * `compaction_started` (mapped from `session.updated.time.compacting`)
    * + `compaction_completed` (mapped from `session.compacted`)

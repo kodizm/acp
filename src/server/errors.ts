@@ -173,7 +173,7 @@ export class BackendStallError extends JsonRpcError {
 
 /**
  * -32003 Backend Driver Error. Generic wrapper for failures inside a
- * backend driver (Claude SDK call rejection, codex app-server protocol
+ * backend driver (Claude SDK call rejection, opencode HTTP protocol
  * mismatch, opencode HTTP error). The original cause is preserved
  * via the standard `Error.cause` chain.
  */
@@ -191,8 +191,8 @@ export class BackendDriverError extends JsonRpcError {
  * registered at all; this one fires when a handler exists but the
  * resolved driver advertised that it does not support the feature.
  *
- * Example: codex driver receives `session/fork`. The dispatch handler
- * is registered, but `codexDriver.capabilities().fork === false`, so
+ * Example: a driver receives `session/fork`. The dispatch handler
+ * is registered, but `driver.capabilities().fork === false`, so
  * the method-supported check raises this error before the driver's
  * forkSession is called.
  *

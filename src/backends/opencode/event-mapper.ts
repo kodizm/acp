@@ -262,7 +262,7 @@ export class OpencodeEventMapper {
    * - MCP tool keys (`<sanitizedServer>_<tool>`) reverse-map to
    *   `mcp__<server>__<tool>` via the reverse map.
    * - Native opencode IDs (`bash`, `edit`, ...) PascalCase to match
-   *   Claude / codex conventions on the orchestrator wire.
+   *   Claude conventions on the orchestrator wire.
    */
   private resolveToolName(opencodeName: string): string {
     const canonical = reverseToolName(opencodeName, this.options.mcpReverseMap)

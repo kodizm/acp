@@ -10,8 +10,8 @@
  * event back to its session row without parsing the payload.
  *
  * This shape is the SOURCE OF TRUTH across all backends: phase 2
- * (codex) and phase 3 (opencode) translate their native stream events
- * into these schemas. Codex/opencode subagent semantics differ but
+ * backends translate their native stream events
+ * into these schemas. Per-backend subagent semantics differ but
  * normalize down to this shape via per-backend mappers.
  */
 
@@ -309,7 +309,7 @@ export const UsageEventSchema = SessionEnvelope.extend({
 })
 
 /**
- * `subagent_spawn`: a subagent (Claude's `Task` tool, codex's
+ * `subagent_spawn`: a subagent (Claude's `Task` tool, opencode's
  * `agent_roles`, opencode's mode swap) has been delegated work.
  * Carries the model + tool surface advertised for the child.
  */

@@ -26,7 +26,7 @@
  *
  * The grammar is deliberately close to the SDK's so the translation
  * to Claude is mostly a delimiter swap, but it stays
- * implementation-agnostic so codex / opencode drivers can map to
+ * implementation-agnostic so the opencode driver can map to
  * their own native shapes without leaking semantics into the wire.
  */
 

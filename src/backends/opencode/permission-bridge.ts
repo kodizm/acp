@@ -181,7 +181,7 @@ function canonicalToolName(opencodePermission: string, mcpReverseMap: Map<string
   const canonical = reverseToolName(opencodePermission, mcpReverseMap)
   if (canonical !== null) return canonical
   // Native opencode permission keys are lowercase; PascalCase for the
-  // canonical wire so claude / codex / opencode all surface the same
+  // canonical wire so claude and opencode both surface the same
   // case in audit logs.
   return opencodePermission
     .split('_')

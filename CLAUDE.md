@@ -1,12 +1,12 @@
 # CLAUDE.md
 
-Kodizm runtime's ACP bridge. One canonical wire surface drives three CLI backends (Claude Code, codex, opencode); the orchestrator never branches on backend. Same `NewSessionRequest` / `PromptRequest` / `SessionUpdateEvent` shape carries every feature across all three. `src/` is the architectural source of truth; verify there before trusting README or this file.
+Kodizm runtime's ACP bridge. One canonical wire surface drives two CLI backends (Claude Code as primary, opencode as secondary); the orchestrator never branches on backend. The same `NewSessionRequest` / `PromptRequest` / `SessionUpdateEvent` shape carries every feature across both. `src/` is the architectural source of truth; verify there before trusting README or this file.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `bun test test/unit` | unit suite (mocked SDK + fake codex subprocess) |
+| `bun test test/unit` | unit suite (mocked SDK) |
 | `bun test test/e2e` | full ACP roundtrip, mocked SDK |
 | `bun test test/integration` | real-API + real-CLI smokes; each suite gates on its own auth probe |
 | `bun test path/to/file.ts -t 'pattern'` | single test by name pattern |
@@ -20,24 +20,13 @@ Kodizm runtime's ACP bridge. One canonical wire surface drives three CLI backend
 - `BackendDriver` methods include `compact`. Backends without a manual lever throw `MethodNotSupportedError`. Manual compaction sets `trigger:'manual'` on the matching `compaction_started` / `compaction_completed`; auto carries `'auto'`.
 - `DriverCapabilities` flags advertised by every driver. Only `resume` (gates `session/load`) and `fork` (gates `session/fork`) are dispatch-gated; the rest are advisory. Authoritative list lives in `src/backends/driver.ts`.
 - Kodizm canonical wire shape (`src/wire/`) is authoritative for orchestrator-facing fields (`systemPrompt`, `additionalDirectories`, `mcpServers`, `model`, `skills`, content blocks). Backends translate down. NEVER smuggle Kodizm fields through `_meta` on the orchestrator edge; `src/wire/schemas.ts` enforces this via `.refine()` at runtime.
-- Codex driver collapses every codex-side approval / question / tool-call / token-refresh server request onto canonical channels (`permission_request`, `question_request`, `session/dynamic_tool_call`, `session/codex_chatgpt_token_refresh`). Pre-v2 snake_case aliases auto-translate. The full mapping lives in `src/backends/codex/driver.ts`.
 - Opencode driver subscribes to opencode's `/event` SSE stream, dispatches `permission.asked` + `question.asked` through canonical `permission_request` + `question_request`, and replies via `sdk.permission.reply` / `sdk.question.reply`.
-- `AcpServerLike`, `EmitLike`, `DEFERRED_SENTINEL`, `awaitPermissionResponse` live in `src/backends/claude/permission-bridge.ts` and are imported by codex + opencode drivers + the bin. Cross-backend coupling is intentional today; a fourth backend's permission-bridge / ask-user-question must import from the claude file. Move it before extracting if you ever split per-backend packages.
+- `AcpServerLike`, `EmitLike`, `DEFERRED_SENTINEL`, `awaitPermissionResponse` live in `src/backends/claude/permission-bridge.ts` and are imported by the opencode driver + the bin. Cross-backend coupling is intentional today; a third backend's permission-bridge / ask-user-question must import from the claude file. Move it before extracting if you ever split per-backend packages.
 - `permissionTimeoutMs` and `permissionDeferTimeoutMs` are mutually exclusive (schema `.refine()` rejects both set). Pick hard-deny on timeout OR soft-defer on timeout, not both.
 
 ## Bin scope
 
-The published bin (`src/index.ts`) only wires `KODIZM_BACKEND=claude`. `codex` and `opencode` are recognised by env but exit with code 2 and a "not yet wired" stderr line. For now, codex and opencode require programmatic embedding: import `CodexDriver` / `OpencodeDriver`, build the transport + `createAcpServer` manually. Anything in this file or README that talks about all three backends "working through the bin" is wrong until that wiring lands.
-
-## Codex specifics
-
-- Field shape is camelCase v2 (`threadId`, `turnId`, `itemId`, `approvalId`, `cwd`, `command`, `cachedInputTokens`, `tokenUsage.total.*`). Pre-v2 snake_case is auto-aliased in the approval pipeline.
-- Item type discriminator is camelCase (`commandExecution`, `fileChange`, `mcpToolCall`, `contextCompaction`, `collabAgentToolCall`). Driver accepts both forms for forward + back compat.
-- Reasoning chunks travel on dedicated methods (`item/reasoning/summaryTextDelta` + `item/reasoning/textDelta`), NOT via `subtype='reasoning'` on `agentMessage/delta`. Both routes feed canonical `thinking_chunk`.
-- `codex app-server` has NO `--config <path>` flag. Inject `[mcp_servers.*]` etc. by setting `CODEX_HOME` to a temp dir + writing `config.toml` there. Per-key overrides go via `-c key=value`.
-- ChatGPT-mode auth ignores `model` overrides and silently keeps the default model. API-key auth honors them.
-- Some features only expose with explicit codex feature flags (`features.default_mode_request_user_input`, `features.request_permissions_tool`, `features.multi_agent_v2`). The latter is account-tier gated; chatgpt-mode never invokes `spawn_agent` organically regardless of plan tier.
-- `hydrateSession({ sessionId, codexThreadId, codexJsonlPath, ... })` is the cross-process Pattern B entry. It is a public method on `CodexDriver`, NOT on `BackendDriver`.
+The published bin (`src/index.ts`) wires both backends: `bootBackend()` dispatches `KODIZM_BACKEND=claude` and `KODIZM_BACKEND=opencode` to real driver builders. A non-zero exit from that path is an import or construction failure, not a missing wire. This file and the README both claimed for months that only `claude` was wired, long after the branches landed, so trust `src/` over either.
 
 ## Opencode specifics
 
@@ -62,10 +51,8 @@ The published bin (`src/index.ts`) only wires `KODIZM_BACKEND=claude`. `codex` a
 ## Gotchas
 
 - **Stdout is reserved for ACP frames.** A single `console.log` corrupts the JSON-RPC stream and kills the session. Use `createLogger` from `@/util/logger` (stderr-only) for structured logs, or `process.stderr.write` for raw.
-- **Run `bun test` from the package directory, not from `kodizm.com` root.** Bun has a subprocess lifecycle quirk under `bun test` when invoked from a parent dir: spawned codex / opencode subprocesses see stdout EOF immediately and exit with no output. `cd packages/kodizm-acp && bun test ...` runs everything green.
-- Bun-on-Bun (`bun run fakeBin.ts`) under `bun test` is unreliable; `BUN_TEST_*` env vars leak into the child and confuse Bun's nested runtime. The fake-codex fixture (`test/integration/_codex-fake-process.ts`) emits Node CJS scripts and uses `binaryPath: 'node'` to sidestep the issue entirely.
-- `Bun.spawn({ env })` LAYERS env onto `process.env` by default. Pass `replaceEnv: true` (custom `CodexAppServerSpawnOptions` flag) when the test needs a fully-scrubbed environment.
-- `KODIZM_ACP_FORWARD_STDERR=1` enables an opt-in stderr pump on the codex subprocess for hang / crash diagnosis.
+- **Run `bun test` from the package directory, not from `kodizm.com` root.** Bun has a subprocess lifecycle quirk under `bun test` when invoked from a parent dir: spawned opencode subprocesses see stdout EOF immediately and exit with no output. `cd packages/kodizm-acp && bun test ...` runs everything green.
+- `KODIZM_ACP_FORWARD_STDERR=1` enables an opt-in stderr pump on a spawned backend subprocess for hang / crash diagnosis.
 - `KODIZM_DEBUG_RAW_SECRETS=1` disables allow-list redaction inside `DebugRecorder`. Incident-only; never set in production.
 - Biome inlines short JSON arrays in config files (`package.json`, `biome.json`). My-coding's "always multi-line" rule applies to source code; accept biome's reformat for JSON.
 - Path alias `@/` resolves to `src/` from `test/` only. Inside `src/`, use relative imports with `.ts` extension (`allowImportingTsExtensions: true` in tsconfig).
@@ -79,8 +66,8 @@ The published bin (`src/index.ts`) only wires `KODIZM_BACKEND=claude`. `codex` a
 
 - `test/unit/` mirrors `src/` one-to-one and runs fully mocked.
 - `test/e2e/` exercises the full ACP roundtrip with a mocked SDK.
-- `test/integration/` holds smoke suites grouped by backend prefix (`claude-*`, `codex-*`, `opencode-*`). Each suite probes its own auth at module load and skips cleanly when credentials are absent. Real-CLI suites need the matching binary on `PATH`.
-- New tests reuse helpers from `test/integration/_helpers.ts` (claude), `test/integration/_codex-fake-process.ts` (deterministic codex), `test/integration/_mcp-fixture.ts` (in-process MCP server).
+- `test/integration/` holds smoke suites grouped by backend prefix (`claude-*`, `opencode-*`). Each suite probes its own auth at module load and skips cleanly when credentials are absent. Real-CLI suites need the matching binary on `PATH`.
+- New tests reuse helpers from `test/integration/_helpers.ts` (claude) and `test/integration/_mcp-fixture.ts` (in-process MCP server).
 
 ## References
 
@@ -91,7 +78,5 @@ Upstream sources are git submodules under `references/`. Investigation order whe
 | `references/claude-code-cli-source-code/` | Claude Code CLI source. First stop for anything claude-driver related (SDK option shapes, tool dispatch, permission plugin). |
 | `references/claude-agent-acp/` | Reference ACP agent implementation against Claude Code. Working example when wiring a new feature. |
 | `references/cc-connect/` | Multi-CLI bridge that already speaks ACP. Prior-art for cross-backend coupling decisions. |
-| `references/codex/` | Codex CLI source. First stop for codex-driver questions (app-server protocol, item types, approval shapes, feature flags). |
-| `references/codex-acp/` | Codex ACP integration source. |
 | `references/opencode/` | Opencode CLI source. First stop for opencode-driver questions (Question.Service, permission ruleset, MCP naming, /event SSE shape). |
 | `references/typescript-sdk/` | ACP protocol TypeScript SDK source. Authoritative for `@agentclientprotocol/sdk` types and method names. |

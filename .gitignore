@@ -5,3 +5,6 @@ dist/
 .env
 .env.local
 CLAUDE.local.md
+
+# opencode run-continuation artefacts, written by a spawned server
+.omo/

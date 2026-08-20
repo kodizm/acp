@@ -1,7 +1,7 @@
 /**
  * BackendDriver contract.
  *
- * Every backend (Claude, codex, opencode) implements this interface.
+ * Every backend (Claude, opencode) implements this interface.
  * The AcpServer dispatch layer routes incoming JSON-RPC requests into
  * the appropriate driver method; capability gating happens before the
  * call so an unsupported method raises {@link MethodNotSupportedError}
@@ -61,7 +61,7 @@ export interface DriverCapabilities {
   /**
    * Phase 3 addition: the backend exposes a first-class user-question
    * channel mapped onto the canonical `session/ask_user_question`
-   * outbound RPC. Claude (SDK `AskUserQuestion` plugin) and codex
+   * outbound RPC. Claude (SDK `AskUserQuestion` plugin) and opencode
    * (`item/tool/requestUserInput` + `mcpServer/elicitation/request`)
    * both surface it; opencode goes a step further with native
    * `Question.Service` + `tool/question.ts`. When false, the driver
@@ -92,7 +92,7 @@ export interface NewSessionResult {
 
 /**
  * Result of a `prompt` call. `stopReason` mirrors Anthropic's SDK
- * stop reasons; codex / opencode normalize to this enum.
+ * stop reasons; opencode normalizes to this enum.
  *
  * `session_failed` is the Phase 1.7 addition: surfaces a structured
  * lifecycle failure (sdk_stall, sdk_throw, transport_error, etc.)
@@ -174,7 +174,7 @@ export interface BackendDriver {
   /**
    * `session/compact`: orchestrator-driven manual context compaction.
    * Drivers translate to their backend's native lever (Claude SDK
-   * `/compact` slash command, codex `thread/compact/start`,
+   * `/compact` slash command,
    * opencode `session.summarize({auto: false})`). Implementations
    * MUST set a per-session `pendingManualCompact` latch before
    * dispatching so the matching `compaction_started` /
