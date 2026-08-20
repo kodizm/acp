@@ -57,6 +57,25 @@ export class OpencodeEventMapper {
   private readonly subagents: Map<string, SubagentSlot> = new Map()
   private readonly toolBegan: Set<string> = new Set()
   private readonly toolEnded: Set<string> = new Set()
+  /**
+   * Last usage figures already emitted, per assistant message id.
+   *
+   * opencode re-sends `message.updated` as a message's token counts and
+   * cost are revised, and a tool-using turn has several assistant
+   * messages, so this handler fires repeatedly. The orchestrator ADDS
+   * every `usage` event it receives (StreamEventPersister rolls the
+   * totals up and CostGuardMiddleware does an atomic increment), so
+   * emitting absolute figures each time multiplied the accounting: a
+   * measured single turn produced four `usage` events. Emitting the
+   * delta against what was already reported keeps the sum honest for
+   * both revisions of one message and several messages in one turn.
+   *
+   * This was invisible until the turn stopped being truncated at the
+   * first completed assistant message; before that only the first
+   * `usage` ever escaped.
+   */
+  private readonly usageByMessage: Map<string, UsageSnapshot> = new Map()
+
   private compactingActive = false
 
   public constructor(private readonly options: OpencodeEventMapperOptions) {}
@@ -222,14 +241,43 @@ export class OpencodeEventMapper {
     const tokens = info.tokens
     if (tokens === undefined) return
 
-    this.options.emit({
-      sessionId: this.options.sessionId,
-      type: 'usage',
+    const current: UsageSnapshot = {
       inputTokens: tokens.input ?? 0,
       outputTokens: tokens.output ?? 0,
       cacheReadTokens: tokens.cache?.read ?? 0,
       cacheCreationTokens: tokens.cache?.write ?? 0,
       costUsd: typeof info.cost === 'number' ? info.cost : 0,
+    }
+    const previous = this.usageByMessage.get(info.id)
+    this.usageByMessage.set(info.id, current)
+
+    const delta: UsageSnapshot =
+      previous === undefined
+        ? current
+        : {
+            inputTokens: current.inputTokens - previous.inputTokens,
+            outputTokens: current.outputTokens - previous.outputTokens,
+            cacheReadTokens: current.cacheReadTokens - previous.cacheReadTokens,
+            cacheCreationTokens: current.cacheCreationTokens - previous.cacheCreationTokens,
+            costUsd: current.costUsd - previous.costUsd,
+          }
+
+    // A revision that changed nothing measurable carries no
+    // information for a summing consumer. Negative deltas are possible
+    // if opencode ever revises a figure downwards; they are forwarded
+    // so the running total still converges on the truth.
+    const changed =
+      delta.inputTokens !== 0 ||
+      delta.outputTokens !== 0 ||
+      delta.cacheReadTokens !== 0 ||
+      delta.cacheCreationTokens !== 0 ||
+      delta.costUsd !== 0
+    if (!changed) return
+
+    this.options.emit({
+      sessionId: this.options.sessionId,
+      type: 'usage',
+      ...delta,
     })
   }
 
@@ -353,6 +401,14 @@ interface ToolState {
   error?: string
   metadata?: Record<string, unknown>
   time?: { start?: number; end?: number }
+}
+
+interface UsageSnapshot {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  costUsd: number
 }
 
 interface MessageUpdatedPayload {

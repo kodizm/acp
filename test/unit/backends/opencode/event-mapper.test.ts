@@ -277,6 +277,77 @@ describe('OpencodeEventMapper', () => {
     })
   })
 
+  test('a revised message.updated emits only the delta', () => {
+    // opencode re-sends message.updated as it revises a message's
+    // token counts. The orchestrator ADDS every usage event it gets, so
+    // absolute figures each time multiply the accounting: a real turn
+    // produced four usage events for one message's worth of tokens.
+    const { events, emit } = recorder()
+    const mapper = new OpencodeEventMapper({ sessionId: 'k-1', emit, mcpReverseMap: new Map() })
+
+    const update = (input: number, output: number, cost: number): void => {
+      mapper.handle('message.updated', {
+        info: {
+          id: 'm1',
+          role: 'assistant',
+          time: { created: 1, completed: 2 },
+          cost,
+          tokens: { total: input + output, input, output, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+      })
+    }
+
+    update(50, 10, 0.001)
+    update(50, 30, 0.003)
+
+    const usages = events.filter((e) => e.type === 'usage')
+    expect(usages).toHaveLength(2)
+    expect(usages[0]).toMatchObject({ inputTokens: 50, outputTokens: 10, costUsd: 0.001 })
+    // Second event carries the increment, so the two sum to the truth.
+    expect(usages[1]).toMatchObject({ inputTokens: 0, outputTokens: 20 })
+    expect((usages[1] as { costUsd: number }).costUsd).toBeCloseTo(0.002, 6)
+  })
+
+  test('an unchanged message.updated emits no usage event', () => {
+    const { events, emit } = recorder()
+    const mapper = new OpencodeEventMapper({ sessionId: 'k-1', emit, mcpReverseMap: new Map() })
+
+    const payload = {
+      info: {
+        id: 'm1',
+        role: 'assistant' as const,
+        time: { created: 1, completed: 2 },
+        cost: 0.002,
+        tokens: { total: 80, input: 50, output: 30, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    }
+    mapper.handle('message.updated', payload)
+    mapper.handle('message.updated', payload)
+
+    expect(events.filter((e) => e.type === 'usage')).toHaveLength(1)
+  })
+
+  test('two assistant messages in one turn each contribute their own usage', () => {
+    const { events, emit } = recorder()
+    const mapper = new OpencodeEventMapper({ sessionId: 'k-1', emit, mcpReverseMap: new Map() })
+
+    for (const id of ['m1', 'm2']) {
+      mapper.handle('message.updated', {
+        info: {
+          id,
+          role: 'assistant',
+          time: { created: 1, completed: 2 },
+          cost: 0.001,
+          tokens: { total: 20, input: 10, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+      })
+    }
+
+    const usages = events.filter((e) => e.type === 'usage')
+    expect(usages).toHaveLength(2)
+    expect(usages[1]).toMatchObject({ inputTokens: 10, outputTokens: 10 })
+  })
+
   test('MCP tool name reverse-translates kodizm_search -> mcp__kodizm__search', () => {
     const { events, emit } = recorder()
     const mapper = new OpencodeEventMapper({
