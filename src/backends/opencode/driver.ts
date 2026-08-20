@@ -29,6 +29,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { MethodNotSupportedError } from '../../server/errors.ts'
+import { createLogger } from '../../util/logger.ts'
 import type { SessionUpdateEvent } from '../../wire/events.ts'
 import type {
   CancelRequest,
@@ -183,6 +184,13 @@ const DEFAULT_BRIDGE_FACTORY = (): OpencodeHttpBridge => new OpencodeHttpBridge(
  * opencode HTTP server. Phase 3 progressive build; T3 ships
  * newSession over a real listener + session.create.
  */
+/**
+ * Stderr-only logger. The event loop used to exit silently on every
+ * unexpected condition, which is why a mis-scoped subscription looked
+ * like a protocol bug for hours.
+ */
+const logger = createLogger({ env: process.env as Record<string, string | undefined> })
+
 export class OpencodeDriver implements BackendDriver {
   private readonly sessions: Map<string, OpencodeSessionState> = new Map()
   private readonly bridgeFactory: () => OpencodeHttpBridge
@@ -314,6 +322,7 @@ export class OpencodeDriver implements BackendDriver {
     const subscriptionPromise = this.runEventLoop({
       handle: state.handle,
       controller,
+      directory: state.configSnapshot.cwd,
       handlers: {
         onMessageBus: (method, properties) => eventMapper.handle(method, properties),
         onPermissionAsked: (properties) => {
@@ -339,7 +348,12 @@ export class OpencodeDriver implements BackendDriver {
             signal: controller.signal,
           })
         },
-        onSessionError: () => undefined,
+        onSessionError: (properties) => {
+          logger.error('opencode session.error on the event bus', {
+            sessionId,
+            properties: JSON.stringify(properties).slice(0, 400),
+          })
+        },
       },
     })
 
@@ -406,6 +420,7 @@ export class OpencodeDriver implements BackendDriver {
   private async runEventLoop(args: {
     handle: OpencodeHttpBridgeHandle
     controller: AbortController
+    directory: string
     handlers: Parameters<typeof dispatchOpencodeEvent>[1]
   }): Promise<void> {
     const eventApi = args.handle.sdk.event as unknown as {
@@ -416,17 +431,44 @@ export class OpencodeDriver implements BackendDriver {
         stream?: AsyncIterable<{ event?: string; data?: unknown }>
       }>
     }
-    if (typeof eventApi.subscribe !== 'function') return
+    if (typeof eventApi.subscribe !== 'function') {
+      logger.error('opencode sdk exposes no event.subscribe; no session events will be mapped')
+      return
+    }
 
     let result: { stream?: AsyncIterable<{ event?: string; data?: unknown }> }
     try {
-      result = await eventApi.subscribe({}, { signal: args.controller.signal })
-    } catch {
+      // `directory` is REQUIRED, not optional. The v2 client builds the
+      // /event request with `directory` + `workspace` as query params
+      // (see `v2/gen/sdk.gen.js`, buildClientParams), so an empty
+      // parameters object scopes the stream to whatever directory the
+      // bin's own process cwd resolves to. Sessions run in
+      // /workspace/<repo> while the bin is spawned elsewhere, so the
+      // subscription then listens to the wrong scope and receives only
+      // global frames (`server.connected`, `server.heartbeat`) while
+      // every `message.part.updated` for the turn goes to the scope
+      // nobody is watching.
+      //
+      // Measured: session cwd equal to process cwd emits
+      // model_advertisement + output_chunk + usage; session cwd
+      // different emits model_advertisement alone. The second case is
+      // every production session.
+      result = await eventApi.subscribe({ directory: args.directory }, { signal: args.controller.signal })
+    } catch (e) {
+      logger.error('opencode event.subscribe rejected; the turn will emit no content', {
+        error: e instanceof Error ? e.message : String(e),
+        directory: args.directory,
+      })
       return
     }
 
     const stream = result?.stream
-    if (stream === undefined) return
+    if (stream === undefined) {
+      logger.error('opencode event.subscribe returned no stream', {
+        keys: Object.keys((result ?? {}) as Record<string, unknown>).join(','),
+      })
+      return
+    }
 
     for await (const frame of stream) {
       if (args.controller.signal.aborted) break
