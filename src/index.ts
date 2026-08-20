@@ -24,6 +24,8 @@
  *   - awaits server.serve() until the transport's read stream ends
  */
 
+import pkg from '../package.json' with { type: 'json' }
+
 import type { AcpServerLike } from './backends/claude/permission-bridge.ts'
 import { createAcpServer } from './server/acp-server.ts'
 import { BackendNotConfiguredError, UnknownBackendError } from './server/errors.ts'
@@ -37,6 +39,14 @@ import type { DebugRecorder } from './util/debug-recorder.ts'
  * union here and append to {@link KNOWN_BACKENDS}; the registry
  * construction happens externally so this module stays import-light.
  */
+/**
+ * Version advertised to the orchestrator in `agentInfo`. Read from
+ * package.json rather than written out, because the two hardcoded
+ * copies this replaces had already drifted a release behind the
+ * published package.
+ */
+const AGENT_VERSION: string = pkg.version
+
 export type SupportedBackend = 'claude' | 'opencode'
 
 const KNOWN_BACKENDS: ReadonlyArray<SupportedBackend> = ['claude', 'opencode']
@@ -241,7 +251,7 @@ async function buildClaudeBackend(): Promise<{
 
   const driver = new ClaudeDriver({
     credentials: pickClaudeCredentials(process.env as Record<string, string | undefined>),
-    agentInfo: { version: '0.5.6' },
+    agentInfo: { version: AGENT_VERSION },
     sdk: {
       // Real-SDK adapter: forwards the driver-built options to the SDK's
       // query() iterator and pins the claude CLI path. settingSources is
@@ -313,7 +323,7 @@ async function buildOpencodeBackend(): Promise<{
   const { OpencodeDriver } = await import('./backends/opencode/driver.ts')
 
   const driver = new OpencodeDriver({
-    agentInfo: { version: '0.5.6' },
+    agentInfo: { version: AGENT_VERSION },
   })
 
   return { driver }
