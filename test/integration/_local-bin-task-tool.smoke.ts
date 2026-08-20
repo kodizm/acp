@@ -108,8 +108,8 @@ async function main(): Promise<void> {
   })
   process.stderr.write(`session/new ok: ${newSession.sessionId}\n`)
 
-  const promptText
-    = 'You MUST delegate to a subagent via the Task tool with subagent_type=general-purpose. Do NOT use any tool yourself. The subagent should run Bash to count *.md files in the current dir then reply with just the integer. Repeat the integer at the end.'
+  const promptText =
+    'You MUST delegate to a subagent via the Task tool with subagent_type=general-purpose. Do NOT use any tool yourself. The subagent should run Bash to count *.md files in the current dir then reply with just the integer. Repeat the integer at the end.'
 
   await send(
     'session/prompt',

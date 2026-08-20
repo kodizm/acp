@@ -72,7 +72,7 @@ describe('ClaudeDriver Task tool subagent lifecycle', () => {
               type: 'tool_result',
               tool_use_id: 'tu_task_real_1',
               content:
-                '432\nagentId: af301668674acf9fc (use SendMessage with to: \'af301668674acf9fc\' to continue this agent)\n<usage>total_tokens: 12816 tool_uses: 2 duration_ms: 6236</usage>',
+                "432\nagentId: af301668674acf9fc (use SendMessage with to: 'af301668674acf9fc' to continue this agent)\n<usage>total_tokens: 12816 tool_uses: 2 duration_ms: 6236</usage>",
               is_error: false,
             },
           ],
