@@ -61,7 +61,7 @@ export interface ClaudeSdkOptions {
   cwd: string
   mcpServers: Record<string, ClaudeSdkMcpServer>
   additionalDirectories?: string[]
-  systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string }
+  systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string; excludeDynamicSections?: boolean }
   model?: string
   /**
    * Skills to pre-load into the session's system prompt. The SDK
@@ -958,7 +958,19 @@ export class ClaudeDriver implements BackendDriver {
     if (typeof input === 'string') {
       return input
     }
-    return { type: 'preset', preset: 'claude_code', append: input.append }
+    const prompt: ClaudeSdkOptions['systemPrompt'] = {
+      type: 'preset',
+      preset: 'claude_code',
+      append: input.append,
+    }
+    // Only forward it when asked. The SDK treats the key as present-or-not
+    // rather than true-or-false in older versions, and sending
+    // `excludeDynamicSections: false` on every call would be a silent
+    // behaviour change for callers that never opted in.
+    if (input.excludeDynamicSections === true) {
+      prompt.excludeDynamicSections = true
+    }
+    return prompt
   }
 
   /**

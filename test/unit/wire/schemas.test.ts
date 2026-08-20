@@ -100,6 +100,19 @@ describe('NewSessionRequestSchema', () => {
     expect(result.success).toBe(true)
   })
 
+  test('accepts excludeDynamicSections alongside append', () => {
+    const parsed = NewSessionRequestSchema.parse({
+      cwd: '/workspace',
+      mcpServers: [],
+      systemPrompt: { append: 'Review rules.', excludeDynamicSections: true },
+    })
+
+    expect(parsed.systemPrompt).toEqual({
+      append: 'Review rules.',
+      excludeDynamicSections: true,
+    })
+  })
+
   test('accepts systemPrompt as the {append: string} object form', () => {
     const result = NewSessionRequestSchema.safeParse({
       cwd: '/workspace',

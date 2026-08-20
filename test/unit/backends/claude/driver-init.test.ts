@@ -136,6 +136,44 @@ describe('ClaudeDriver.newSession + buildSdkOptions', () => {
     })
   })
 
+  test('excludeDynamicSections rides through to the SDK when asked', () => {
+    // The preset embeds per-session context (cwd, git flag, platform,
+    // shell, OS) in the system prompt ahead of our append text, so a fleet
+    // of agents each running in its own checkout never shares a prompt
+    // cache entry. This flag moves that context into the first user
+    // message, leaving the static preset + append to be cached.
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace/.reviews/5/main',
+      mcpServers: [],
+      systemPrompt: { append: 'Review rules.', excludeDynamicSections: true },
+    })
+
+    expect(options.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'Review rules.',
+      excludeDynamicSections: true,
+    })
+  })
+
+  test('excludeDynamicSections is omitted rather than sent as false', () => {
+    // Sending it as `false` on every call would be a silent behaviour
+    // change for callers that never opted in.
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      systemPrompt: { append: 'Review rules.', excludeDynamicSections: false },
+    })
+
+    expect(options.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'Review rules.',
+    })
+  })
+
   test('systemPrompt undefined => default preset', () => {
     const driver = makeDriver()
     const options = driver.buildSdkOptions({ cwd: '/workspace', mcpServers: [] })

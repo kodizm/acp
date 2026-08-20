@@ -48,11 +48,23 @@ export const McpServerSchema = z.object({
  *
  * The append form maps to claude-agent-sdk's
  * `{ type: 'preset', preset: 'claude_code', append: string }` shape.
+ *
+ * `excludeDynamicSections` rides along on the append form. The preset
+ * embeds per-session context in the system prompt AHEAD of the append
+ * text: working directory, git-repo flag, platform, shell, OS version,
+ * auto memory paths. Any difference there is a different system prompt
+ * and therefore a prompt-cache miss, which is guaranteed for a fleet of
+ * agents that each run in their own checkout. The flag moves that
+ * context into the first user message instead, leaving the static preset
+ * plus our append text to be cached and shared.
+ *
+ * It has no meaning on the string form, and the SDK ignores it there.
  */
 const SystemPromptSchema = z.union([
   z.string(),
   z.object({
     append: z.string(),
+    excludeDynamicSections: z.boolean().optional(),
   }),
 ])
 
