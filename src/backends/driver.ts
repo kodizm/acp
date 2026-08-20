@@ -188,6 +188,19 @@ export interface BackendDriver {
    * @throws {MethodNotSupportedError} when the backend has no manual compact lever
    */
   compact(request: CompactSessionRequest, emit: EventEmitter): Promise<void>
+
+  /**
+   * Release every per-session resource the driver owns. Optional: a
+   * backend that holds nothing beyond the process (the Claude SDK
+   * path) can leave it unimplemented.
+   *
+   * The bin calls this from its SIGTERM / SIGINT handler. It is load
+   * bearing for opencode, which boots one `opencode serve` subprocess
+   * per session: without it those children outlive the bin. Six of
+   * them accumulated in a production container and filled its 1 GiB
+   * cgroup to 99.4 %, with two OOM kills.
+   */
+  disposeAll?(): Promise<void>
 }
 
 /**

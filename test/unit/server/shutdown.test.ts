@@ -19,6 +19,41 @@ describe('runShutdown', () => {
     expect(result.timedOut).toBe(false)
   })
 
+  test('disposes the backend driver after the flushers', async () => {
+    // Load bearing for opencode: it boots one `opencode serve`
+    // subprocess per session and those children do not die with the
+    // bin. Before this step existed they accumulated until the
+    // container's cgroup was full.
+    const callOrder: string[] = []
+    await runShutdown({
+      graceMs: 1_000,
+      flushRecorders: async () => {
+        callOrder.push('recorders')
+      },
+      flushTransport: async () => {
+        callOrder.push('transport')
+      },
+      disposeDriver: async () => {
+        callOrder.push('driver')
+      },
+    })
+
+    expect(callOrder).toEqual(['recorders', 'transport', 'driver'])
+  })
+
+  test('a driver disposal failure does not abort the shutdown', async () => {
+    const result = await runShutdown({
+      graceMs: 1_000,
+      flushRecorders: async () => undefined,
+      flushTransport: async () => undefined,
+      disposeDriver: async () => {
+        throw new Error('subprocess already gone')
+      },
+    })
+
+    expect(result.timedOut).toBe(false)
+  })
+
   test('returns timedOut=true when flushers exceed graceMs', async () => {
     const result = await runShutdown({
       graceMs: 30,

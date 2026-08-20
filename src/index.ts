@@ -73,6 +73,14 @@ const activeRecorders = new Set<DebugRecorder>()
 let transportFlusher: (() => Promise<void>) | undefined
 
 /**
+ * The live backend driver, so the shutdown hook can release the
+ * per-session resources it owns. opencode holds one `opencode serve`
+ * subprocess per session and those children do not die with the bin on
+ * their own.
+ */
+let activeDriver: import('./backends/driver.ts').BackendDriver | undefined
+
+/**
  * Register a recorder so the shutdown handler can flush it.
  *
  * @param recorder - the recorder to track
@@ -110,6 +118,15 @@ export async function performShutdown(graceMs: number = SHUTDOWN_GRACE_MS): Prom
     flushTransport: async () => {
       if (transportFlusher !== undefined) {
         await transportFlusher()
+      }
+    },
+    disposeDriver: async () => {
+      // Before this existed, `disposeAll` was reachable only from
+      // tests while its own docblock claimed production disposed at
+      // process exit. It did not, and every opencode session leaked
+      // its server.
+      if (activeDriver?.disposeAll !== undefined) {
+        await activeDriver.disposeAll()
       }
     },
   })
@@ -345,6 +362,7 @@ export async function main(): Promise<void> {
   let driver: import('./backends/driver.ts').BackendDriver
   try {
     driver = await bootBackend(backend)
+    activeDriver = driver
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     process.stderr.write(

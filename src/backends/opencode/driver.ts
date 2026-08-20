@@ -688,10 +688,15 @@ export class OpencodeDriver implements BackendDriver {
   }
 
   /**
-   * Tear down every active session's bridge. Production drivers
-   * dispose at process exit through the existing shutdown hook;
-   * tests call this in `finally` to avoid leaking subprocesses
-   * across cases.
+   * Tear down every active session's bridge, which is what actually
+   * terminates the per-session `opencode serve` subprocess.
+   *
+   * The bin's SIGTERM / SIGINT handler calls this through
+   * `ShutdownOptions.disposeDriver`. It did not until 0.6.2: this
+   * docblock previously claimed production disposed at process exit
+   * while the only callers were tests, so every session leaked its
+   * server. Six accumulated in one production container and filled
+   * its 1 GiB cgroup to 99.4 % with two OOM kills.
    */
   public async disposeAll(): Promise<void> {
     const bridges = [...this.sessions.values()].map((s) => s.bridge)

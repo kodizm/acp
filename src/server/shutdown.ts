@@ -37,6 +37,12 @@ export interface ShutdownOptions {
    */
   flushTransport: () => Promise<void>
   /**
+   * Release per-session backend resources (opencode's per-session
+   * `opencode serve` subprocess). Optional so existing callers and
+   * tests keep working.
+   */
+  disposeDriver?: () => Promise<void>
+  /**
    * Optional final event emitter. When supplied with non-empty
    * {@link finalSessionIds} + a {@link finalReason}, runShutdown
    * emits a `session_failed` event for each session id BEFORE
@@ -108,6 +114,15 @@ export async function runShutdown(options: ShutdownOptions): Promise<ShutdownRes
       await options.flushTransport()
     } catch (err) {
       errors.push(toError(err))
+    }
+    // Last: releasing backend resources can outlive the wire flush,
+    // and a caller that never wired it keeps the old behaviour.
+    if (options.disposeDriver !== undefined) {
+      try {
+        await options.disposeDriver()
+      } catch (err) {
+        errors.push(toError(err))
+      }
     }
   })()
 
