@@ -18,7 +18,7 @@
     "test": "bun test test/unit test/e2e",
     "test:unit": "bun test test/unit",
     "test:e2e": "bun test test/e2e",
-    "test:integration": "bun test test/integration",
+    "test:integration": "./scripts/reap-opencode.sh bun test test/integration",
     "test:watch": "bun test --watch",
     "lint": "biome check src test",
     "lint:fix": "biome check --write src test",

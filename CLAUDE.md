@@ -63,7 +63,7 @@ The published bin (`src/index.ts`) wires both backends: `bootBackend()` dispatch
 - Path alias `@/` resolves to `src/` from `test/` only. Inside `src/`, use relative imports with `.ts` extension (`allowImportingTsExtensions: true` in tsconfig).
 - Bun's `bun:test` is jest-compatible. Mocks via `mock(fn)` from `bun:test`. No `vitest`, no `jest`.
 - `debug_log` carries one of the stage enums in `DebugStageSchema` (`src/wire/events.ts`). Read the schema before emitting a new stage value.
-- Opencode subprocesses leak between failed test runs. `pkill -f "opencode serve"` between iterations is sometimes required during local development.
+- Opencode subprocesses leak between failed test runs, because the server is a grandchild that reparents to pid 1 and never sees the signal that killed the run. `bun run test:integration` goes through `scripts/reap-opencode.sh`, which snapshots the running servers first and terminates whatever is new when the run ends, however it ends. Invoke `bun test test/integration` directly and you lose that: check `pgrep -fc "[o]pencode serve"` afterwards. macOS has no `setsid`, so the snapshot is the portable substitute for a process-group kill. Count on `comm` when a number looks wrong, since `ps -Ao args=` also lists the shell whose command line embeds the pattern.
 - `debug-recorder.test.ts` flakes occasionally under parallel test load; re-run is the workaround.
 - Underscore-prefixed files in `test/integration/` are fixtures or manual scripts, NOT bun:test suites.
 
