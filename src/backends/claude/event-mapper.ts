@@ -287,8 +287,8 @@ function mapAssistantMessage(sessionId: string, message: SdkAssistantMessage): S
       }
       // Surface Task tool dispatches (Claude Code's subagent
       // delegation lever) as subagent_spawn before the generic
-      // tool_call_begin. Older Anthropic SDK builds named the same
-      // tool 'Agent' on the wire; both aliases route here. The
+      // tool_call_begin. Current CLIs name the tool 'Agent' and
+      // older ones 'Task'; both aliases route here. The
       // tool_use_id is reused as childId because the Task tool
       // does not allocate a separate session uuid; the matching
       // subagent_complete (T370 below) ties back via tool_use_id.
@@ -343,7 +343,7 @@ function extractSkillName(block: SdkToolUseBlock): string | undefined {
  * `subagent_type` argument so the mapper can record it as the
  * "model" hint on the subagent_spawn event.
  *
- * Tool name is `Task` on current SDK builds + `Agent` on legacy
+ * Tool name is `Agent` on current CLI builds + `Task` on legacy
  * builds; both surface a `subagent_type` field on the input. When
  * the field is missing we still treat the call as a subagent (the
  * Task tool always does), defaulting to `'general-purpose'` since
@@ -382,7 +382,7 @@ function mapUserMessage(sessionId: string, message: SdkUserMessage): SessionUpda
       // tool_call_end so the orchestrator's tree observer pairs the
       // complete with its spawn before the tool lifecycle event
       // closes. Markers: the Task tool stamps `agentId: <hex>` plus a
-      // `<usage>total_tokens: N tool_uses: M duration_ms: D</usage>`
+      // `<usage>subagent_tokens: N` (older CLIs: `total_tokens: N`)
       // block on its result string. Both must be present to avoid
       // false-positives on any unrelated tool that mentions the word.
       const subagentUsage = extractTaskToolUsage(resultText)
@@ -414,12 +414,17 @@ function mapUserMessage(sessionId: string, message: SdkUserMessage): SessionUpda
 
 /**
  * Detect a Claude Code Task tool result by scanning for both the
- * `agentId:` line + the `<usage>total_tokens: N ...</usage>` block.
- * Returns the parsed numeric counts when both markers land, else
- * undefined for any unrelated tool result.
+ * `agentId:` line + the `<usage>...</usage>` block. Returns the parsed
+ * numeric counts when both markers land, else undefined for any
+ * unrelated tool result.
+ *
+ * The count is named `subagent_tokens` on current CLIs (seen on
+ * 2.1.280, one field per line) and `total_tokens` on older ones, so
+ * both are read. Missing the rename kept `subagent_complete` silent
+ * even for a foreground agent.
  *
  * The Task tool does not split input vs output tokens; the wire
- * exposes `total_tokens` only. Callers map total -> inputTokens and
+ * exposes one total only. Callers map total -> inputTokens and
  * leave outputTokens at 0; the orchestrator's modal renders both.
  */
 function extractTaskToolUsage(resultText: string): { totalTokens: number } | undefined {
@@ -432,7 +437,7 @@ function extractTaskToolUsage(resultText: string): { totalTokens: number } | und
     return undefined
   }
 
-  const totalMatch = usageMatch[1]?.match(/total_tokens:\s*(\d+)/)
+  const totalMatch = usageMatch[1]?.match(/(?:subagent|total)_tokens:\s*(\d+)/)
   if (totalMatch === null || totalMatch === undefined) {
     return undefined
   }

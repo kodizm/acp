@@ -132,6 +132,73 @@ describe('ClaudeDriver Task tool subagent lifecycle', () => {
     expect(completeIdx).toBeLessThan(toolEndIdx)
   })
 
+  test('CLI 2.1.280 hand-back with subagent_tokens -> subagent_complete carries the count', async () => {
+    // Captured verbatim from a foreground Agent run on Claude Code
+    // 2.1.280: the usage block names the figure `subagent_tokens` and
+    // puts each field on its own line.
+    const messages: SdkMessage[] = [
+      {
+        type: 'system',
+        subtype: 'init',
+        model: 'claude-haiku-4-5-20251001',
+      },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tu_agent_280',
+              name: 'Agent',
+              input: { subagent_type: 'general-purpose', prompt: 'Count *.md files.' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tu_agent_280',
+              content:
+                '[Subagent hand-back] The text below is the final report of a subagent this session delegated to. The report follows:\n  4\n  \n  4\n' +
+                "agentId: ab9347b841a8a7ddc (use SendMessage with to: 'ab9347b841a8a7ddc', summary: '<5-10 word recap>' to continue this agent)\n" +
+                '<usage>subagent_tokens: 45546\ntool_uses: 1\nduration_ms: 5176</usage>',
+              is_error: false,
+            },
+          ],
+        },
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+      },
+    ]
+
+    const driver = new ClaudeDriver({
+      credentials: { type: 'api-key', token: 'sk-ant-fake' },
+      agentInfo: { version: '0.0.1-test' },
+      sdk: makeAdapter(messages),
+    })
+
+    const { sessionId } = await driver.newSession({ cwd: '/workspace', mcpServers: [] })
+    const { emit, events } = makeRecordingEmitter()
+    await driver.prompt(sessionId, { sessionId, prompt: [] }, emit)
+
+    const completes = events.filter((e) => e.type === 'subagent_complete')
+    expect(completes).toHaveLength(1)
+
+    const complete = completes[0]
+    if (complete?.type === 'subagent_complete') {
+      expect(complete.childId).toBe('tu_agent_280')
+      expect(complete.inputTokens).toBe(45546)
+    }
+  })
+
   test('Plain tool_use + tool_result (non-Task) does NOT emit subagent events', async () => {
     const messages: SdkMessage[] = [
       {
