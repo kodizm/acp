@@ -149,6 +149,11 @@ export const ToolPolicySchema = z.object({
  * narrows the whole built-in set to web fetch + web search and drops
  * filesystem settings, for a lean research agent whose other tools
  * arrive over MCP.
+ *
+ * `tools` names the built-in set outright (e.g. `['Bash', 'Read']` for a
+ * reviewer), for a role that knows exactly what it uses. Unlike `simple`
+ * it leaves filesystem settings loaded, so the image's deny rules and env
+ * still apply. `simple` wins when both are set.
  */
 export const FeaturesSchema = z.object({
   todos: z.boolean().optional(),
@@ -162,6 +167,7 @@ export const FeaturesSchema = z.object({
   autoMemory: z.boolean().optional(),
   bundledSkills: z.boolean().optional(),
   simple: z.boolean().optional(),
+  tools: z.array(z.string().min(1)).optional(),
 })
 
 /**

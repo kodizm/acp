@@ -217,7 +217,7 @@ export class OpencodeDriver implements BackendDriver {
     // 1. Build the per-session env (Phase 3 D9). The OPENCODE_AUTH_CONTENT
     //    blob carries provider credentials; layered onto process.env
     //    only for the duration of the subprocess spawn.
-    const env = this.buildAuthEnv(params)
+    const env = this.buildSessionEnv(params)
 
     // 2. Boot a fresh opencode server for this session. The bridge
     //    spawns 'opencode serve --port 0 --hostname 127.0.0.1' under
@@ -591,8 +591,11 @@ export class OpencodeDriver implements BackendDriver {
       throw new MethodNotSupportedError('session/load', this.supportedMethodNames())
     }
 
+    // A load spawns a fresh server in the same checkout, so it needs the
+    // same env as the session it resumes: without it the resumed server
+    // ran with no provider auth and read the checkout's own config.
     const bridge = this.bridgeFactory()
-    const handle = await bridge.start({})
+    const handle = await bridge.start({ env: this.buildSessionEnv(params) })
 
     const sessionApi = handle.sdk.session as unknown as {
       get?: (parameters: { sessionID: string; directory?: string }) => Promise<unknown>
@@ -705,12 +708,36 @@ export class OpencodeDriver implements BackendDriver {
   }
 
   /**
+   * Everything the opencode subprocess for one session reads from its env.
+   *
+   * `OPENCODE_DISABLE_PROJECT_CONFIG` is set when the orchestrator's
+   * `settingSources` leaves out `project` (simple mode implies an empty
+   * list), which is how Kodizm marks a checkout it does not trust. The
+   * flag is opencode's only switch for the project layer: without it
+   * opencode loads `opencode.json` and every `.opencode/plugin/*.{ts,js}`
+   * from the checkout and EXECUTES the plugins, in a process whose env
+   * carries `OPENCODE_AUTH_CONTENT`. Measured on opencode 1.18.32: a
+   * plugin in a probe checkout ran under `opencode debug config`, and did
+   * not with the flag. It also skips AGENTS.md / CLAUDE.md autoloading,
+   * the same trade the claude backend makes with `settingSources: ['user']`.
+   */
+  private buildSessionEnv(params: NewSessionRequest | LoadSessionRequest): Record<string, string> {
+    const sources = params.features?.simple === true ? [] : params.settingSources
+    const untrusted = sources !== undefined && !sources.includes('project')
+
+    return {
+      ...this.buildAuthEnv(params),
+      ...(untrusted ? { OPENCODE_DISABLE_PROJECT_CONFIG: '1' } : {}),
+    }
+  }
+
+  /**
    * Translate canonical `_meta.opencodeAuth` (Phase 3 D9) into the
    * `OPENCODE_AUTH_CONTENT` env var the opencode subprocess reads at
    * boot. Empty when the orchestrator does not pass auth; production
    * Kodizm flows attach this from the agent_session row.
    */
-  private buildAuthEnv(params: NewSessionRequest): Record<string, string> {
+  private buildAuthEnv(params: NewSessionRequest | LoadSessionRequest): Record<string, string> {
     const meta = (params._meta ?? {}) as { opencodeAuth?: string | Record<string, unknown> }
     if (meta.opencodeAuth === undefined) {
       return {}

@@ -36,7 +36,7 @@ import type { FeaturesSchema } from '../../wire/schemas.ts'
 
 export type KodizmFeatures = z.infer<typeof FeaturesSchema>
 
-type ToolFamily = Exclude<keyof KodizmFeatures, 'autoMemory' | 'bundledSkills' | 'simple'>
+type ToolFamily = Exclude<keyof KodizmFeatures, 'autoMemory' | 'bundledSkills' | 'simple' | 'tools'>
 
 /**
  * Subset of Claude SDK `Options` the translator emits. The driver
@@ -102,6 +102,12 @@ export function translateFeaturesToClaude(
     out.strictMcpConfig = true
 
     return out
+  }
+
+  // A named base set is the whole menu; the family removals below still
+  // run and are harmless against a set that never offered those tools.
+  if (features.tools !== undefined) {
+    out.tools = [...features.tools]
   }
 
   for (const [family, tools] of Object.entries(FAMILY_TOOLS)) {

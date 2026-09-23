@@ -84,4 +84,16 @@ describe('translateFeaturesToClaude', () => {
     // Nothing else is left to remove once the base set is two tools.
     expect(out.disallowedTools).toEqual([])
   })
+
+  test('a base tool set replaces the built-in preset, and simple mode still wins', () => {
+    const out = translateFeaturesToClaude({ tools: ['Bash', 'Read'], todos: false }, 'bypassPermissions')
+
+    expect(out.tools).toEqual(['Bash', 'Read'])
+    // Settings stay loaded: unlike simple mode, a base set is only a narrower menu.
+    expect('settingSources' in out).toBe(false)
+    expect(translateFeaturesToClaude({ tools: ['Bash'], simple: true }, 'bypassPermissions').tools).toEqual([
+      'WebFetch',
+      'WebSearch',
+    ])
+  })
 })
