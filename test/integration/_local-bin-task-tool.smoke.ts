@@ -12,10 +12,15 @@
  *   ANTHROPIC_API_KEY=sk-ant-... \
  *     bun run test/integration/_local-bin-task-tool.smoke.ts
  *
- * Expected output ends with:
+ * A foreground agent ends with:
  *   ✅ subagent_spawn fired
  *   ✅ subagent_complete fired
- *   ✅ both events carry trigger=Task tool
+ *
+ * Claude Code runs Task agents in the background by default (since
+ * 2.1.198), and a background agent's tool_result carries no <usage>
+ * block, so on a default CLI this reports `❌ no subagent_complete
+ * fired`. That is the known gap recorded in CLAUDE.md, not a broken
+ * script. Set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 to see both.
  */
 
 import { spawn } from 'node:child_process'
@@ -59,19 +64,21 @@ child.stdout?.on('data', (chunk: Buffer) => {
       continue
     }
 
-    if (frame.id !== undefined && pending.has(frame.id)) {
-      pending.get(frame.id)?.(frame)
-      pending.delete(frame.id)
+    // The bin calls back into the orchestrator before a session's first
+    // prompt (`session/permission_deferred_state`, Pattern B) and waits
+    // for the answer. Leaving it unanswered parks the turn until the
+    // prompt times out, which is how this script hung with a single
+    // frame on the wire. An empty result reads as "no deferred state".
+    // Checked before the response branch: the bin numbers its own
+    // requests from 1 too, so an id alone cannot tell the two apart.
+    if (frame.id !== undefined && frame.method !== undefined) {
+      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: {} })}\n`)
       continue
     }
 
-    // The bin calls back into the orchestrator before a turn starts
-    // (`session/permission_deferred_state`, Pattern B) and waits for the
-    // answer. Leaving it unanswered parks the turn until the prompt
-    // times out, which is how this script hung with a single frame on
-    // the wire. An empty result reads as "no deferred state".
-    if (frame.id !== undefined && frame.method !== undefined) {
-      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: {} })}\n`)
+    if (frame.id !== undefined && pending.has(frame.id)) {
+      pending.get(frame.id)?.(frame)
+      pending.delete(frame.id)
       continue
     }
 
@@ -136,7 +143,7 @@ async function main(): Promise<void> {
   const spawnEvents = sessionUpdates.filter((u) => (u.params as { type?: string }).type === 'subagent_spawn')
   const completeEvents = sessionUpdates.filter((u) => (u.params as { type?: string }).type === 'subagent_complete')
 
-  process.stderr.write(`\n=== summary ===\n`)
+  process.stderr.write('\n=== summary ===\n')
   process.stderr.write(`total sessionUpdates: ${sessionUpdates.length}\n`)
   process.stderr.write(`subagent_spawn count: ${spawnEvents.length}\n`)
   process.stderr.write(`subagent_complete count: ${completeEvents.length}\n`)
