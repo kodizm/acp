@@ -46,6 +46,7 @@ import type { ClaudeCredentials } from './auth.ts'
 import { findSessionJsonlPath, writeDeferredToolResult } from './deferred-permission.ts'
 import { classifyClaudeError } from './error-classifier.ts'
 import { type SdkMessage, mapSdkMessage } from './event-mapper.ts'
+import { translateFeaturesToClaude } from './features.ts'
 import { type ClaudeSdkMcpServer, translateMcpServers } from './mcp-bridge.ts'
 import { buildCanUseTool } from './permission-bridge.ts'
 import { translateToolPolicyToClaude } from './policy.ts'
@@ -81,6 +82,17 @@ export interface ClaudeSdkOptions {
   permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'dontAsk' | 'bypassPermissions'
   allowedTools?: string[]
   disallowedTools?: string[]
+  /**
+   * Base set of built-in tools. Omitted means the full preset; the
+   * driver only sets it for `features.simple`.
+   */
+  tools?: string[]
+  /**
+   * Ignore every MCP configuration except `mcpServers`. Only set for
+   * `features.simple`, whose empty settingSources drops the settings
+   * env that otherwise keeps account connectors off.
+   */
+  strictMcpConfig?: boolean
   /**
    * SDK settings sources. Pass `[]` to disable filesystem settings
    * (SDK isolation mode); the driver does NOT set this by default
@@ -319,14 +331,30 @@ export class ClaudeDriver implements BackendDriver {
     this.sessions.set(sessionId, {
       sessionId,
       options,
+      ...this.sessionTimings(params),
+    })
+    return { sessionId }
+  }
+
+  /**
+   * The permission and liveness timings a session keeps outside its SDK
+   * options, shared by new and load so a resumed session defers and
+   * heartbeats the way it did before the process restarted.
+   */
+  private sessionTimings(
+    params: NewSessionRequest | LoadSessionRequest,
+  ): Pick<
+    SessionState,
+    'permissionTimeoutMs' | 'permissionDeferTimeoutMs' | 'heartbeatIntervalMs' | 'inactivityThresholdMs'
+  > {
+    return {
       ...(params.permissionTimeoutMs === undefined ? {} : { permissionTimeoutMs: params.permissionTimeoutMs }),
       ...(params.permissionDeferTimeoutMs === undefined
         ? {}
         : { permissionDeferTimeoutMs: params.permissionDeferTimeoutMs }),
       ...(params.heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs: params.heartbeatIntervalMs }),
       ...(params.inactivityThresholdMs === undefined ? {} : { inactivityThresholdMs: params.inactivityThresholdMs }),
-    })
-    return { sessionId }
+    }
   }
 
   public async loadSession(params: LoadSessionRequest): Promise<NewSessionResult> {
@@ -339,14 +367,22 @@ export class ClaudeDriver implements BackendDriver {
     const existing = this.sessions.get(params.sessionId)
     const resumeKey = existing?.sdkSessionId ?? params.sessionId
 
+    // The CLI restores the model and the system prompt from the
+    // transcript, so both are only forwarded when the wire names them:
+    // forcing the preset on a bare load would overwrite a role's
+    // full-replacement prompt. Everything else is per-query and has to
+    // travel on every load, or the role's tool policy is lost.
     const options: ClaudeSdkOptions = {
       ...this.buildBaseSdkOptions(params),
+      ...(params.systemPrompt === undefined ? {} : { systemPrompt: this.buildSystemPrompt(params.systemPrompt) }),
+      ...(params.model === undefined ? {} : { model: params.model }),
       resume: resumeKey,
     }
     this.sessions.set(params.sessionId, {
       sessionId: params.sessionId,
       options,
       sdkSessionId: existing?.sdkSessionId,
+      ...this.sessionTimings(params),
     })
     return { sessionId: params.sessionId }
   }
@@ -868,8 +904,8 @@ export class ClaudeDriver implements BackendDriver {
         ? { additionalDirectories: [...params.additionalDirectories] }
         : {}
 
-    // Skills only flow on session/new (not load / fork; load reuses
-    // the persisted system prompt and fork inherits the source's).
+    // Skills flow on new and load (a load is a fresh query, and the
+    // skill filter is per-query); fork inherits the source's.
     const skills =
       'skills' in params && params.skills !== undefined && params.skills.length > 0
         ? { skills: [...params.skills] }
@@ -883,13 +919,24 @@ export class ClaudeDriver implements BackendDriver {
     const policyTranslation =
       'toolPolicy' in params && params.toolPolicy !== undefined ? translateToolPolicyToClaude(params.toolPolicy) : {}
 
+    const permissionMode = policyTranslation.permissionMode ?? 'bypassPermissions'
+
+    // Feature switches: tool families join the policy's deny list (a
+    // bare name there removes the tool from the model's context), and
+    // behaviour families ride in as env. See features.ts.
+    const featureTranslation = translateFeaturesToClaude(
+      'features' in params ? params.features : undefined,
+      permissionMode,
+    )
+    const disallowedTools = [
+      ...new Set([...(policyTranslation.disallowedTools ?? []), ...featureTranslation.disallowedTools]),
+    ]
+
     const policyOptions: Pick<ClaudeSdkOptions, 'allowedTools' | 'disallowedTools' | 'permissionMode' | 'permissions'> =
       {
         ...(policyTranslation.allowedTools !== undefined ? { allowedTools: policyTranslation.allowedTools } : {}),
-        ...(policyTranslation.disallowedTools !== undefined
-          ? { disallowedTools: policyTranslation.disallowedTools }
-          : {}),
-        permissionMode: policyTranslation.permissionMode ?? 'bypassPermissions',
+        ...(disallowedTools.length > 0 ? { disallowedTools } : {}),
+        permissionMode,
         ...(policyTranslation.askRules !== undefined && policyTranslation.askRules.length > 0
           ? {
               permissions: {
@@ -906,31 +953,31 @@ export class ClaudeDriver implements BackendDriver {
           : {}),
       }
 
-    // Auto-compact opt-out via env. SDK default is on; when the
-    // orchestrator passes autoCompact:false the driver injects the
-    // SDK's documented disable env var. Merge with process.env so
+    // Env injection: the feature switches' CLAUDE_CODE_DISABLE_* vars,
+    // plus the auto-compact opt-out (SDK default is on; autoCompact:false
+    // injects the SDK's documented disable env var). Merge with process.env so
     // the SDK's own auth env (CLAUDE_CODE_OAUTH_TOKEN,
     // ANTHROPIC_API_KEY) survives the injection — the SDK passes
     // `Options.env` as the FULL subprocess env, not an addition.
-    const compactEnv =
-      'autoCompact' in params && params.autoCompact === false
-        ? {
-            env: {
-              ...(process.env as Record<string, string>),
-              DISABLE_AUTO_COMPACT: '1',
-            },
-          }
-        : {}
+    const extraEnv: Record<string, string> = {
+      ...featureTranslation.env,
+      ...('autoCompact' in params && params.autoCompact === false ? { DISABLE_AUTO_COMPACT: '1' } : {}),
+    }
+    const envOpt =
+      Object.keys(extraEnv).length > 0 ? { env: { ...(process.env as Record<string, string>), ...extraEnv } } : {}
 
     // settingSources: orchestrator opt-out for fs config layering.
     // Undefined means pass nothing to the SDK so its built-in default
     // (`user, project, local`, matching standalone Claude Code CLI)
     // fires. Explicit `[]` disables every fs scope; selective subsets
     // are honored verbatim.
+    // An explicit wire value wins over the one simple mode implies.
     const settingSourcesOpt =
       'settingSources' in params && params.settingSources !== undefined
         ? { settingSources: [...params.settingSources] }
-        : {}
+        : featureTranslation.settingSources !== undefined
+          ? { settingSources: featureTranslation.settingSources }
+          : {}
 
     return {
       cwd: params.cwd,
@@ -938,8 +985,12 @@ export class ClaudeDriver implements BackendDriver {
       ...additional,
       ...skills,
       ...policyOptions,
-      ...compactEnv,
+      ...envOpt,
       ...settingSourcesOpt,
+      ...(featureTranslation.tools !== undefined ? { tools: featureTranslation.tools } : {}),
+      ...(featureTranslation.strictMcpConfig !== undefined
+        ? { strictMcpConfig: featureTranslation.strictMcpConfig }
+        : {}),
     }
   }
 

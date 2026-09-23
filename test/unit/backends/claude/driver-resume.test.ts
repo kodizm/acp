@@ -134,3 +134,61 @@ describe('ClaudeDriver.loadSession, continue conversation', () => {
     expect(calls[1]?.prompt).toBe('and one more thing')
   })
 })
+
+describe('ClaudeDriver.loadSession, role options', () => {
+  test('a load carries the same options a new session would, on top of resume', async () => {
+    // Measured on CLI 2.1.280: a resumed query() keeps the transcript's
+    // model and system prompt, but the tool policy, permission mode,
+    // extra directories and env are per-query options. A load that sent
+    // none of them came back with every tool the role had removed and on
+    // bypassPermissions.
+    let observed: Record<string, unknown> | undefined
+    const driver = makeDriver(
+      makeAdapter([{ type: 'result', subtype: 'success' }], (call) => {
+        observed = call.options as unknown as Record<string, unknown>
+      }),
+    )
+
+    await driver.loadSession({
+      sessionId: 'prior-session-2',
+      cwd: '/workspace',
+      mcpServers: [],
+      additionalDirectories: ['/workspace/extra'],
+      systemPrompt: { append: 'Role rules.' },
+      model: 'claude-sonnet-5',
+      toolPolicy: { deny: ['Edit'], defaultMode: 'default' },
+      autoCompact: false,
+      features: { todos: false },
+    })
+
+    const { emit } = makeRecordingEmitter()
+    await driver.prompt('prior-session-2', { sessionId: 'prior-session-2', prompt: [] }, emit)
+
+    expect(observed?.resume).toBe('prior-session-2')
+    expect(observed?.permissionMode).toBe('default')
+    expect(observed?.disallowedTools).toEqual(['Edit', 'TodoWrite', 'TaskCreate', 'TaskGet', 'TaskUpdate', 'TaskList'])
+    expect(observed?.additionalDirectories).toEqual(['/workspace/extra'])
+    expect(observed?.model).toBe('claude-sonnet-5')
+    expect(observed?.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'Role rules.' })
+    expect((observed?.env as Record<string, string> | undefined)?.DISABLE_AUTO_COMPACT).toBe('1')
+  })
+
+  test('a bare load keeps its old shape: no prompt override, no model', async () => {
+    let observed: Record<string, unknown> | undefined
+    const driver = makeDriver(
+      makeAdapter([{ type: 'result', subtype: 'success' }], (call) => {
+        observed = call.options as unknown as Record<string, unknown>
+      }),
+    )
+
+    await driver.loadSession({ sessionId: 'prior-session-3', cwd: '/workspace', mcpServers: [] })
+
+    const { emit } = makeRecordingEmitter()
+    await driver.prompt('prior-session-3', { sessionId: 'prior-session-3', prompt: [] }, emit)
+
+    // The CLI restores both from the transcript; forcing the preset here
+    // would overwrite a role's full-replacement prompt on resume.
+    expect('systemPrompt' in (observed ?? {})).toBe(false)
+    expect('model' in (observed ?? {})).toBe(false)
+  })
+})

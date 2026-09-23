@@ -238,4 +238,68 @@ describe('ClaudeDriver.newSession + buildSdkOptions', () => {
 
     expect(options.settingSources).toEqual(['user', 'project', 'local'])
   })
+
+  test('features: switched-off tools join the policy deny list without duplicates', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      toolPolicy: { deny: ['Edit', 'TodoWrite'] },
+      features: { todos: false, worktree: false },
+    })
+
+    expect(options.disallowedTools).toEqual([
+      'Edit',
+      'TodoWrite',
+      'TaskCreate',
+      'TaskGet',
+      'TaskUpdate',
+      'TaskList',
+      'EnterWorktree',
+      'ExitWorktree',
+    ])
+  })
+
+  test('features: env switches ride on top of process.env and keep the auto-compact opt-out', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      autoCompact: false,
+      features: { scheduling: false, autoMemory: false },
+    })
+
+    expect(options.env?.CLAUDE_CODE_DISABLE_CRON).toBe('1')
+    expect(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
+    expect(options.env?.DISABLE_AUTO_COMPACT).toBe('1')
+    // The SDK takes env as the FULL subprocess environment.
+    expect(options.env?.PATH).toBe(process.env.PATH)
+  })
+
+  test('features: all on sends neither env nor tools', () => {
+    const driver = makeDriver()
+    const options = driver.buildSdkOptions({ cwd: '/workspace', mcpServers: [], features: {} })
+
+    expect('env' in options).toBe(false)
+    expect('tools' in options).toBe(false)
+    expect('disallowedTools' in options).toBe(false)
+  })
+
+  test('features.simple: web tools only and no filesystem settings unless the wire names some', () => {
+    const driver = makeDriver()
+    const simple = driver.buildSdkOptions({ cwd: '/workspace', mcpServers: [], features: { simple: true } })
+
+    expect(simple.tools).toEqual(['WebFetch', 'WebSearch'])
+    expect(simple.settingSources).toEqual([])
+    expect(simple.strictMcpConfig).toBe(true)
+
+    const explicit = driver.buildSdkOptions({
+      cwd: '/workspace',
+      mcpServers: [],
+      settingSources: ['project'],
+      features: { simple: true },
+    })
+
+    expect(explicit.settingSources).toEqual(['project'])
+  })
 })

@@ -99,6 +99,7 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'heartbeatIntervalMs',
   'inactivityThresholdMs',
   'settingSources',
+  'features',
 ] as const
 
 /**
@@ -138,6 +139,32 @@ export const ToolPolicySchema = z.object({
 })
 
 /**
+ * Canonical feature switches: which families of built-in agent
+ * behaviour a session carries. Every key is optional and an absent key
+ * means on, so an empty or missing object is today's full surface.
+ * Backends translate what they have a lever for and ignore the rest;
+ * see `src/backends/claude/features.ts` for the one translation today.
+ *
+ * `simple` is the odd one out: rather than switching a family off it
+ * narrows the whole built-in set to web fetch + web search and drops
+ * filesystem settings, for a lean research agent whose other tools
+ * arrive over MCP.
+ */
+export const FeaturesSchema = z.object({
+  todos: z.boolean().optional(),
+  subagents: z.boolean().optional(),
+  backgroundTasks: z.boolean().optional(),
+  scheduling: z.boolean().optional(),
+  planMode: z.boolean().optional(),
+  worktree: z.boolean().optional(),
+  notebook: z.boolean().optional(),
+  clientTools: z.boolean().optional(),
+  autoMemory: z.boolean().optional(),
+  bundledSkills: z.boolean().optional(),
+  simple: z.boolean().optional(),
+})
+
+/**
  * Refinement helper that rejects any payload smuggling a canonical
  * field through `_meta`. Used by every schema that exposes `_meta`.
  *
@@ -170,6 +197,43 @@ export const InitializeRequestSchema = z.object({
 })
 
 /**
+ * The per-session options `session/new` and `session/load` share. A load
+ * is a fresh `query()` with `resume`, and the CLI restores only the model
+ * and the system prompt from the transcript: the tool policy, permission
+ * mode, extra directories and env are per-query, so a load that did not
+ * carry them came back on bypassPermissions with every tool the role had
+ * removed (measured on CLI 2.1.280).
+ */
+const SessionOptionFields = {
+  additionalDirectories: z.array(AbsolutePathSchema).optional(),
+  systemPrompt: SystemPromptSchema.optional(),
+  model: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+  toolPolicy: ToolPolicySchema.optional(),
+  autoCompact: z.boolean().optional(),
+  permissionTimeoutMs: z.number().int().positive().optional(),
+  permissionDeferTimeoutMs: z.number().int().positive().optional(),
+  debug: z.boolean().optional(),
+  debugCaptureRawSdk: z.boolean().optional(),
+  debugCaptureRpc: z.boolean().optional(),
+  heartbeatIntervalMs: z.number().int().positive().optional(),
+  inactivityThresholdMs: z.number().int().positive().optional(),
+  settingSources: SettingSourcesSchema.optional(),
+  features: FeaturesSchema.optional(),
+  _meta: MetaSchema.optional(),
+}
+
+const TIMEOUT_EXCLUSION = {
+  message:
+    'permissionTimeoutMs and permissionDeferTimeoutMs are mutually exclusive (pick hard-deny on timeout OR soft-defer on timeout)',
+  path: ['permissionDeferTimeoutMs'],
+}
+
+function timeoutsAreExclusive(data: { permissionTimeoutMs?: number; permissionDeferTimeoutMs?: number }): boolean {
+  return !(data.permissionTimeoutMs !== undefined && data.permissionDeferTimeoutMs !== undefined)
+}
+
+/**
  * `session/new` request: opens a session against the chosen backend.
  * All Kodizm-specific fields (systemPrompt, additionalDirectories,
  * model, skills) are first-class top-level. Backend drivers translate
@@ -179,28 +243,10 @@ export const NewSessionRequestSchema = z
   .object({
     cwd: AbsolutePathSchema,
     mcpServers: z.array(McpServerSchema),
-    additionalDirectories: z.array(AbsolutePathSchema).optional(),
-    systemPrompt: SystemPromptSchema.optional(),
-    model: z.string().optional(),
-    skills: z.array(z.string()).optional(),
-    toolPolicy: ToolPolicySchema.optional(),
-    autoCompact: z.boolean().optional(),
-    permissionTimeoutMs: z.number().int().positive().optional(),
-    permissionDeferTimeoutMs: z.number().int().positive().optional(),
-    debug: z.boolean().optional(),
-    debugCaptureRawSdk: z.boolean().optional(),
-    debugCaptureRpc: z.boolean().optional(),
-    heartbeatIntervalMs: z.number().int().positive().optional(),
-    inactivityThresholdMs: z.number().int().positive().optional(),
-    settingSources: SettingSourcesSchema.optional(),
-    _meta: MetaSchema.optional(),
+    ...SessionOptionFields,
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
-  .refine((data) => !(data.permissionTimeoutMs !== undefined && data.permissionDeferTimeoutMs !== undefined), {
-    message:
-      'permissionTimeoutMs and permissionDeferTimeoutMs are mutually exclusive (pick hard-deny on timeout OR soft-defer on timeout)',
-    path: ['permissionDeferTimeoutMs'],
-  })
+  .refine(timeoutsAreExclusive, TIMEOUT_EXCLUSION)
 
 /**
  * `session/prompt` request: a turn in an existing session. The
@@ -237,10 +283,10 @@ export const LoadSessionRequestSchema = z
     sessionId: z.string().min(1),
     cwd: AbsolutePathSchema,
     mcpServers: z.array(McpServerSchema),
-    settingSources: SettingSourcesSchema.optional(),
-    _meta: MetaSchema.optional(),
+    ...SessionOptionFields,
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
+  .refine(timeoutsAreExclusive, TIMEOUT_EXCLUSION)
 
 /**
  * `session/compact` request: orchestrator asks the backend driver to
@@ -268,6 +314,7 @@ export const ForkSessionRequestSchema = z
     model: z.string().optional(),
     additionalDirectories: z.array(AbsolutePathSchema).optional(),
     settingSources: SettingSourcesSchema.optional(),
+    features: FeaturesSchema.optional(),
     _meta: MetaSchema.optional(),
   })
   .refine(metaCarriesNoCanonicalFields, { message: META_SMUGGLE_MESSAGE, path: ['_meta'] })
