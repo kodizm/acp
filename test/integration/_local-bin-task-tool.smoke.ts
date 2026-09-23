@@ -65,6 +65,16 @@ child.stdout?.on('data', (chunk: Buffer) => {
       continue
     }
 
+    // The bin calls back into the orchestrator before a turn starts
+    // (`session/permission_deferred_state`, Pattern B) and waits for the
+    // answer. Leaving it unanswered parks the turn until the prompt
+    // times out, which is how this script hung with a single frame on
+    // the wire. An empty result reads as "no deferred state".
+    if (frame.id !== undefined && frame.method !== undefined) {
+      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: {} })}\n`)
+      continue
+    }
+
     if (frame.method === 'sessionUpdate' && typeof frame.params === 'object' && frame.params !== null) {
       const params = frame.params as Record<string, unknown>
       sessionUpdates.push({ method: frame.method, params })
