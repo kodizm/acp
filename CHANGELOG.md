@@ -2,6 +2,33 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-03
+
+Entries for 0.5.5 to 0.6.9 were not kept in this file; `git log v0.5.4..v0.6.9` has them.
+
+### Added
+
+- **`plugins` on `session/new` and `session/load`**. An array of absolute
+  directories the Claude backend hands to the SDK as
+  `plugins: [{ type: 'local', path }]`, so the CLI loads a plugin (for
+  example the baked ac-lsp language servers) for that query only. Every path
+  must sit under `/opt/kodizm/plugins/` and contain no `..` segment; the
+  field is also banned inside `_meta`. The opencode backend ignores it. A
+  bridge older than 0.7.0 strips the field silently.
+- `config.claudeAgentSdk` in `package.json`: the exact SDK version this
+  release is built against. The agent image installs the CLI from the
+  matching platform package, so the one `claude` binary equals the SDK's
+  bundled CLI.
+
+### Changed
+
+- `@anthropic-ai/claude-agent-sdk` is pinned to `0.3.280` instead of
+  `^0.3.280`, and every bundled dependency moved to `devDependencies`: the
+  published `dist/index.js` imports only Node built-ins, so the package now
+  installs with no runtime dependencies.
+- The package description and keywords no longer mention codex, which the
+  bin has not wired since it was retired.
+
 ## [0.5.4] - 2026-05-08
 
 ### Added

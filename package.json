@@ -1,7 +1,7 @@
 {
   "name": "@kodizm/acp",
   "version": "0.7.0",
-  "description": "Custom ACP server bridging Claude Code, codex, and opencode CLIs through a single Kodizm-flavored protocol surface.",
+  "description": "Custom ACP server bridging Claude Code and opencode CLIs through a single Kodizm-flavored protocol surface.",
   "type": "module",
   "bin": {
     "kodizm-acp": "./dist/index.js"
@@ -56,7 +56,6 @@
     "acp",
     "agent-client-protocol",
     "claude",
-    "codex",
     "opencode",
     "ai",
     "bridge",
