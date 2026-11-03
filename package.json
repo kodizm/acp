@@ -1,6 +1,6 @@
 {
   "name": "@kodizm/acp",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "Custom ACP server bridging Claude Code, codex, and opencode CLIs through a single Kodizm-flavored protocol surface.",
   "type": "module",
   "bin": {
@@ -33,17 +33,18 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.280",
-    "@anthropic-ai/sdk": ">=0.93.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@opencode-ai/sdk": "^1.18.32",
-    "zod": "^4.0.0"
+  "config": {
+    "claudeAgentSdk": "0.3.280"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.280",
+    "@anthropic-ai/sdk": ">=0.93.0",
     "@biomejs/biome": "^1.9.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opencode-ai/sdk": "^1.18.32",
     "@types/bun": "latest",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "zod": "^4.0.0"
   },
   "license": "Apache-2.0",
   "homepage": "https://github.com/kodizm/acp",

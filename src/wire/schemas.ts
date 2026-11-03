@@ -22,6 +22,18 @@ import { z } from 'zod'
  */
 const AbsolutePathSchema = z.string().regex(/^\//, 'path must be absolute (start with "/")')
 
+const PLUGIN_ROOT = '/opt/kodizm/plugins/'
+
+/**
+ * A Claude Code plugin directory baked into the image. Confined to
+ * {@link PLUGIN_ROOT} with no `..` segment, so a request cannot make the
+ * CLI load code from anywhere else on the container's filesystem.
+ */
+const PluginPathSchema = AbsolutePathSchema.refine(
+  (path) => path.length > PLUGIN_ROOT.length && path.startsWith(PLUGIN_ROOT) && !path.split('/').includes('..'),
+  { message: `plugin path must live under ${PLUGIN_ROOT} with no ".." segment` },
+)
+
 /**
  * MCP server entry passed inline on `session/new`. Phase 1 supports
  * the `http` transport only; a later backend may add more
@@ -100,6 +112,7 @@ const CANONICAL_FIELDS_BANNED_IN_META = [
   'inactivityThresholdMs',
   'settingSources',
   'features',
+  'plugins',
 ] as const
 
 /**
@@ -212,6 +225,7 @@ export const InitializeRequestSchema = z.object({
  */
 const SessionOptionFields = {
   additionalDirectories: z.array(AbsolutePathSchema).optional(),
+  plugins: z.array(PluginPathSchema).optional(),
   systemPrompt: SystemPromptSchema.optional(),
   model: z.string().optional(),
   skills: z.array(z.string()).optional(),

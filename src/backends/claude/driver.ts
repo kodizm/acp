@@ -62,6 +62,8 @@ export interface ClaudeSdkOptions {
   cwd: string
   mcpServers: Record<string, ClaudeSdkMcpServer>
   additionalDirectories?: string[]
+  /** Local plugin directories the CLI loads for this query (init lists each as `<name>@inline`). */
+  plugins?: Array<{ type: 'local'; path: string }>
   systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string; excludeDynamicSections?: boolean }
   model?: string
   /**
@@ -904,6 +906,13 @@ export class ClaudeDriver implements BackendDriver {
         ? { additionalDirectories: [...params.additionalDirectories] }
         : {}
 
+    // Plugins flow on new and load: a load is a fresh query, and plugins
+    // are per-query. The wire schema has already confined the paths.
+    const plugins =
+      'plugins' in params && params.plugins !== undefined && params.plugins.length > 0
+        ? { plugins: params.plugins.map((path) => ({ type: 'local' as const, path })) }
+        : {}
+
     // Skills flow on new and load (a load is a fresh query, and the
     // skill filter is per-query); fork inherits the source's.
     const skills =
@@ -983,6 +992,7 @@ export class ClaudeDriver implements BackendDriver {
       cwd: params.cwd,
       mcpServers: translateMcpServers(params.mcpServers),
       ...additional,
+      ...plugins,
       ...skills,
       ...policyOptions,
       ...envOpt,
