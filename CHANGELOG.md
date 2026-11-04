@@ -2,6 +2,47 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-04
+
+### Added
+
+- **`kodizm-acp tmuxd` start contract v2.** `ctl start` takes the value flags
+  `--mcp-config`, `--tool-policy`, `--system-prompt-file`, `--permission-mode`,
+  `--one-shot`, `--deadline-seconds` and `--retain-failed-seconds`. An unknown
+  start flag is a `usage_error`. Every ctl reply carries `daemon_version`
+  (read from `package.json`). The hand-off files are cleaned up after a refused
+  or failed start. A `dontAsk` pane denies without calling the ingest. First-run
+  seeding is part of the start.
+- **Unattended pane lifecycle.** A `--one-shot` pane closes once its
+  `turn_completed` is delivered. `--deadline-seconds` fails a turn that runs past it with reason
+  `deadline`. `--retain-failed-seconds` keeps a failed pane for inspection
+  instead of closing it. A pane started without these flags behaves as 0.8.2.
+- **`usage_limit` is told apart from `rate_limit`.** The transcript API error
+  is classified as `usage_limit` only when the entry is an API error message
+  with the `rate_limit` error and a limit-resets text; every other 429 stays
+  `rate_limit`, and an `authentication_failed` StopFailure stays `auth_error`.
+- **`turn_completed` carries `lastAssistantMessage`**, always a string, and the
+  same text is kept in `last-assistant-message.txt` in the pane's settings
+  directory.
+- The per-pane settings file sets `autoContinueAtUsageLimit` to off, so the CLI
+  does not resume on its own after a usage limit.
+- An optional daemon idle timeout, set with
+  `KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS` (`session_ended` reason `idle_timeout`).
+
+### Changed
+
+- The permission RPC helpers (`AcpServerLike`, `EmitLike`, `DEFERRED_SENTINEL`,
+  `awaitPermissionResponse`) moved to `src/backends/permission-rpc.ts`, shared
+  by both backends. No behaviour change.
+- A transcript API error now ends the turn as `turn_failed` instead of
+  `turn_completed` with stopReason `watchdog`.
+
+### Fixed
+
+- A first-run seeding race on a shared `HOME`.
+- A pane slot TOCTOU between the capacity guard and the registration.
+- Hand-off file cleanup stopped at the first failed unlink.
+
 ## [0.8.2] - 2026-11-04
 
 ### Fixed
