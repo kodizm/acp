@@ -40,6 +40,7 @@ Environment:
   KODIZM_TMUXD_SOCKET        daemon socket (default: $XDG_RUNTIME_DIR or the temp dir, kodizm-live-<uid>/tmuxd.sock)
   KODIZM_TMUXD_TMUX_SOCKET   tmux socket name (default: ${LIVE_SOCKET})
   KODIZM_TMUXD_MAX_PANES     panes per daemon (default: ${DEFAULT_MAX_PANES})
+  KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS  end a pane with no turn, dialog or activity for N seconds (default: off)
   KODIZM_LIVE_BASE_SETTINGS  base settings with the deny list (default: ${DEFAULT_BASE_SETTINGS_PATH})
   CLAUDE_CODE_PATH           claude binary (default: claude on PATH)
 `
@@ -214,6 +215,7 @@ async function runDaemon(): Promise<number> {
     baseSettingsPath: env.KODIZM_LIVE_BASE_SETTINGS ?? DEFAULT_BASE_SETTINGS_PATH,
     maxPanes: Number.isInteger(maxPanes) && maxPanes > 0 ? maxPanes : DEFAULT_MAX_PANES,
     logger: createLogger({ env }),
+    timings: { idleTimeoutMs: idleTimeoutMs(env) },
     onIdle: () => void daemon.close().then(shutdown),
   })
   await daemon.listen()
@@ -225,6 +227,16 @@ async function runDaemon(): Promise<number> {
   await stopped
 
   return 0
+}
+
+/**
+ * The idle timeout in ms from `KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS`: a positive integer of seconds, anything else is 0
+ * (off), so a typo never ends a pane early.
+ */
+export function idleTimeoutMs(env: Readonly<Record<string, string | undefined>>): number {
+  const seconds = env.KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS
+
+  return seconds !== undefined && /^[1-9]\d*$/.test(seconds) ? Number(seconds) * 1000 : 0
 }
 
 /**

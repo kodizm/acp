@@ -27,6 +27,7 @@ import {
   type LiveEvent,
   type Payload,
   type PermissionOpenRequest,
+  type SessionEndReason,
   apiStopReason,
   compactionCompleted,
   compactionStarted,
@@ -177,6 +178,8 @@ export interface DaemonTimings {
   retryMaxMs: number
   /** The unit of `--deadline-seconds` and `--retain-failed-seconds`. */
   secondMs: number
+  /** How long a pane with no turn, dialog or compaction may sit without activity before it ends; 0 is off. */
+  idleTimeoutMs: number
 }
 
 const DEFAULT_TIMINGS: DaemonTimings = {
@@ -191,6 +194,7 @@ const DEFAULT_TIMINGS: DaemonTimings = {
   retryBaseMs: 250,
   retryMaxMs: 10_000,
   secondMs: 1_000,
+  idleTimeoutMs: 0,
 }
 
 export interface LiveDaemonOptions {
@@ -658,11 +662,11 @@ class LivePane {
     return turnCompleted('interrupted', this.lastAssistantText ?? '')
   }
 
-  /** Kill the pane on request and report the end. */
-  public async stop(): Promise<void> {
+  /** Kill the pane and report the end with `reason`. */
+  public async stop(reason: SessionEndReason = 'stopped'): Promise<void> {
     this.close()
     await killPane(this.pane)
-    this.queue.push(sessionEnded('stopped'))
+    this.queue.push(sessionEnded(reason))
     await this.queue.drain(STOP_DRAIN_MS)
     this.queue.stop()
   }
@@ -733,8 +737,13 @@ class LivePane {
       }
     }
 
+    await this.end('stopped')
+  }
+
+  /** The pane leaves by its own decision: killed, reported with `reason`, and out of the registry even if the kill fails. */
+  private async end(reason: SessionEndReason): Promise<void> {
     try {
-      await this.stop()
+      await this.stop(reason)
     } finally {
       this.daemon.remove(this)
     }
@@ -1170,6 +1179,19 @@ class LivePane {
       const idle = this.dialog === undefined && this.openTools.size === 0 && !this.compacting && this.settled
       if (this.turn !== undefined && quiet && idle) {
         this.closeTurn(turnCompleted('watchdog', this.lastAssistantText ?? ''), 'watchdog')
+      }
+
+      // Heartbeats and this monitor are no activity; a retaining pane is ended by its retention timer, and a prompt
+      // typed but not yet confirmed by UserPromptSubmit has not touched lastActivityAt.
+      const idleTimeoutMs = this.daemon.timings.idleTimeoutMs
+      const unoccupied =
+        this.turn === undefined &&
+        this.pendingPromptId === undefined &&
+        this.dialog === undefined &&
+        !this.compacting &&
+        !this.isRetaining
+      if (idleTimeoutMs > 0 && unoccupied && Date.now() - this.lastActivityAt >= idleTimeoutMs) {
+        await this.end('idle_timeout')
       }
     } finally {
       this.monitoring = false

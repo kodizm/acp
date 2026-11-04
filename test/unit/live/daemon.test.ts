@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'b
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { idleTimeoutMs } from '@/live/ctl.ts'
 import {
   type CtlResult,
   DAEMON_VERSION,
@@ -1595,6 +1596,76 @@ describe('lifecycle', () => {
     expect(fx.idle.count).toBe(0)
     expect((await prompt(fx, 'hello there')).ok).toBe(true)
   }, 20_000)
+})
+
+describe('idle timeout', () => {
+  const alive = (fx: Fixture): Promise<boolean> => paneAlive({ id: fx.pane, socket: SOCKET })
+
+  test('a quiet pane ends with session_ended idle_timeout and is gone', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ idleTimeoutMs: 300 })
+    await start(fx)
+
+    expect(await waitUntil(() => fx.ingest.ofType('session_ended').length === 1)).toBe(true)
+
+    expect(fx.ingest.events.at(-1)).toMatchObject({ type: 'session_ended', payload: { reason: 'idle_timeout' } })
+    expect(await alive(fx)).toBe(false)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    expect((await status(fx)).running).toBe(false)
+    expect(fx.ingest.ofType('process_died')).toHaveLength(0)
+  }, 20_000)
+
+  test('a pane with a running turn is not ended', async () => {
+    const fx = await fixture()
+    await start(fx)
+    expect((await prompt(fx, 'MUTE work')).ok).toBe(true)
+
+    fx.daemon.setTimings({ idleTimeoutMs: 300 })
+    await Bun.sleep(900)
+
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('session_ended')).toHaveLength(0)
+  }, 20_000)
+
+  test('a pane with an open dialog is not ended', async () => {
+    const fx = await fixture()
+    await start(fx)
+    await prompt(fx, 'run the TOOL')
+    expect(await waitUntil(() => fx.ingest.polls >= 2)).toBe(true)
+    expect(await status(fx)).toMatchObject({ dialogOpen: true })
+
+    fx.daemon.setTimings({ idleTimeoutMs: 300 })
+    await Bun.sleep(900)
+
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('session_ended')).toHaveLength(0)
+  }, 20_000)
+
+  test('a timeout of 0 never ends a pane', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ idleTimeoutMs: 0 })
+    await start(fx)
+
+    await Bun.sleep(900)
+
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('session_ended')).toHaveLength(0)
+  }, 20_000)
+})
+
+describe('idleTimeoutMs', () => {
+  test.each([
+    ['90', 90_000],
+    ['1', 1_000],
+    ['0', 0],
+    ['-5', 0],
+    ['abc', 0],
+    ['1.5', 0],
+    ['', 0],
+    [undefined, 0],
+  ])('reads %p seconds as %p ms', (value, expected) => {
+    expect(idleTimeoutMs({ KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS: value })).toBe(expected)
+  })
 })
 
 describe('tmuxd command line', () => {
