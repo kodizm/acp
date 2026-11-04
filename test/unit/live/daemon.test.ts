@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
@@ -110,6 +110,8 @@ async function submit(prompt) {
     if (prompt.includes('SLOW')) marker('[Request interrupted by user]')
   } else if (prompt.includes('FAIL')) {
     await hook('StopFailure', { error: 'rate_limit', error_details: '429 Too Many Requests', last_assistant_message: '' })
+  } else if (prompt.includes('BARE')) {
+    await hook('Stop', { stop_hook_active: false })
   } else {
     assistant(mid, { type: 'thinking', thinking: 'thinking about ' + prompt }, 'end_turn')
     assistant(mid, {
@@ -1096,6 +1098,65 @@ describe('events', () => {
 
     fx.ingest.refuse = undefined
     expect(await waitUntil(() => fx.ingest.events.length > before)).toBe(true)
+  }, 20_000)
+})
+
+describe('last assistant message', () => {
+  const MESSAGE_FILE = 'last-assistant-message.txt'
+
+  test('a normal turn persists the redacted message at 0600 and the event carries the same string', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'hello there')
+    expect(await turnClosed(fx)).toBe(true)
+
+    const path = join(fx.settingsBase, MESSAGE_FILE)
+    const persisted = await readFile(path, 'utf8')
+    expect(persisted).toBe('done [REDACTED]')
+    expect(persisted).not.toContain(AUTH_TOKEN)
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload.lastAssistantMessage).toBe(persisted)
+    expect((await readdir(fx.settingsBase)).filter((name) => name.includes(MESSAGE_FILE))).toEqual([MESSAGE_FILE])
+  }, 20_000)
+
+  test('an interrupted turn carries a string, empty when the model wrote no text', async () => {
+    const fx = await fixture()
+    await start(fx)
+    await prompt(fx, 'SLOW work')
+    await fx.daemon.ctl('cancel', { pane: fx.pane })
+
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({
+      stopReason: 'interrupted',
+      lastAssistantMessage: '',
+    })
+    expect(await readFile(join(fx.settingsBase, MESSAGE_FILE), 'utf8')).toBe('')
+  }, 20_000)
+
+  test('a watchdog turn carries the last text the transcript held', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ watchdogQuietMs: 600 })
+    await start(fx)
+
+    await prompt(fx, 'HANG please')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({
+      stopReason: 'watchdog',
+      lastAssistantMessage: 'hanging',
+    })
+    expect(await readFile(join(fx.settingsBase, MESSAGE_FILE), 'utf8')).toBe('hanging')
+  }, 20_000)
+
+  test('a prompt with no assistant text gives an empty string', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'BARE turn')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({ stopReason: 'end_turn', lastAssistantMessage: '' })
+    expect(await readFile(join(fx.settingsBase, MESSAGE_FILE), 'utf8')).toBe('')
   }, 20_000)
 })
 

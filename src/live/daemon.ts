@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { rmSync } from 'node:fs'
+import { renameSync, rmSync, writeFileSync } from 'node:fs'
 import { chmod, lstat, mkdir, readFile, realpath, unlink } from 'node:fs/promises'
 import { type Server, type Socket, createServer } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -114,6 +114,7 @@ const PANE_ID = /^[A-Za-z0-9_-]{1,64}$/
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/
 const LIVE_KEY_PREFIX = 'KODIZM_LIVE_'
 const TOKEN_PREFIX = 'kdz-int-jwt.'
+const LAST_MESSAGE_FILE = 'last-assistant-message.txt'
 
 const COMMAND_NAMES: ReadonlySet<string> = new Set(['compact', 'clear', 'model'])
 
@@ -510,6 +511,7 @@ class LivePane {
     private readonly daemon: LiveDaemon,
     public readonly extras: StartExtras,
     public readonly mcpConfig: string | undefined,
+    private readonly paneDir: string,
   ) {
     this.token = token
     this.secrets = [token, ...authValues.filter((value) => value.length >= MIN_SECRET_LENGTH)]
@@ -615,6 +617,10 @@ class LivePane {
 
     this.closeOpenTools()
     this.clearDialog()
+    const message = text(draft.payload.lastAssistantMessage)
+    if (draft.type === 'turn_completed' && message !== undefined) {
+      this.persistLastAssistantMessage(message)
+    }
     this.queue.push(draft)
     this.turn = undefined
     this.lastCloseCause = cause
@@ -628,7 +634,7 @@ class LivePane {
   }
 
   public interruptedTurn(): EventDraft {
-    return turnCompleted('interrupted', this.lastAssistantText)
+    return turnCompleted('interrupted', this.lastAssistantText ?? '')
   }
 
   /** Kill the pane on request and report the end. */
@@ -670,6 +676,26 @@ class LivePane {
         throw error
       }
       this.daemon.logger.error('tmuxd could not remove the mcp-config', { pane: this.id, code: error.code })
+    }
+  }
+
+  // The Laravel side reads this file after the pane is gone, so it is never removed. It is written redacted, like
+  // the event, and renamed into place so a reader never sees half a message.
+  private persistLastAssistantMessage(message: string): void {
+    const path = join(this.paneDir, LAST_MESSAGE_FILE)
+    const temp = `${path}.tmp`
+
+    try {
+      writeFileSync(temp, redactDeep(message, this.secrets), { mode: 0o600 })
+      renameSync(temp, path)
+    } catch (error) {
+      if (!isErrno(error)) {
+        throw error
+      }
+      this.daemon.logger.error('tmuxd could not persist the last assistant message', {
+        pane: this.id,
+        code: error.code,
+      })
     }
   }
 
@@ -921,7 +947,10 @@ class LivePane {
     // The text and usage written before Stop go out before the turn ends.
     await this.syncTranscript()
     this.closeTurn(
-      turnCompleted(apiStopReason(this.lastStopReason), text(payload.last_assistant_message) ?? this.lastAssistantText),
+      turnCompleted(
+        apiStopReason(this.lastStopReason),
+        text(payload.last_assistant_message) ?? this.lastAssistantText ?? '',
+      ),
       'stop',
     )
   }
@@ -1034,7 +1063,7 @@ class LivePane {
       const quiet = Date.now() - this.lastActivityAt >= this.daemon.timings.watchdogQuietMs
       const idle = this.dialog === undefined && this.openTools.size === 0 && !this.compacting && this.settled
       if (this.turn !== undefined && quiet && idle) {
-        this.closeTurn(turnCompleted('watchdog', this.lastAssistantText), 'watchdog')
+        this.closeTurn(turnCompleted('watchdog', this.lastAssistantText ?? ''), 'watchdog')
       }
     } finally {
       this.monitoring = false
@@ -1340,6 +1369,7 @@ export class LiveDaemon {
       this,
       extras,
       mcpConfig,
+      settingsBase,
     )
     this.starting.delete(id)
     this.panes.set(id, live)

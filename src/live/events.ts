@@ -146,7 +146,7 @@ export function turnStarted(promptId: string): EventDraft {
   return draft('turn_started', { promptId })
 }
 
-export function turnCompleted(stopReason: StopReason, lastAssistantMessage: string | undefined): EventDraft {
+export function turnCompleted(stopReason: StopReason, lastAssistantMessage: string): EventDraft {
   return draft('turn_completed', {
     stopReason,
     lastAssistantMessage,
