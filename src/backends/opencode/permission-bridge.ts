@@ -185,7 +185,7 @@ function canonicalToolName(opencodePermission: string, mcpReverseMap: Map<string
   // case in audit logs.
   return opencodePermission
     .split('_')
-    .map((part) => (part.length === 0 ? part : part[0]!.toUpperCase() + part.slice(1)))
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join('')
 }
 

@@ -152,6 +152,9 @@ describe.skipIf(!HAS_AUTH)('Pattern B coverage matrix vs real Claude API', () =>
     expect(eventsA.find((e) => e.type === 'permission_deferred')).toBeDefined()
     const stateA = await store.get(sessA.sessionId)
     expect(stateA?.toolName).toBe('Write')
+    if (!stateA) {
+      throw new Error('deferred state missing for session A')
+    }
 
     // Capture sdkSessionId from A so we can re-attach it to B for resume.
     const sdkSessionId = (driverA as unknown as { sessions: Map<string, { sdkSessionId?: string }> }).sessions.get(
@@ -160,7 +163,7 @@ describe.skipIf(!HAS_AUTH)('Pattern B coverage matrix vs real Claude API', () =>
     expect(sdkSessionId).toBeDefined()
 
     // Orchestrator caches an allow answer.
-    await store.set(sessA.sessionId, { ...stateA!, cachedAnswer: { behavior: 'allow' } })
+    await store.set(sessA.sessionId, { ...stateA, cachedAnswer: { behavior: 'allow' } })
 
     // -------- Driver B: resume cycle --------
     const adapterB = await buildRealAdapter()
@@ -263,9 +266,12 @@ describe.skipIf(!HAS_AUTH)('Pattern B coverage matrix vs real Claude API', () =>
     }
     const stateA = await store.get(sessA.sessionId)
     expect(stateA).not.toBeNull()
+    if (!stateA) {
+      throw new Error('deferred state missing for session A')
+    }
 
     await store.set(sessA.sessionId, {
-      ...stateA!,
+      ...stateA,
       cachedAnswer: { behavior: 'deny', message: 'User denied via dialog' },
     })
 

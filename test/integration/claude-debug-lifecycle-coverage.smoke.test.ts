@@ -325,7 +325,10 @@ describe('Phase 1.7 coverage: BLACK failure paths', () => {
     const result = await driver.prompt(sessionId, { sessionId, prompt: [] }, emit)
 
     expect(result.failureReason).toBe('sdk_stall')
-    expect(shouldExitOnReason(result.failureReason!)).toBe(true)
+    if (result.failureReason === undefined) {
+      throw new Error('prompt result carries no failureReason')
+    }
+    expect(shouldExitOnReason(result.failureReason)).toBe(true)
   }, 5000)
 
   test('black-3: runShutdown emits final session_failed for active sessions + flushes within budget', async () => {

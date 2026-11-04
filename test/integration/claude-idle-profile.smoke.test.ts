@@ -136,12 +136,15 @@ describe.skipIf(!HAS_AUTH)('idle profile while permission pending', () => {
     const rssAvg = rssValues.reduce((a, b) => a + b, 0) / rssValues.length
     const cpuMsAvg = cpuMsValues.reduce((a, b) => a + b, 0) / cpuMsValues.length
 
-    console.log('=== IDLE PROFILE (permission await 10s) ===')
-    console.log(`pre-prompt RSS:    ${memBeforePrompt.rssMb.toFixed(1)} MB`)
-    console.log(`during-await RSS:  min=${rssMin.toFixed(1)} avg=${rssAvg.toFixed(1)} max=${rssMax.toFixed(1)} MB`)
-    console.log(`during-await CPU:  avg=${cpuMsAvg.toFixed(1)} ms/sec (~${((cpuMsAvg / 1000) * 100).toFixed(2)}%)`)
-    console.log(`post-prompt RSS:   ${memAfterPrompt.rssMb.toFixed(1)} MB`)
-    console.log(`heap delta:        ${(memAfterPrompt.heapUsedMb - memBeforePrompt.heapUsedMb).toFixed(2)} MB`)
+    const report = [
+      '=== IDLE PROFILE (permission await 10s) ===',
+      `pre-prompt RSS:    ${memBeforePrompt.rssMb.toFixed(1)} MB`,
+      `during-await RSS:  min=${rssMin.toFixed(1)} avg=${rssAvg.toFixed(1)} max=${rssMax.toFixed(1)} MB`,
+      `during-await CPU:  avg=${cpuMsAvg.toFixed(1)} ms/sec (~${((cpuMsAvg / 1000) * 100).toFixed(2)}%)`,
+      `post-prompt RSS:   ${memAfterPrompt.rssMb.toFixed(1)} MB`,
+      `heap delta:        ${(memAfterPrompt.heapUsedMb - memBeforePrompt.heapUsedMb).toFixed(2)} MB`,
+    ]
+    process.stderr.write(`${report.join('\n')}\n`)
 
     // Assertions:
     // 1. RSS during await stays bounded (no leak; max <= avg + 20%).

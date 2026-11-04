@@ -326,7 +326,7 @@ export class OpencodeEventMapper {
     // Underscored tokens (`apply_patch` -> `ApplyPatch`).
     return name
       .split('_')
-      .map((part) => (part.length === 0 ? part : part[0]!.toUpperCase() + part.slice(1)))
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join('')
   }
 

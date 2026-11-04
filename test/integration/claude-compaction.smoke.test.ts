@@ -36,7 +36,7 @@ beforeAll(() => {
 
 afterAll(() => {
   if (originalPctOverride === undefined) {
-    delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+    Reflect.deleteProperty(process.env, 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')
   } else {
     process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = originalPctOverride
   }
