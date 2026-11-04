@@ -31,6 +31,14 @@ describe('redact, credential patterns', () => {
     ['anthropic key', `ANTHROPIC_API_KEY=${FAKE_ANTHROPIC_KEY}\n`, 'ANTHROPIC_API_KEY=', FAKE_ANTHROPIC_KEY],
     ['anthropic oauth token shape', 'tok sk-ant-oat01-FAKE_x-y end', 'tok ', 'sk-ant-oat01-FAKE_x-y'],
     ['internal agent jwt', `{"auth":"${FAKE_AGENT_JWT}"}`, '{"auth":"', FAKE_AGENT_JWT],
+    ['bare github token', 'GH_TOKEN=ghp_FAKE0001abcdefghij12345 ok', 'GH_TOKEN=', 'ghp_FAKE0001abcdefghij12345'],
+    ['github installation token', 'token ghs_FAKE0001abcdefghij12345\n', 'token ', 'ghs_FAKE0001abcdefghij12345'],
+    [
+      'fine-grained github token',
+      'pat github_pat_FAKE0001abcdefghij_12345 end',
+      'pat ',
+      'github_pat_FAKE0001abcdefghij_12345',
+    ],
   ]
 
   for (const [label, input, keptPrefix, secret] of cases) {

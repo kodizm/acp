@@ -91,6 +91,10 @@ const STOP_DRAIN_MS = 10_000
 // The daemon stops polling a permission shortly before the CLI kills the hook that waits for it.
 const PERMISSION_WAIT_MS = PERMISSION_HOOK_TIMEOUT_S * 1000 - 10_000
 
+// How long the open of a permission row is retried after a transient failure: long enough for an Octane reload or a
+// short outage, short enough that a dead ingest hands the dialog back to a human.
+const PERMISSION_OPEN_RETRY_MS = 90_000
+
 // Injected values shorter than this are not redacted by value: replacing a "1" would shred every text.
 const MIN_SECRET_LENGTH = 8
 
@@ -150,6 +154,8 @@ export interface DaemonTimings {
   watchdogQuietMs: number
   cancelTimeoutMs: number
   permissionPollMs: number
+  /** How long a permission open is retried after a network error, a 429 or a 5xx. */
+  permissionOpenRetryMs: number
   ingestTimeoutMs: number
   /** Pane liveness and watchdog check. */
   monitorMs: number
@@ -163,6 +169,7 @@ const DEFAULT_TIMINGS: DaemonTimings = {
   watchdogQuietMs: WATCHDOG_QUIET_MS,
   cancelTimeoutMs: CANCEL_TIMEOUT_MS,
   permissionPollMs: PERMISSION_POLL_MS,
+  permissionOpenRetryMs: PERMISSION_OPEN_RETRY_MS,
   ingestTimeoutMs: INGEST_TIMEOUT_MS,
   monitorMs: 2_000,
   transcriptPollMs: 250,
@@ -262,12 +269,12 @@ class Latch {
 
 export interface EventQueueOptions {
   gen: number
-  /** Full URL of `POST /internal/live/events`. */
+  /** Full URL of `POST /mcp/internal/live/events`. */
   endpoint: string
   bearer: () => string
   secrets: () => readonly string[]
   timings: () => DaemonTimings
-  /** The ingest moved to a newer gen: nobody will accept this pane's events again. */
+  /** The ingest moved to a newer gen, ended the session or rejected the stream: nobody will accept it again. */
   onStaleGen: () => void
   logger: Logger
 }
@@ -385,6 +392,23 @@ export class EventQueue {
     }
     if (response.status === 409 && error.code === 'seq_gap' && typeof error.expectedSeq === 'number') {
       return this.acknowledge(error.expectedSeq - 1)
+    }
+    // The session ended in Kodizm: no token will ever make this pane's events welcome again. An expired token
+    // is a 410 too, but it is cured by the next rotate-token, so it stays a retry.
+    if (response.status === 410 && error.code === 'session_closed') {
+      this.options.logger.warn('tmuxd ingest says the session has ended', { gen: this.options.gen })
+
+      return 'stale'
+    }
+    // A rejected batch cannot be skipped (the seq after it would be a gap for ever) and a resend is rejected
+    // again, so the stream is over rather than wedged.
+    if (response.status === 422) {
+      this.options.logger.error('tmuxd ingest rejected the event stream as malformed', {
+        gen: this.options.gen,
+        code: error.code,
+      })
+
+      return 'stale'
     }
 
     this.options.logger.warn('tmuxd event push failed', {
@@ -699,22 +723,8 @@ class LivePane {
 
   private async askIngest(request: PermissionOpenRequest, signal: AbortSignal): Promise<Decision | undefined> {
     const timings = this.daemon.timings
-    const opened = await fetchJson(`${this.ingestUrl}/permissions`, {
-      method: 'POST',
-      bearer: this.token,
-      body: redactDeep(
-        {
-          gen: this.gen,
-          ...request,
-        },
-        this.secrets,
-      ),
-      timeoutMs: timings.ingestTimeoutMs,
-      signal,
-    })
-    if (opened.status !== 200 && opened.status !== 201) {
-      this.daemon.logger.warn('tmuxd permission open failed', { pane: this.id, status: opened.status })
-
+    const opened = await this.openPermission(request, signal)
+    if (opened === undefined) {
       return undefined
     }
 
@@ -756,6 +766,49 @@ class LivePane {
     }
 
     return undefined
+  }
+
+  /**
+   * Open the decision row. The dialog is opened once, so a row that never opens leaves it with nothing for any door
+   * to answer: a network error, a timeout, a 429 or a 5xx is retried with the queue's backoff for
+   * `permissionOpenRetryMs`. Any other refusal is final, and so is an aborted dialog.
+   */
+  private async openPermission(
+    request: PermissionOpenRequest,
+    signal: AbortSignal,
+  ): Promise<{ status: number; body: unknown } | undefined> {
+    const timings = this.daemon.timings
+    const deadline = Date.now() + timings.permissionOpenRetryMs
+    let failures = 0
+
+    for (;;) {
+      const opened = await fetchJson(`${this.ingestUrl}/permissions`, {
+        method: 'POST',
+        bearer: this.token,
+        body: redactDeep(
+          {
+            gen: this.gen,
+            ...request,
+          },
+          this.secrets,
+        ),
+        timeoutMs: timings.ingestTimeoutMs,
+        signal,
+      })
+      if (opened.status === 200 || opened.status === 201) {
+        return opened
+      }
+
+      const transient = opened.status === 0 || opened.status === 429 || opened.status >= 500
+      if (!transient || signal.aborted || Date.now() >= deadline) {
+        this.daemon.logger.warn('tmuxd permission open failed', { pane: this.id, status: opened.status })
+
+        return undefined
+      }
+
+      failures += 1
+      await Bun.sleep(Math.min(timings.retryMaxMs, timings.retryBaseMs * 2 ** (failures - 1)))
+    }
   }
 
   private closeTool(payload: Payload, status: 'completed' | 'failed', output?: string): void {

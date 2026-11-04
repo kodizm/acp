@@ -2,6 +2,24 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-04
+
+### Fixed
+
+- **tmuxd permission open is retried.** A permission dialog is opened once, so
+  a network error, a timeout, a 429 or a 5xx on `POST .../permissions` left it
+  open in the pane with no row for any door to answer. The open is now retried
+  with the event queue's backoff for 90 s; any other refusal is final.
+- **tmuxd stops retrying a stream the ingest will never take.** A 410
+  `session_closed` and a 422 ended up retried for ever (a 422 wedged the queue,
+  since a skipped batch is a sequence gap). Both now end the stream and close
+  the pane, like a stale gen. A 410 `expired_token` and a 401 stay retries: the
+  next `rotate-token` cures them.
+- **Bare GitHub tokens are redacted** (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`
+  and `github_pat_` shapes), not only the `x-access-token:` URL form.
+- Lint is clean again: non-null assertions in the opencode mapper and permission
+  bridge, and `delete`, `console` in the integration smokes.
+
 ## [0.8.0] - 2026-11-04
 
 ### Added

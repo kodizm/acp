@@ -12,6 +12,8 @@ const CREDENTIAL_PATTERNS: ReadonlyArray<RegExp> = [
   /kgw-[A-Za-z0-9]{8,}/g,
   /sk-ant-[\w-]+/g,
   /kdz-int-jwt\.[\w.-]+/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /github_pat_\w{20,}/g,
   /-----BEGIN[\s\S]*?(?:-----END[^\n]*?-----|$)/g,
 ]
 

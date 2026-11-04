@@ -56,7 +56,7 @@ export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'watchdog' | 'i
 
 export type SessionEndReason = 'idle_timeout' | 'stopped' | 'crashed' | 'token_expired'
 
-/** Body of `POST /internal/live/permissions`, without the gen the daemon adds. */
+/** Body of `POST /mcp/internal/live/permissions`, without the gen the daemon adds. */
 export interface PermissionOpenRequest {
   toolCallId: string
   title: string

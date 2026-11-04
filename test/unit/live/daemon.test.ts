@@ -164,6 +164,8 @@ class FakeIngest {
   public readonly opened: Record<string, unknown>[] = []
   public lastSeq = 0
   public failEvents = 0
+  public failOpens = 0
+  public refuse: { status: number; code: string } | undefined
   public staleGen = false
   public permissionMode: PermissionMode = 'pending'
   public answer: Record<string, unknown> = {
@@ -173,7 +175,7 @@ class FakeIngest {
   private server: ReturnType<typeof Bun.serve> | undefined
 
   public get url(): string {
-    return `http://127.0.0.1:${this.server?.port}/internal/live`
+    return `http://127.0.0.1:${this.server?.port}/mcp/internal/live`
   }
 
   public start(): void {
@@ -200,11 +202,16 @@ class FakeIngest {
     const path = new URL(request.url).pathname
     this.bearers.push(request.headers.get('authorization') ?? '')
 
-    if (request.method === 'POST' && path === '/internal/live/events') {
+    if (request.method === 'POST' && path === '/mcp/internal/live/events') {
       return this.ingest((await request.json()) as { events: LiveEvent[] })
     }
-    if (request.method === 'POST' && path === '/internal/live/permissions') {
+    if (request.method === 'POST' && path === '/mcp/internal/live/permissions') {
       this.opened.push((await request.json()) as Record<string, unknown>)
+      if (this.failOpens > 0) {
+        this.failOpens -= 1
+
+        return Response.json({ error: { code: 'unavailable', message: 'deploying' } }, { status: 503 })
+      }
       if (this.permissionMode === 'fail') {
         return Response.json({ error: { code: 'server_error', message: 'boom' } }, { status: 500 })
       }
@@ -217,7 +224,7 @@ class FakeIngest {
 
       return Response.json({ id: '019e0000-0000-7000-8000-00000000f001', status: 'pending' }, { status: 201 })
     }
-    if (request.method === 'GET' && path === '/internal/live/permissions/019e0000-0000-7000-8000-00000000f001') {
+    if (request.method === 'GET' && path === '/mcp/internal/live/permissions/019e0000-0000-7000-8000-00000000f001') {
       this.polls += 1
 
       return Response.json({ id: '019e0000-0000-7000-8000-00000000f001', ...this.answer })
@@ -234,6 +241,9 @@ class FakeIngest {
     }
     if (this.staleGen) {
       return Response.json({ error: { code: 'stale_gen', message: 'stale', currentGen: 2 } }, { status: 409 })
+    }
+    if (this.refuse !== undefined) {
+      return Response.json({ error: { code: this.refuse.code, message: 'refused' } }, { status: this.refuse.status })
     }
 
     let applied = 0
@@ -672,6 +682,38 @@ describe('events', () => {
     expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
     expect((await fx.daemon.ctl('status', { pane: fx.pane })).code).toBe('pane_not_running')
   }, 20_000)
+
+  for (const refusal of [
+    { status: 410, code: 'session_closed' },
+    { status: 422, code: 'validation_failed' },
+  ]) {
+    test(`a ${refusal.status} ${refusal.code} ends the stream instead of retrying it for ever`, async () => {
+      const fx = await fixture()
+      await start(fx)
+      expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+
+      fx.ingest.refuse = refusal
+      await prompt(fx, 'hello')
+
+      expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+      expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+    }, 20_000)
+  }
+
+  test('a 410 expired_token is retried and the events arrive once the token is accepted again', async () => {
+    const fx = await fixture()
+    await start(fx)
+    expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+    const before = fx.ingest.events.length
+
+    fx.ingest.refuse = { status: 410, code: 'expired_token' }
+    await prompt(fx, 'hello')
+    await Bun.sleep(600)
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(true)
+
+    fx.ingest.refuse = undefined
+    expect(await waitUntil(() => fx.ingest.events.length > before)).toBe(true)
+  }, 20_000)
 })
 
 describe('delivery guard and turn end', () => {
@@ -878,11 +920,25 @@ describe('permissions', () => {
     expect(await readOrEmpty(join(fx.dir, 'decisions.log'))).toContain('allow')
   }, 20_000)
 
+  test('a transient open failure is retried and the answer still reaches the hook', async () => {
+    const fx = await fixture()
+    fx.ingest.permissionMode = 'auto'
+    fx.ingest.failOpens = 2
+    fx.daemon.setTimings({ retryBaseMs: 20, retryMaxMs: 50, permissionOpenRetryMs: 10_000 })
+    await start(fx)
+
+    await prompt(fx, 'run the TOOL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.opened.length).toBe(3)
+    expect(await readOrEmpty(join(fx.dir, 'decisions.log'))).toContain('allow')
+  }, 20_000)
+
   for (const mode of ['fail', 'hang'] as const) {
     test(`a ${mode === 'fail' ? 'failed (500)' : 'timed-out'} open prints no decision and the dialog stays open`, async () => {
       const fx = await fixture()
       fx.ingest.permissionMode = mode
-      fx.daemon.setTimings({ ingestTimeoutMs: 300 })
+      fx.daemon.setTimings({ ingestTimeoutMs: 300, permissionOpenRetryMs: 0 })
       await start(fx)
 
       await prompt(fx, 'run the TOOL')
