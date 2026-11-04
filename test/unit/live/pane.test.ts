@@ -1,0 +1,394 @@
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { InputRejectedError } from '@/live/input.ts'
+import {
+  type Pane,
+  PaneError,
+  cancelPane,
+  createPane,
+  deliverCommand,
+  deliverPrompt,
+  killPane,
+  paneAlive,
+} from '@/live/pane.ts'
+
+// Runs against a real tmux on its own socket. The pane program is a stub that records its argv and env, puts the pty
+// in raw mode, turns bracketed paste on like the Claude TUI does, and copies every byte it receives to a file.
+const SOCKET = 'kdz-test'
+const BRACKET_OPEN = '\x1b[200~'
+const BRACKET_CLOSE = '\x1b[201~'
+const DAEMON_SECRET_NAME = 'KDZ_TEST_DAEMON_SECRET'
+
+const STUB = `#!/bin/sh
+dir="$(dirname "$0")"
+printf '%s\\n' "$@" > "$dir/args"
+env > "$dir/env"
+stty raw -echo
+printf '\\033[?2004h'
+exec cat > "$dir/input"
+`
+
+let root = ''
+let counter = 0
+const created: Pane[] = []
+
+interface Fixture {
+  dir: string
+  cwd: string
+  home: string
+  stub: string
+}
+
+function tmux(...args: string[]): { exitCode: number; stdout: string } {
+  const result = Bun.spawnSync(['tmux', '-L', SOCKET, ...args])
+
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+  }
+}
+
+async function waitUntil(check: () => Promise<boolean> | boolean, timeoutMs = 3000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return true
+    }
+    await Bun.sleep(25)
+  }
+
+  return check()
+}
+
+async function readOrEmpty(path: string): Promise<string> {
+  const file = Bun.file(path)
+
+  return (await file.exists()) ? file.text() : ''
+}
+
+async function fixture(stubBody = STUB): Promise<Fixture> {
+  counter += 1
+  const dir = join(root, `case-${counter}`)
+  const cwd = join(dir, 'work')
+  const home = join(dir, 'home')
+  const stub = join(dir, 'stub.sh')
+  await mkdir(cwd, { recursive: true })
+  await mkdir(home, { recursive: true })
+  await writeFile(stub, stubBody)
+  await chmod(stub, 0o755)
+
+  return {
+    dir,
+    cwd,
+    home,
+    stub,
+  }
+}
+
+async function launch(fx: Fixture, extra: Partial<Parameters<typeof createPane>[0]> = {}): Promise<Pane> {
+  const pane = await createPane({
+    id: `kdz-pane-${counter}`,
+    cwd: fx.cwd,
+    home: fx.home,
+    settingsPath: join(fx.dir, 'settings.json'),
+    claudeBin: fx.stub,
+    socket: SOCKET,
+    ...extra,
+  })
+  created.push(pane)
+
+  return pane
+}
+
+async function launchReady(fx: Fixture, extra: Partial<Parameters<typeof createPane>[0]> = {}): Promise<Pane> {
+  const pane = await launch(fx, extra)
+  // The input file appears when `cat` starts, after `stty raw`: bytes sent earlier would go through a cooked pty.
+  expect(await waitUntil(() => Bun.file(join(fx.dir, 'input')).exists())).toBe(true)
+
+  return pane
+}
+
+async function envOf(fx: Fixture): Promise<Map<string, string>> {
+  await waitUntil(async () => (await readOrEmpty(join(fx.dir, 'env'))) !== '')
+  const lines = (await readOrEmpty(join(fx.dir, 'env'))).split('\n').filter((line) => line.includes('='))
+
+  return new Map(lines.map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
+}
+
+const confirmOnCarriageReturn =
+  (fx: Fixture, count = 1) =>
+  async (timeoutMs: number) =>
+    waitUntil(async () => (await readOrEmpty(join(fx.dir, 'input'))).split('\r').length - 1 >= count, timeoutMs)
+
+beforeAll(async () => {
+  root = await realpath(await mkdtemp(join(tmpdir(), 'kdz-pane-test-')))
+})
+
+afterEach(async () => {
+  for (const pane of created.splice(0)) {
+    await killPane(pane)
+  }
+})
+
+afterAll(async () => {
+  tmux('kill-server')
+  await rm(root, { recursive: true, force: true })
+})
+
+describe('createPane', () => {
+  test('launches the program with --settings and the setting source restriction', async () => {
+    const fx = await fixture()
+    await launchReady(fx)
+
+    const args = (await readOrEmpty(join(fx.dir, 'args'))).trim().split('\n')
+    expect(args).toEqual(['--settings', join(fx.dir, 'settings.json'), '--setting-sources', 'user'])
+  })
+
+  test('passes --resume with the session id', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { resumeSessionId: '0b7f6a3e-1d2c-4f5a-9e8d-7c6b5a4f3e2d' })
+
+    const args = (await readOrEmpty(join(fx.dir, 'args'))).trim().split('\n')
+    expect(args.slice(-2)).toEqual(['--resume', '0b7f6a3e-1d2c-4f5a-9e8d-7c6b5a4f3e2d'])
+  })
+
+  test('gives the pane an explicit minimal env and none of the daemon env', async () => {
+    const fx = await fixture()
+    process.env[DAEMON_SECRET_NAME] = 'daemon-only-value'
+    try {
+      await launchReady(fx, {
+        env: {
+          CLAUDE_CODE_FAKE_FLAG: '1',
+          CLAUDE_CODE_SESSION_ID: 'parent-session',
+          CLAUDE_CODE_CHILD_SESSION: '1',
+          PATH: '/usr/bin:/bin',
+        },
+      })
+    } finally {
+      delete process.env[DAEMON_SECRET_NAME]
+    }
+
+    const env = await envOf(fx)
+    expect(env.get('HOME')).toBe(fx.home)
+    expect(env.get('PATH')).toBe('/usr/bin:/bin')
+    expect(env.get('TERM')).toBe('xterm-256color')
+    expect(env.get('CI')).toBe('1')
+    expect(env.get('CLAUDE_CODE_FAKE_FLAG')).toBe('1')
+    expect(env.has('CLAUDE_CODE_SESSION_ID')).toBe(false)
+    expect(env.has('CLAUDE_CODE_CHILD_SESSION')).toBe(false)
+    expect(env.has(DAEMON_SECRET_NAME)).toBe(false)
+  })
+
+  test('pre-seeds onboarding and trust by realpath, keeping existing config', async () => {
+    const fx = await fixture()
+    const linked = join(fx.dir, 'linked-work')
+    await symlink(fx.cwd, linked)
+    await writeFile(
+      join(fx.home, '.claude.json'),
+      JSON.stringify({
+        theme: 'light',
+        oauthAccount: {
+          emailAddress: 'kept@example.invalid',
+        },
+      }),
+    )
+    const configDir = join(fx.dir, 'config')
+
+    await launchReady(fx, {
+      cwd: linked,
+      env: {
+        CLAUDE_CONFIG_DIR: configDir,
+      },
+    })
+
+    for (const dir of [fx.home, configDir]) {
+      const config = JSON.parse(await readFile(join(dir, '.claude.json'), 'utf8'))
+      expect(config.hasCompletedOnboarding).toBe(true)
+      expect(config.projects[fx.cwd].hasTrustDialogAccepted).toBe(true)
+      expect(config.projects[linked]).toBeUndefined()
+    }
+    const home = JSON.parse(await readFile(join(fx.home, '.claude.json'), 'utf8'))
+    expect(home.theme).toBe('light')
+    expect(home.oauthAccount.emailAddress).toBe('kept@example.invalid')
+  })
+
+  test('rejects a pane id tmux could misread as a target', async () => {
+    const fx = await fixture()
+    const attempt = createPane({
+      id: 'bad:id.0',
+      cwd: fx.cwd,
+      home: fx.home,
+      settingsPath: join(fx.dir, 'settings.json'),
+      claudeBin: fx.stub,
+      socket: SOCKET,
+    })
+
+    await expect(attempt).rejects.toMatchObject({ reason: 'invalid_pane_id' })
+  })
+
+  test('rejects a resume id that could become an option', async () => {
+    const fx = await fixture()
+
+    await expect(launch(fx, { resumeSessionId: '--dangerously-skip-permissions' })).rejects.toMatchObject({
+      reason: 'invalid_resume_id',
+    })
+  })
+
+  test('kills the pane and throws when the start signal never arrives', async () => {
+    const fx = await fixture()
+    const seen: number[] = []
+
+    const attempt = launch(fx, {
+      confirmStarted: async (timeoutMs) => {
+        seen.push(timeoutMs)
+        return false
+      },
+    })
+
+    await expect(attempt).rejects.toMatchObject({ reason: 'start_timeout' })
+    expect(seen).toEqual([10_000])
+    expect(tmux('has-session', '-t', `=kdz-pane-${counter}`).exitCode).not.toBe(0)
+  })
+
+  test('refuses a second pane with the same id', async () => {
+    const fx = await fixture()
+    await launchReady(fx)
+
+    await expect(launch(fx)).rejects.toBeInstanceOf(PaneError)
+  })
+})
+
+describe('deliverPrompt', () => {
+  test('pastes a multi-line text byte-exact inside bracketed paste, then one Enter', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    const text = 'first line\nsecond line: çğıöşü 漢字 🙂\n  indented !not-bash /not-slash\nC-c literal'
+
+    await deliverPrompt(pane, text, confirmOnCarriageReturn(fx))
+
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}${text}${BRACKET_CLOSE}\r`)
+  })
+
+  test('pastes the sanitised bytes, not the raw ones', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await deliverPrompt(pane, `a\x1b${BRACKET_CLOSE}\x03\u009bb\tc`, confirmOnCarriageReturn(fx))
+
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}a[201~b    c${BRACKET_CLOSE}\r`)
+  })
+
+  test('re-sends Enter on the ladder until the submit signal arrives', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    const windows: number[] = []
+    let calls = 0
+
+    await deliverPrompt(pane, 'hello', async (timeoutMs) => {
+      windows.push(timeoutMs)
+      calls += 1
+      return calls === 3
+    })
+
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}hello${BRACKET_CLOSE}\r\r\r`)
+    expect(windows).toEqual([328, 656, 1312])
+  })
+
+  test('throws not_submitted when the ladder runs out', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await expect(deliverPrompt(pane, 'hello', async () => false)).rejects.toMatchObject({ reason: 'not_submitted' })
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}hello${BRACKET_CLOSE}\r\r\r\r`)
+  })
+
+  test('rejects a slash command before touching the pane', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await expect(deliverPrompt(pane, ' /clear', async () => true)).rejects.toBeInstanceOf(InputRejectedError)
+    await Bun.sleep(100)
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe('')
+  })
+
+  test('leaves no paste buffer behind', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await deliverPrompt(pane, 'buffered', confirmOnCarriageReturn(fx))
+
+    expect(tmux('list-buffers').stdout).toBe('')
+  })
+
+  test('throws pane_dead for a pane whose program exited', async () => {
+    const fx = await fixture('#!/bin/sh\nexit 0\n')
+    const pane = await launch(fx)
+    await waitUntil(async () => !(await paneAlive(pane)))
+
+    await expect(deliverPrompt(pane, 'hello', async () => true)).rejects.toMatchObject({ reason: 'pane_dead' })
+  })
+})
+
+describe('deliverCommand', () => {
+  test('types an allowlisted command literally, then Enter', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await deliverCommand(pane, '/model claude-opus-4.5')
+
+    await waitUntil(async () => (await readOrEmpty(join(fx.dir, 'input'))).endsWith('\r'))
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe('/model claude-opus-4.5\r')
+  })
+
+  test('rejects a command outside the allowlist before touching the pane', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await expect(deliverCommand(pane, '/login')).rejects.toBeInstanceOf(InputRejectedError)
+    await Bun.sleep(100)
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe('')
+  })
+})
+
+describe('cancelPane, paneAlive, killPane', () => {
+  test('cancel sends Esc and then clears the composer', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    await cancelPane(pane)
+
+    await waitUntil(async () => (await readOrEmpty(join(fx.dir, 'input'))).length >= 2)
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe('\x1b\x15')
+  })
+
+  test('liveness follows the pane, and killing the last pane leaves no server', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    expect(await paneAlive(pane)).toBe(true)
+
+    await killPane(pane)
+
+    expect(await paneAlive(pane)).toBe(false)
+    expect(await waitUntil(() => tmux('ls').exitCode !== 0)).toBe(true)
+  })
+
+  test('liveness matches the pane id exactly, not as a prefix', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    expect(await paneAlive({ ...pane, id: pane.id.slice(0, -1) })).toBe(false)
+  })
+
+  test('killing a pane that is already gone is a no-op', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    await killPane(pane)
+
+    await killPane(pane)
+
+    expect(await paneAlive(pane)).toBe(false)
+  })
+})
