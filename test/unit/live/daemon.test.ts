@@ -1,10 +1,17 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { type CtlResult, HEARTBEAT_INTERVAL_MS, LiveDaemon, type LiveDaemonOptions } from '@/live/daemon.ts'
+import {
+  type CtlResult,
+  DAEMON_VERSION,
+  HEARTBEAT_INTERVAL_MS,
+  LiveDaemon,
+  type LiveDaemonOptions,
+} from '@/live/daemon.ts'
 import type { LiveEvent } from '@/live/events.ts'
 import { paneAlive } from '@/live/pane.ts'
+import pkg from '../../../package.json' with { type: 'json' }
 
 // Runs the daemon in-process against a real tmux (socket kdz-test) and a stub CLI. The stub reads the pane's
 // --settings file and runs its hook commands exactly as the CLI does (sh -c, payload on stdin, stdout as the
@@ -582,12 +589,237 @@ describe('start', () => {
       ok: false,
       code: 'pane_not_running',
       data: {
+        daemon_version: pkg.version,
         pane: 'nobody',
         running: false,
       },
     })
     expect(await fx.daemon.ctl('explode', {})).toMatchObject({ ok: false, code: 'usage_error' })
   })
+})
+
+const POLICY = JSON.stringify({
+  allow: ['Bash:git status*'],
+  deny: ['Bash:git push*', 'Read:/proc/**', 'WebFetch'],
+})
+
+interface Handoff {
+  env: string
+  policy: string
+  prompt: string
+  mcp: string
+}
+
+async function handoff(fx: Fixture, overrides: { policy?: string; mcpMode?: number } = {}): Promise<Handoff> {
+  return {
+    env: await writeSecretFile(join(fx.dir, 'live.env'), envFile(fx)),
+    policy: await writeSecretFile(join(fx.dir, 'policy.json'), overrides.policy ?? POLICY),
+    prompt: await writeSecretFile(join(fx.dir, 'system-prompt.md'), 'You run as a test pane.'),
+    mcp: await writeSecretFile(
+      join(fx.dir, 'mcp.json'),
+      JSON.stringify({ mcpServers: { kodizm: { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }),
+      overrides.mcpMode ?? 0o600,
+    ),
+  }
+}
+
+function startArgs(fx: Fixture, files: Handoff, extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    pane: fx.pane,
+    cwd: fx.cwd,
+    'settings-base': fx.settingsBase,
+    'env-file': files.env,
+    'tool-policy': files.policy,
+    'system-prompt-file': files.prompt,
+    'mcp-config': files.mcp,
+    ...extra,
+  }
+}
+
+async function remaining(paths: readonly string[]): Promise<string[]> {
+  const left: string[] = []
+  for (const path of paths) {
+    if (await Bun.file(path).exists()) {
+      left.push(path)
+    }
+  }
+
+  return left
+}
+
+async function paneSettings(fx: Fixture, pane = fx.pane): Promise<{ permissions: Record<string, string[]> }> {
+  return JSON.parse(await readFile(join(fx.settingsBase, `${pane}.settings.json`), 'utf8'))
+}
+
+async function stubArgs(fx: Fixture): Promise<string[]> {
+  return JSON.parse(await readFile(join(fx.dir, 'args.json'), 'utf8')) as string[]
+}
+
+describe('start contract v2', () => {
+  test('every reply carries the daemon version first: start, status, refusals and not running', async () => {
+    expect(DAEMON_VERSION).toBe(pkg.version)
+    const fx = await fixture()
+
+    const started = await start(fx)
+    expect(started.data?.daemon_version).toBe(pkg.version)
+    expect(Object.keys(started.data ?? {})[0]).toBe('daemon_version')
+
+    expect((await status(fx)).daemon_version).toBe(pkg.version)
+    expect((await start(fx)).data).toEqual({ daemon_version: pkg.version })
+    expect((await fx.daemon.ctl('explode', {})).data).toEqual({ daemon_version: pkg.version })
+    expect((await fx.daemon.ctl('status', { pane: 'nobody' })).data?.daemon_version).toBe(pkg.version)
+  }, 20_000)
+
+  test('a usage_error start removes all four hand-off files', async () => {
+    const fx = await fixture()
+    const cases: Array<{ extra: Record<string, string>; policy?: string; mcpMode?: number }> = [
+      { extra: { bogus: '1' } },
+      { extra: { 'permission-mode': 'yolo' } },
+      { extra: {}, policy: 'not json' },
+      { extra: {}, mcpMode: 0o644 },
+    ]
+
+    for (const { extra, policy, mcpMode } of cases) {
+      const files = await handoff(fx, { policy, mcpMode })
+      expect(await fx.daemon.ctl('start', startArgs(fx, files, extra))).toMatchObject({
+        ok: false,
+        code: 'usage_error',
+      })
+      expect(await remaining(Object.values(files))).toEqual([])
+    }
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 20_000)
+
+  test('relative extra paths and a symlinked mcp-config, tool-policy or env file are usage_error', async () => {
+    const fx = await fixture()
+    for (const flag of ['tool-policy', 'system-prompt-file', 'mcp-config']) {
+      const files = await handoff(fx)
+      expect(await fx.daemon.ctl('start', startArgs(fx, files, { [flag]: 'relative/file' }))).toMatchObject({
+        code: 'usage_error',
+      })
+    }
+
+    // 1. Each target is a valid 0600 file on its own: only the link makes the start fail.
+    for (const [flag, content] of [
+      ['mcp-config', '{"mcpServers":{}}'],
+      ['tool-policy', POLICY],
+      ['env-file', envFile(fx)],
+    ] as const) {
+      const files = await handoff(fx)
+      const target = await writeSecretFile(join(fx.dir, `target-${flag}`), content)
+      const link = join(fx.dir, `link-${flag}`)
+      await symlink(target, link)
+      expect(await fx.daemon.ctl('start', startArgs(fx, files, { [flag]: link }))).toMatchObject({
+        code: 'usage_error',
+      })
+      expect(await remaining([link])).toEqual([])
+    }
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 20_000)
+
+  test('pane_exists and pane_cap refusals remove all four hand-off files', async () => {
+    const fx = await fixture({ maxPanes: 1 })
+    expect((await start(fx)).ok).toBe(true)
+
+    const again = await handoff(fx)
+    expect(await fx.daemon.ctl('start', startArgs(fx, again))).toMatchObject({ code: 'pane_exists' })
+    expect(await remaining(Object.values(again))).toEqual([])
+
+    const capped = await handoff(fx)
+    expect(await fx.daemon.ctl('start', startArgs(fx, capped, { pane: `${fx.pane}-b` }))).toMatchObject({
+      code: 'pane_cap',
+    })
+    expect(await remaining(Object.values(capped))).toEqual([])
+  }, 20_000)
+
+  test('a started pane keeps only its mcp-config, launches on the extras and drops the file on stop', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, files))).ok).toBe(true)
+    expect(await remaining(Object.values(files))).toEqual([files.mcp])
+
+    // 1. The CLI got the extras as paths only, the strict flag right behind the config.
+    const args = await stubArgs(fx)
+    const at = args.indexOf('--mcp-config')
+    expect(args.slice(at, at + 3)).toEqual(['--mcp-config', files.mcp, '--strict-mcp-config'])
+    expect(args[args.indexOf('--append-system-prompt-file') + 1]).toBe(files.prompt)
+    expect(args).not.toContain('--permission-mode')
+
+    // 2. The policy lands after the base deny, and the pane may not read its own bearer file.
+    const settings = await paneSettings(fx)
+    expect(settings.permissions.deny).toEqual([
+      'WebFetch',
+      'WebSearch',
+      'Bash(git push*)',
+      'Read(//proc/**)',
+      `Read(/${files.mcp})`,
+    ])
+    expect(settings.permissions.allow).toEqual(['Bash(git status:*)'])
+
+    expect((await fx.daemon.ctl('stop', { pane: fx.pane })).ok).toBe(true)
+    expect(await remaining([files.mcp])).toEqual([])
+  }, 20_000)
+
+  test('the mcp-config is removed when the pane dies on its own', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+    expect((await fx.daemon.ctl('start', startArgs(fx, files))).ok).toBe(true)
+
+    Bun.spawnSync(['tmux', '-L', SOCKET, 'kill-session', '-t', `=${fx.pane}`])
+
+    expect(await waitUntil(() => fx.ingest.ofType('process_died').length === 1)).toBe(true)
+    expect(await remaining([files.mcp])).toEqual([])
+  }, 20_000)
+
+  test('the mcp-config is removed when the daemon closes with the pane still running', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+    expect((await fx.daemon.ctl('start', startArgs(fx, files))).ok).toBe(true)
+
+    await fx.daemon.close()
+
+    expect(await remaining([files.mcp])).toEqual([])
+  }, 20_000)
+
+  test('dontAsk denies a permission request at once: no dialog, no event, no ingest call', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+    expect((await fx.daemon.ctl('start', startArgs(fx, files, { 'permission-mode': 'dontAsk' }))).ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    expect(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2)).toEqual([
+      '--permission-mode',
+      'dontAsk',
+    ])
+    expect((await paneSettings(fx)).permissions.deny).toContain('EnterPlanMode')
+
+    await prompt(fx, 'run the TOOL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    const [decision] = (await readOrEmpty(join(fx.dir, 'decisions.log'))).trim().split('\n')
+    const output = JSON.parse(JSON.parse(decision ?? '""')).hookSpecificOutput.decision
+    expect(output.behavior).toBe('deny')
+    expect(output.message).toContain('unattended')
+    expect(fx.ingest.opened).toHaveLength(0)
+    expect(fx.ingest.ofType('permission_request')).toHaveLength(0)
+    expect(await status(fx)).toMatchObject({ dialogOpen: false, busy: false })
+  }, 20_000)
+
+  test('an explicit default mode still opens the permission in the ingest', async () => {
+    const fx = await fixture()
+    fx.ingest.permissionMode = 'auto'
+    const files = await handoff(fx)
+    expect((await fx.daemon.ctl('start', startArgs(fx, files, { 'permission-mode': 'default' }))).ok).toBe(true)
+    expect((await paneSettings(fx)).permissions.deny).not.toContain('EnterPlanMode')
+
+    await prompt(fx, 'run the TOOL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.opened).toHaveLength(1)
+    expect(fx.ingest.ofType('permission_request')).toHaveLength(1)
+    expect(await readOrEmpty(join(fx.dir, 'decisions.log'))).toContain('allow')
+  }, 20_000)
 })
 
 describe('events', () => {
@@ -738,7 +970,13 @@ describe('delivery guard and turn end', () => {
     const fx = await fixture()
     await start(fx)
 
-    expect(await prompt(fx, 'PREDIALOG now')).toEqual({ ok: false, code: 'dialog_open' })
+    expect(await prompt(fx, 'PREDIALOG now')).toEqual({
+      ok: false,
+      code: 'dialog_open',
+      data: {
+        daemon_version: pkg.version,
+      },
+    })
     expect(await status(fx)).toMatchObject({ dialogOpen: true, busy: false })
     expect(fx.ingest.ofType('turn_started')).toHaveLength(0)
   }, 20_000)
@@ -751,6 +989,7 @@ describe('delivery guard and turn end', () => {
       ok: false,
       code: 'prompt_rejected',
       data: {
+        daemon_version: pkg.version,
         rule: 'leading_slash',
       },
     })
@@ -768,6 +1007,7 @@ describe('delivery guard and turn end', () => {
       ok: true,
       code: 'ok',
       data: {
+        daemon_version: pkg.version,
         wasBusy: true,
         detectedBy: 'transcript_marker',
       },
@@ -783,6 +1023,7 @@ describe('delivery guard and turn end', () => {
       ok: true,
       code: 'ok',
       data: {
+        daemon_version: pkg.version,
         wasBusy: false,
       },
     })
@@ -807,6 +1048,7 @@ describe('delivery guard and turn end', () => {
       ok: true,
       code: 'ok',
       data: {
+        daemon_version: pkg.version,
         name: 'compact',
       },
     })
@@ -971,6 +1213,7 @@ describe('rotate-token', () => {
       ok: true,
       code: 'ok',
       data: {
+        daemon_version: pkg.version,
         gen: 1,
       },
     })
@@ -1008,6 +1251,7 @@ describe('stop', () => {
       ok: true,
       code: 'ok',
       data: {
+        daemon_version: pkg.version,
         claudeSessionId: started.data?.claudeSessionId,
       },
     })

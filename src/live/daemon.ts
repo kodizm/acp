@@ -14,9 +14,12 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdir, readFile, stat, unlink } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
+import { chmod, lstat, mkdir, readFile, unlink } from 'node:fs/promises'
 import { type Server, type Socket, createServer } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
+
+import pkg from '../../package.json' with { type: 'json' }
 
 import { type Logger, createLogger } from '../util/logger.ts'
 import {
@@ -51,6 +54,7 @@ import {
 import {
   DEFAULT_BASE_SETTINGS_PATH,
   PERMISSION_HOOK_TIMEOUT_S,
+  type PermissionRules,
   SocketRequestError,
   socketRequest,
   writePaneSettings,
@@ -68,7 +72,12 @@ import {
   killPane,
   paneAlive,
 } from './pane.ts'
+import { parseToolPolicy } from './policy.ts'
+import { type PermissionMode, START_FILE_FLAGS, type StartExtras, parseStartExtras } from './start-flags.ts'
 import { TranscriptTail, UsageLedger, assistantBlocks, assistantStopReason, classifyInterrupt } from './transcript.ts'
+
+/** The package version every daemon reply carries, so Laravel can tell which start contract it talks to. */
+export const DAEMON_VERSION: string = pkg.version
 
 export const HEARTBEAT_INTERVAL_MS = 20_000
 
@@ -107,6 +116,8 @@ const LIVE_KEY_PREFIX = 'KODIZM_LIVE_'
 const TOKEN_PREFIX = 'kdz-int-jwt.'
 
 const COMMAND_NAMES: ReadonlySet<string> = new Set(['compact', 'clear', 'model'])
+
+const UNATTENDED_DENIAL = 'This session runs unattended and approves nothing, so the tool call is denied.'
 
 const REJECTION_RULES: Readonly<Record<InputRejectionReason, string>> = {
   slash_command: 'leading_slash',
@@ -473,6 +484,9 @@ class LivePane {
   private monitoring = false
   private closed = false
 
+  /**
+   * @param mcpConfig The hand-off MCP config of the pane, owned from here on: `close()` removes it.
+   */
   public constructor(
     public readonly pane: Pane,
     public readonly gen: number,
@@ -480,6 +494,8 @@ class LivePane {
     token: string,
     authValues: readonly string[],
     private readonly daemon: LiveDaemon,
+    public readonly extras: StartExtras,
+    public readonly mcpConfig: string | undefined,
   ) {
     this.token = token
     this.secrets = [token, ...authValues.filter((value) => value.length >= MIN_SECRET_LENGTH)]
@@ -617,12 +633,30 @@ class LivePane {
     await this.killLogged()
   }
 
+  // Every end of a pane passes here: stop, death, a stale stream and the daemon's own shutdown.
   private close(): void {
     this.closed = true
     for (const timer of this.timers.splice(0)) {
       clearInterval(timer)
     }
     this.clearDialog()
+    this.removeMcpConfig()
+  }
+
+  // The config holds the MCP bearer token. A failed removal is logged and the rest of the teardown still runs.
+  private removeMcpConfig(): void {
+    if (this.mcpConfig === undefined) {
+      return
+    }
+
+    try {
+      rmSync(this.mcpConfig, { force: true })
+    } catch (error) {
+      if (!isErrno(error)) {
+        throw error
+      }
+      this.daemon.logger.error('tmuxd could not remove the mcp-config', { pane: this.id, code: error.code })
+    }
   }
 
   private async onSessionStart(payload: Payload): Promise<void> {
@@ -686,7 +720,23 @@ class LivePane {
   }
 
   private async onPermissionRequest(payload: Payload, signal: AbortSignal): Promise<Ack> {
-    // 1. PermissionRequest carries no tool_use_id; the PreToolUse of the same tool and input does.
+    // 1. Nobody watches a dontAsk session: no dialog, no event, no decision row, just the denial.
+    if (this.extras.permissionMode === 'dontAsk') {
+      this.daemon.logger.debug('tmuxd denied a permission request in dontAsk mode', {
+        pane: this.id,
+        tool: text(payload.tool_name),
+      })
+
+      return {
+        ok: true,
+        decision: {
+          behavior: 'deny',
+          message: UNATTENDED_DENIAL,
+        },
+      }
+    }
+
+    // 2. PermissionRequest carries no tool_use_id; the PreToolUse of the same tool and input does.
     const correlated = this.findOpenTool(payload)
     const dialog: Dialog = {
       toolCallId: correlated ?? randomUUID(),
@@ -699,7 +749,7 @@ class LivePane {
     this.dialog = dialog
     signal.addEventListener('abort', () => dialog.abort.abort())
 
-    // 2. The timeline event, then the decision row the operator answers.
+    // 3. The timeline event, then the decision row the operator answers.
     const request = permissionRequest(payload, dialog.toolCallId)
     this.queue.push({
       type: 'permission_request',
@@ -709,7 +759,7 @@ class LivePane {
     })
     const decision = await this.askIngest(request, dialog.abort.signal)
 
-    // 3. Only an explicit answer for the dialog that is still open goes back; the CLI keeps the dialog otherwise.
+    // 4. Only an explicit answer for the dialog that is still open goes back; the CLI keeps the dialog otherwise.
     if (decision === undefined || this.dialog !== dialog) {
       return { ok: true }
     }
@@ -1157,34 +1207,46 @@ export class LiveDaemon {
     }
   }
 
+  /**
+   * The hand-off files (env, tool policy, system prompt, MCP config) hold the token, the policy and the bearer of the
+   * MCP server: whatever the outcome, a refusal or a throw included, none outlives this call, except the MCP config
+   * of a pane that runs, which its LivePane removes when the pane ends. Only absolute paths are ever unlinked.
+   */
   private async start(args: Readonly<Record<string, string>>): Promise<CtlResult> {
-    const envFile = args['env-file']
-    if (envFile === undefined || !isAbsolute(envFile)) {
-      return refuse('usage_error')
-    }
-
-    // The env file holds the token: whatever the outcome, a refusal included, it does not outlive this call.
+    let result: CtlResult | undefined
     try {
-      return await this.launch(args, envFile)
+      result = await this.launch(args)
+
+      return result
     } finally {
-      await removeFile(envFile)
+      await removeHandoff(args, result?.ok === true)
     }
   }
 
-  private async launch(args: Readonly<Record<string, string>>, envFile: string): Promise<CtlResult> {
+  private async launch(args: Readonly<Record<string, string>>): Promise<CtlResult> {
     const { pane: id, cwd, model, resume } = args
+    const envFile = args['env-file']
     const settingsBase = args['settings-base']
+    const policyFile = args['tool-policy']
+    const systemPromptFile = args['system-prompt-file']
+    const mcpConfig = args['mcp-config']
     if (id === undefined || !PANE_ID.test(id) || cwd === undefined || !isAbsolute(cwd)) {
       return refuse('usage_error')
     }
-    if (settingsBase === undefined || !isAbsolute(settingsBase)) {
+    if (envFile === undefined || !isAbsolute(envFile) || settingsBase === undefined || !isAbsolute(settingsBase)) {
       return refuse('usage_error')
     }
     if (model !== undefined && !MODEL_NAME.test(model)) {
       return refuse('usage_error')
     }
 
-    // 1. State guards first, so a refused start never reads the token.
+    // 1. An unknown flag or a bad extra fails the start, and so does an optional path that is not absolute.
+    const extras = parseStartExtras(args)
+    if (extras === null || [policyFile, systemPromptFile, mcpConfig].some((path) => !optionalAbsolute(path))) {
+      return refuse('usage_error')
+    }
+
+    // 2. State guards next, so a refused start never reads the token.
     if (this.panes.has(id)) {
       return refuse('pane_exists')
     }
@@ -1192,13 +1254,23 @@ export class LiveDaemon {
       return refuse('pane_cap')
     }
 
+    // 3. The env and policy files are read; the prompt and MCP config only reach the CLI as paths, never read here.
     const content = await readSecretFile(envFile)
     const env = content === null ? null : parseStartEnv(content)
     if (env === null) {
       return refuse('usage_error')
     }
+    for (const path of [systemPromptFile, mcpConfig]) {
+      if (path !== undefined && !(await isPrivateFile(path))) {
+        return refuse('usage_error')
+      }
+    }
+    const policy = policyFile === undefined ? undefined : await readToolPolicy(policyFile)
+    if (policy === null) {
+      return refuse('usage_error')
+    }
 
-    // 2. The settings file carries the hooks and the deny list, never the token.
+    // 4. The settings file carries the hooks and the rules, never the token.
     const settingsPath = join(settingsBase, `${id}.settings.json`)
     await mkdir(settingsBase, { recursive: true, mode: 0o700 })
     await writePaneSettings(settingsPath, {
@@ -1206,14 +1278,24 @@ export class LiveDaemon {
       helperArgv: this.options.helperArgv,
       socketPath: this.options.socketPath,
       paneId: id,
+      rules: paneRules(policy, mcpConfig, extras.permissionMode),
     })
 
-    // 3. Registered before launch: SessionStart arrives while createPane still waits for it.
+    // 5. Registered before launch: SessionStart arrives while createPane still waits for it.
     const pane: Pane = {
       id,
       socket: this.options.tmuxSocket ?? LIVE_SOCKET,
     }
-    const live = new LivePane(pane, env.gen, env.ingestUrl, env.token, Object.values(env.authEnv), this)
+    const live = new LivePane(
+      pane,
+      env.gen,
+      env.ingestUrl,
+      env.token,
+      Object.values(env.authEnv),
+      this,
+      extras,
+      mcpConfig,
+    )
     this.panes.set(id, live)
 
     try {
@@ -1225,6 +1307,9 @@ export class LiveDaemon {
         env: env.authEnv,
         model,
         resumeSessionId: resume,
+        mcpConfig,
+        systemPromptFile,
+        permissionMode: extras.permissionMode,
         claudeBin: this.options.claudeBin,
         socket: pane.socket,
         confirmStarted: (timeoutMs) => live.started.wait(timeoutMs),
@@ -1236,7 +1321,7 @@ export class LiveDaemon {
       return refuse(launchFailure(error))
     }
 
-    // 4. The pane runs: the pid backs the liveness check and the answer.
+    // 6. The pane runs: the pid backs the liveness check and the answer.
     live.pid = await panePid(pane)
     live.begin()
 
@@ -1597,19 +1682,69 @@ function parseStartEnv(content: string): StartEnv | null {
   }
 }
 
-/** The content of a regular 0600 file, or null when it is missing, not a file or readable by others. */
-async function readSecretFile(path: string): Promise<string | null> {
-  const info = await stat(path).catch((error: NodeJS.ErrnoException) => {
+/**
+ * The rules a pane's settings add to the base file, or undefined when nothing applies. A pane given an MCP config may
+ * not read it (it holds the server's bearer), and a dontAsk pane may not enter plan mode, which would leave dontAsk.
+ */
+function paneRules(
+  policy: PermissionRules | undefined,
+  mcpConfig: string | undefined,
+  mode: PermissionMode | undefined,
+): PermissionRules | undefined {
+  const deny = [
+    ...(mcpConfig === undefined ? [] : [`Read(/${mcpConfig})`]),
+    ...(mode === 'dontAsk' ? ['EnterPlanMode'] : []),
+  ]
+  if (policy === undefined && deny.length === 0) {
+    return undefined
+  }
+
+  return {
+    allow: policy?.allow ?? [],
+    deny: [...(policy?.deny ?? []), ...deny],
+    ask: policy?.ask ?? [],
+  }
+}
+
+function optionalAbsolute(path: string | undefined): boolean {
+  return path === undefined || isAbsolute(path)
+}
+
+/**
+ * Remove the hand-off files a start named. A relative path is never unlinked; the MCP config is kept when `keepMcp`.
+ */
+async function removeHandoff(args: Readonly<Record<string, string>>, keepMcp: boolean): Promise<void> {
+  for (const flag of START_FILE_FLAGS) {
+    const path = args[flag]
+    if (path === undefined || !isAbsolute(path) || (keepMcp && flag === 'mcp-config')) {
+      continue
+    }
+    await removeFile(path)
+  }
+}
+
+/** True for a regular 0600 file that is no symlink; a missing path is false. Nothing is read. */
+async function isPrivateFile(path: string): Promise<boolean> {
+  const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') {
       return null
     }
     throw error
   })
-  if (info === null || !info.isFile() || (info.mode & 0o777) !== 0o600) {
-    return null
-  }
 
-  return readFile(path, 'utf8')
+  return info?.isFile() === true && (info.mode & 0o777) === 0o600
+}
+
+/** The content of a regular 0600 file, or null when it is missing, a symlink, not a file or readable by others. */
+async function readSecretFile(path: string): Promise<string | null> {
+  return (await isPrivateFile(path)) ? readFile(path, 'utf8') : null
+}
+
+/** The translated rules of a tool-policy file, or null when the file is no secret file or no valid policy. */
+async function readToolPolicy(path: string): Promise<PermissionRules | null> {
+  const content = await readSecretFile(path)
+
+  return content === null ? null : parseToolPolicy(content)
 }
 
 async function readFileOrNull(path: string): Promise<string | null> {
@@ -1813,12 +1948,23 @@ function accept(data: Record<string, unknown>): CtlResult {
   return {
     ok: true,
     code: 'ok',
-    data: Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)),
+    data: stamped(data),
   }
 }
 
-function refuse(code: CtlCode, data?: Record<string, unknown>): CtlResult {
-  return data === undefined ? { ok: false, code } : { ok: false, code, data }
+function refuse(code: CtlCode, data: Record<string, unknown> = {}): CtlResult {
+  return {
+    ok: false,
+    code,
+    data: stamped(data),
+  }
+}
+
+/** The reply data with `daemon_version` first and every undefined value dropped. */
+function stamped(data: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries({ daemon_version: DAEMON_VERSION, ...data }).filter(([, value]) => value !== undefined),
+  )
 }
 
 function notRunning(id: string): CtlResult {
