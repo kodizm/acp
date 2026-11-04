@@ -48,6 +48,7 @@ import {
   toolOutput,
   turnCompleted,
   turnFailed,
+  turnFailedWith,
   turnStarted,
   usage,
 } from './events.ts'
@@ -174,6 +175,8 @@ export interface DaemonTimings {
   transcriptPollMs: number
   retryBaseMs: number
   retryMaxMs: number
+  /** The unit of `--deadline-seconds` and `--retain-failed-seconds`. */
+  secondMs: number
 }
 
 const DEFAULT_TIMINGS: DaemonTimings = {
@@ -187,6 +190,7 @@ const DEFAULT_TIMINGS: DaemonTimings = {
   transcriptPollMs: 250,
   retryBaseMs: 250,
   retryMaxMs: 10_000,
+  secondMs: 1_000,
 }
 
 export interface LiveDaemonOptions {
@@ -214,7 +218,7 @@ type Decision =
       message: string
     }
 
-type CloseCause = 'stop' | 'marker' | 'watchdog' | 'timeout'
+type CloseCause = 'stop' | 'marker' | 'watchdog' | 'timeout' | 'deadline'
 
 interface Dialog {
   toolCallId: string
@@ -496,6 +500,10 @@ class LivePane {
   private lastActivityAt = Date.now()
   private sessionEndReason: string | undefined
   private timers: Array<ReturnType<typeof setInterval>> = []
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined
+  private deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  private retentionTimer: ReturnType<typeof setTimeout> | undefined
+  private isRetaining = false
   private monitoring = false
   private closed = false
 
@@ -521,7 +529,12 @@ class LivePane {
       bearer: () => this.token,
       secrets: () => this.secrets,
       timings: () => daemon.timings,
-      onStaleGen: () => void this.abandon(),
+      // A retained pane is kept for the operator to look at, whatever the ingest says; its own timer ends it.
+      onStaleGen: () => {
+        if (!this.isRetaining) {
+          void this.abandon()
+        }
+      },
       logger: daemon.logger,
     })
   }
@@ -534,14 +547,19 @@ class LivePane {
     return this.turn !== undefined || this.compacting
   }
 
+  /** True while a failed pane waits out `--retain-failed-seconds` before it ends; it takes no input then. */
+  public get retaining(): boolean {
+    return this.isRetaining
+  }
+
   /** Start the transcript tail, the liveness monitor and the heartbeat once the pane runs. */
   public begin(): void {
     const timings = this.daemon.timings
     this.timers = [
       setInterval(() => void this.guard('transcript', () => this.readTranscript()), timings.transcriptPollMs),
       setInterval(() => void this.guard('monitor', () => this.monitor()), timings.monitorMs),
-      setInterval(() => void this.guard('heartbeat', () => this.beat()), timings.heartbeatMs),
     ]
+    this.heartbeatTimer = setInterval(() => void this.guard('heartbeat', () => this.beat()), timings.heartbeatMs)
   }
 
   public rotate(token: string): void {
@@ -623,8 +641,11 @@ class LivePane {
     }
     this.queue.push(draft)
     this.turn = undefined
+    clearTimeout(this.deadlineTimer)
+    this.deadlineTimer = undefined
     this.lastCloseCause = cause
     this.turnClosed.fire()
+    this.afterTurn(draft.type)
   }
 
   /** Esc and the hook answer both close a dialog without a tool hook, so the dialog state is dropped by hand. */
@@ -659,8 +680,84 @@ class LivePane {
     for (const timer of this.timers.splice(0)) {
       clearInterval(timer)
     }
+    clearInterval(this.heartbeatTimer)
+    clearTimeout(this.deadlineTimer)
+    clearTimeout(this.retentionTimer)
     this.clearDialog()
     this.removeMcpConfig()
+  }
+
+  /**
+   * End an unattended pane after its turn: a one-shot pane after any turn, a failed turn when the pane is one-shot or
+   * retains failures. A pane started without these flags never ends here, a failed turn included.
+   */
+  private afterTurn(type: string): void {
+    if (this.closed || this.isRetaining) {
+      return
+    }
+
+    const { oneShot, retainFailedSeconds } = this.extras
+    if (type === 'turn_completed' && oneShot) {
+      void this.guard('end', () => this.endAfterDelivery(0))
+
+      return
+    }
+    if (type !== 'turn_failed' || (!oneShot && retainFailedSeconds === 0)) {
+      return
+    }
+
+    // Retention starts in this tick: no prompt, heartbeat or stale stream may reach the pane from here on.
+    if (retainFailedSeconds > 0) {
+      this.isRetaining = true
+      clearInterval(this.heartbeatTimer)
+    }
+    void this.guard('end', () => this.endAfterDelivery(retainFailedSeconds * this.daemon.timings.secondMs))
+  }
+
+  /**
+   * Stop the pane once the turn event was acknowledged and `delayMs` passed, unless another end came first: a stale
+   * stream, a death, a ctl stop or the daemon's shutdown. close() clears the delay timer, which leaves this one
+   * waiting on a promise nobody resolves; nothing else holds it.
+   */
+  private async endAfterDelivery(delayMs: number): Promise<void> {
+    await this.queue.drain(STOP_DRAIN_MS)
+    if (this.closed) {
+      return
+    }
+    if (delayMs > 0) {
+      await new Promise<void>((resolve) => {
+        this.retentionTimer = setTimeout(resolve, delayMs)
+      })
+      if (this.closed) {
+        return
+      }
+    }
+
+    try {
+      await this.stop()
+    } finally {
+      this.daemon.remove(this)
+    }
+  }
+
+  /** The turn ran out of time: it fails first, so the interrupt marker the Esc may write finds no open turn. */
+  private async onDeadline(promptId: string, seconds: number): Promise<void> {
+    if (this.closed || this.turn?.promptId !== promptId) {
+      return
+    }
+
+    this.closeTurn(turnFailedWith('deadline', `The turn ran longer than ${seconds} seconds.`), 'deadline')
+    try {
+      await cancelPane(this.pane)
+    } catch (error) {
+      if (!(error instanceof PaneError)) {
+        throw error
+      }
+      this.daemon.logger.warn('tmuxd could not interrupt a turn past its deadline', {
+        pane: this.id,
+        reason: error.reason,
+      })
+    }
   }
 
   // The config holds the MCP bearer token. A failed removal is logged and the rest of the teardown still runs.
@@ -742,6 +839,15 @@ class LivePane {
     this.lastStopReason = null
     this.queue.push(turnStarted(this.turn.promptId))
     this.submitted.fire()
+
+    const seconds = this.extras.deadlineSeconds
+    if (seconds !== undefined) {
+      const promptId = this.turn.promptId
+      this.deadlineTimer = setTimeout(
+        () => void this.guard('deadline', () => this.onDeadline(promptId, seconds)),
+        seconds * this.daemon.timings.secondMs,
+      )
+    }
   }
 
   private onPreToolUse(payload: Payload): void {
@@ -1070,8 +1176,12 @@ class LivePane {
     }
   }
 
+  // Checked after the liveness probe too: a beat in flight when the pane closed or started retaining stays unsent.
   private async beat(): Promise<void> {
-    if (!this.closed && (await this.alive())) {
+    if (this.closed || this.isRetaining || !(await this.alive())) {
+      return
+    }
+    if (!this.closed && !this.isRetaining) {
       this.queue.push(heartbeat())
     }
   }
@@ -1634,7 +1744,7 @@ export class LiveDaemon {
     if (live.dialog !== undefined) {
       return refuse('dialog_open')
     }
-    if (live.busy || live.pendingPromptId !== undefined) {
+    if (live.busy || live.retaining || live.pendingPromptId !== undefined) {
       return refuse('busy')
     }
 

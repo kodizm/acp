@@ -176,6 +176,8 @@ class FakeIngest {
   public failEvents = 0
   public failOpens = 0
   public refuse: { status: number; code: string } | undefined
+  /** Store a batch holding this event type, then answer it 410 session_closed: Laravel ended the session there. */
+  public closeOn: string | undefined
   public staleGen = false
   public permissionMode: PermissionMode = 'pending'
   public answer: Record<string, unknown> = {
@@ -272,6 +274,9 @@ class FakeIngest {
       this.events.push(event)
       this.lastSeq = event.seq
       applied += 1
+    }
+    if (this.closeOn !== undefined && body.events.some((event) => event.type === this.closeOn)) {
+      return Response.json({ error: { code: 'session_closed', message: 'closed' } }, { status: 410 })
     }
 
     return Response.json({ ok: true, lastSeq: this.lastSeq, applied, duplicates })
@@ -1473,6 +1478,122 @@ describe('stop', () => {
     expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
     await Bun.sleep(300)
     expect(fx.ingest.ofType('process_died')).toHaveLength(0)
+  }, 20_000)
+})
+
+describe('lifecycle', () => {
+  const alive = (fx: Fixture): Promise<boolean> => paneAlive({ id: fx.pane, socket: SOCKET })
+
+  test('a one-shot pane closes once turn_completed was acknowledged, session_ended stopped last', async () => {
+    const fx = await fixture()
+    await start(fx, { 'one-shot': '1' })
+
+    expect((await prompt(fx, 'hello there')).ok).toBe(true)
+
+    expect(await waitUntil(async () => !(await alive(fx)), 5000)).toBe(true)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    expect(fx.ingest.types().slice(-2)).toEqual(['turn_completed', 'session_ended'])
+    expect(fx.ingest.events.at(-1)?.payload).toEqual({ reason: 'stopped' })
+    expect((await status(fx)).running).toBe(false)
+  }, 20_000)
+
+  test('a pane without one-shot stays after turn_completed', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'hello there')
+    expect(await turnClosed(fx)).toBe(true)
+    await Bun.sleep(300)
+
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('session_ended')).toHaveLength(0)
+    expect(fx.idle.count).toBe(0)
+  }, 20_000)
+
+  test('the deadline fails the turn, presses Esc and leaves no interrupted turn behind', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ secondMs: 20 })
+    await start(fx, { 'deadline-seconds': '10' })
+
+    expect((await prompt(fx, 'MUTE work')).ok).toBe(true)
+    expect(await turnClosed(fx)).toBe(true)
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toEqual({
+      reason: 'deadline',
+      detail: 'The turn ran longer than 10 seconds.',
+    })
+
+    // The stub's MUTE turn only ends on Esc: a next prompt that runs proves the Esc reached it.
+    fx.daemon.setTimings({ secondMs: 60_000 })
+    expect(await waitUntil(async () => (await status(fx)).busy === false)).toBe(true)
+    expect((await prompt(fx, 'hello again')).ok).toBe(true)
+    expect(await turnClosed(fx, 2)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_completed').map((event) => event.payload.stopReason)).toEqual(['end_turn'])
+    expect(await alive(fx)).toBe(true)
+  }, 20_000)
+
+  test('a one-shot pane with no retention closes at once after turn_failed', async () => {
+    const fx = await fixture()
+    await start(fx, { 'one-shot': '1', 'retain-failed-seconds': '0' })
+
+    await prompt(fx, 'please FAIL')
+
+    expect(await waitUntil(async () => !(await alive(fx)), 5000)).toBe(true)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    expect(fx.ingest.types().slice(-2)).toEqual(['turn_failed', 'session_ended'])
+    expect(fx.ingest.events.at(-1)?.payload).toEqual({ reason: 'stopped' })
+  }, 20_000)
+
+  test('a retained failed pane stays, refuses prompts as busy and beats no more until the retention ends', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ secondMs: 50, heartbeatMs: 50 })
+    await start(fx, { 'retain-failed-seconds': '16' })
+
+    await prompt(fx, 'please FAIL')
+    expect(await waitUntil(() => fx.ingest.ofType('turn_failed').length === 1)).toBe(true)
+    const failedSeq = fx.ingest.ofType('turn_failed')[0]?.seq ?? 0
+
+    expect(await prompt(fx, 'second')).toMatchObject({ ok: false, code: 'busy' })
+    await Bun.sleep(300)
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('heartbeat').filter((event) => event.seq > failedSeq)).toHaveLength(0)
+
+    expect(await waitUntil(async () => !(await alive(fx)), 5000)).toBe(true)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    expect(fx.ingest.types().slice(-2)).toEqual(['turn_failed', 'session_ended'])
+    expect(fx.ingest.events.at(-1)?.payload).toEqual({ reason: 'stopped' })
+  }, 20_000)
+
+  test('a retained failed pane survives an ingest 410 and still ends when the retention runs out', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ secondMs: 50 })
+    await start(fx, { 'retain-failed-seconds': '16' })
+    expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+
+    fx.ingest.closeOn = 'turn_failed'
+    await prompt(fx, 'please FAIL')
+    expect(await waitUntil(() => fx.ingest.ofType('turn_failed').length === 1)).toBe(true)
+
+    await Bun.sleep(300)
+    expect(await alive(fx)).toBe(true)
+    expect(fx.idle.count).toBe(0)
+
+    expect(await waitUntil(async () => !(await alive(fx)), 5000)).toBe(true)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+  }, 20_000)
+
+  test('a pane started without lifecycle flags survives a failed turn', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'please FAIL')
+    expect(await turnClosed(fx)).toBe(true)
+    await Bun.sleep(300)
+
+    expect(await alive(fx)).toBe(true)
+    expect(fx.ingest.ofType('session_ended')).toHaveLength(0)
+    expect(fx.idle.count).toBe(0)
+    expect((await prompt(fx, 'hello there')).ok).toBe(true)
   }, 20_000)
 })
 
