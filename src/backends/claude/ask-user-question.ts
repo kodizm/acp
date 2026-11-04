@@ -37,7 +37,7 @@
 import { z } from 'zod'
 import { type KodizmQuestion, KodizmQuestionSchema } from '../../wire/events.ts'
 
-import { type AcpServerLike, DEFERRED_SENTINEL, type EmitLike, awaitPermissionResponse } from './permission-bridge.ts'
+import { type AcpServerLike, DEFERRED_SENTINEL, type EmitLike, awaitPermissionResponse } from '../permission-rpc.ts'
 import type { CanUseToolOptions, PermissionResult } from './permission-bridge.ts'
 
 const QuestionsArraySchema = z.array(KodizmQuestionSchema).min(1).max(4)

@@ -165,7 +165,7 @@ export interface ClaudeDriverDeps {
    * surface (e.g., basic newSession + prompt smoke) keep working.
    * The integration tests + production bin always provide it.
    */
-  server?: import('./permission-bridge.ts').AcpServerLike
+  server?: import('../permission-rpc.ts').AcpServerLike
   /**
    * Optional Pattern B deferred-permission store. When provided + the
    * session opts in via `permissionDeferTimeoutMs`, the driver
@@ -311,8 +311,8 @@ export class ClaudeDriver implements BackendDriver {
    * @param server - the AcpServer (or AcpServerLike) the driver issues
    *                 outbound RPCs against
    */
-  public attachServer(server: import('./permission-bridge.ts').AcpServerLike): void {
-    ;(this.deps as { server?: import('./permission-bridge.ts').AcpServerLike }).server = server
+  public attachServer(server: import('../permission-rpc.ts').AcpServerLike): void {
+    ;(this.deps as { server?: import('../permission-rpc.ts').AcpServerLike }).server = server
   }
 
   public capabilities(): DriverCapabilities {

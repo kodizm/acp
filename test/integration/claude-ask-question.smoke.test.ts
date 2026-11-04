@@ -12,8 +12,8 @@ import { describe, expect, test } from 'bun:test'
 
 import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
 import type { SdkMessage } from '@/backends/claude/event-mapper.ts'
-import type { AcpServerLike } from '@/backends/claude/permission-bridge.ts'
 import type { EventEmitter } from '@/backends/driver.ts'
+import type { AcpServerLike } from '@/backends/permission-rpc.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
 
 import { HAS_AUTH, TEST_MODEL } from './_helpers.ts'

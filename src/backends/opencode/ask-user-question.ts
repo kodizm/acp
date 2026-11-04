@@ -28,7 +28,7 @@
  */
 
 import type { KodizmQuestion } from '../../wire/events.ts'
-import type { AcpServerLike, EmitLike } from '../claude/permission-bridge.ts'
+import type { AcpServerLike, EmitLike } from '../permission-rpc.ts'
 
 /**
  * Subset of opencode's `Question.Option` we consume.

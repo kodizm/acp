@@ -26,7 +26,7 @@ import { join } from 'node:path'
 
 import { ClaudeDriver, type SdkAdapter } from '@/backends/claude/driver.ts'
 import type { SdkMessage } from '@/backends/claude/event-mapper.ts'
-import type { AcpServerLike } from '@/backends/claude/permission-bridge.ts'
+import type { AcpServerLike } from '@/backends/permission-rpc.ts'
 import { DebugRecorder } from '@/util/debug-recorder.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
 

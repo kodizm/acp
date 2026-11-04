@@ -31,8 +31,8 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
-import type { AcpServerLike } from '@/backends/claude/permission-bridge.ts'
 import { OpencodeDriver } from '@/backends/opencode/driver.ts'
+import type { AcpServerLike } from '@/backends/permission-rpc.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
 
 const SMOKE_MODEL: string = 'opencode-go/deepseek-v4-flash'

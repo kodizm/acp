@@ -40,7 +40,6 @@ import type {
   NewSessionRequest,
   PromptRequest,
 } from '../../wire/types.ts'
-import type { AcpServerLike } from '../claude/permission-bridge.ts'
 import type {
   BackendDriver,
   DriverCapabilities,
@@ -49,6 +48,7 @@ import type {
   NewSessionResult,
   PromptResult,
 } from '../driver.ts'
+import type { AcpServerLike } from '../permission-rpc.ts'
 import { handleOpencodeQuestion } from './ask-user-question.ts'
 import { classifyOpencodeError } from './error-classifier.ts'
 import { OpencodeEventMapper } from './event-mapper.ts'

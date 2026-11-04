@@ -26,12 +26,7 @@
  * surface as `mcp__<server>__<tool>` for the orchestrator UI.
  */
 
-import {
-  type AcpServerLike,
-  DEFERRED_SENTINEL,
-  type EmitLike,
-  awaitPermissionResponse,
-} from '../claude/permission-bridge.ts'
+import { type AcpServerLike, DEFERRED_SENTINEL, type EmitLike, awaitPermissionResponse } from '../permission-rpc.ts'
 import { reverseToolName } from './mcp-mapper.ts'
 
 /**

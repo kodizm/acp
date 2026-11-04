@@ -26,7 +26,7 @@
 
 import pkg from '../package.json' with { type: 'json' }
 
-import type { AcpServerLike } from './backends/claude/permission-bridge.ts'
+import type { AcpServerLike } from './backends/permission-rpc.ts'
 import { createAcpServer } from './server/acp-server.ts'
 import { BackendNotConfiguredError, UnknownBackendError } from './server/errors.ts'
 import { runShutdown } from './server/shutdown.ts'

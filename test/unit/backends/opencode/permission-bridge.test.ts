@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test'
 
-import type { AcpServerLike } from '@/backends/claude/permission-bridge.ts'
 import { type OpencodePermissionRequest, handleOpencodePermission } from '@/backends/opencode/permission-bridge.ts'
+import type { AcpServerLike } from '@/backends/permission-rpc.ts'
 import type { SessionUpdateEvent } from '@/wire/events.ts'
 
 function recorder(): { events: SessionUpdateEvent[]; emit: { send: (e: SessionUpdateEvent) => void } } {
