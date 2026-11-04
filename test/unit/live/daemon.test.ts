@@ -45,6 +45,10 @@ const assistant = (id, block, stop) => record({
   type: 'assistant', isSidechain: false, timestamp: now(),
   message: { id, role: 'assistant', model: 'claude-stub', stop_reason: stop, content: [block], usage },
 })
+const apiError = (error, status, text) => record({
+  type: 'assistant', isSidechain: false, isApiErrorMessage: true, error, apiErrorStatus: status, timestamp: now(),
+  message: { model: '<synthetic>', role: 'assistant', stop_reason: 'stop_sequence', content: [{ type: 'text', text }] },
+})
 const marker = (text) => record({
   type: 'user', isSidechain: false, timestamp: now(), message: { role: 'user', content: [{ type: 'text', text }] },
 })
@@ -109,6 +113,17 @@ async function submit(prompt) {
     assistant(mid, { type: 'thinking', thinking: 'slow' }, null)
     await new Promise((resolve) => { waitingEsc = resolve })
     if (prompt.includes('SLOW')) marker('[Request interrupted by user]')
+  } else if (prompt.includes('APIERR_USAGE')) {
+    apiError('rate_limit', 429, "You've hit your session limit · resets 3pm")
+    if (prompt.includes('APIERR_USAGE_HOOK')) {
+      await hook('StopFailure', { error: 'rate_limit', error_details: '429 Too Many Requests', last_assistant_message: '' })
+    }
+  } else if (prompt.includes('APIERR_429')) {
+    apiError('rate_limit', 429, 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited')
+  } else if (prompt.includes('APIERR_401')) {
+    apiError('authentication_failed', 401, 'Please run /login · API Error: 401 Invalid authentication credentials')
+  } else if (prompt.includes('HOOK_AUTH')) {
+    await hook('StopFailure', { error: 'authentication_failed', error_details: '401 Unauthorized', last_assistant_message: '' })
   } else if (prompt.includes('FAIL')) {
     await hook('StopFailure', { error: 'rate_limit', error_details: '429 Too Many Requests', last_assistant_message: '' })
   } else if (prompt.includes('BARE')) {
@@ -1163,6 +1178,87 @@ describe('last assistant message', () => {
 
     expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({ stopReason: 'end_turn', lastAssistantMessage: '' })
     expect(await readFile(join(fx.settingsBase, MESSAGE_FILE), 'utf8')).toBe('')
+  }, 20_000)
+})
+
+describe('api error', () => {
+  const closes = (fx: Fixture) => fx.ingest.ofType('turn_completed').length + fx.ingest.ofType('turn_failed').length
+
+  test('api error: a usage limit record fails the turn at once with usage_limit', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'APIERR_USAGE please')
+    expect(await turnClosed(fx)).toBe(true)
+    await Bun.sleep(400)
+
+    expect(fx.ingest.ofType('turn_failed')).toHaveLength(1)
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toMatchObject({ reason: 'usage_limit' })
+    expect(fx.ingest.ofType('turn_completed')).toHaveLength(0)
+    expect(fx.ingest.ofType('output_chunk')[0]?.payload).toMatchObject({
+      text: "You've hit your session limit · resets 3pm",
+    })
+  }, 20_000)
+
+  test('api error: a StopFailure after the usage limit record adds no second end', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'APIERR_USAGE_HOOK please')
+    expect(await turnClosed(fx)).toBe(true)
+    await Bun.sleep(400)
+
+    expect(closes(fx)).toBe(1)
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toMatchObject({ reason: 'usage_limit' })
+  }, 20_000)
+
+  test('api error: a plain 429 is reported as rate_limit when the watchdog ends the turn', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ watchdogQuietMs: 200 })
+    await start(fx)
+
+    await prompt(fx, 'APIERR_429 please')
+    expect(await turnClosed(fx)).toBe(true)
+    await Bun.sleep(400)
+
+    expect(closes(fx)).toBe(1)
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toMatchObject({ reason: 'rate_limit' })
+  }, 20_000)
+
+  test('api error: a 401 record is reported as auth_error when the watchdog ends the turn', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ watchdogQuietMs: 200 })
+    await start(fx)
+
+    await prompt(fx, 'APIERR_401 please')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toMatchObject({ reason: 'auth_error' })
+    expect(fx.ingest.ofType('turn_completed')).toHaveLength(0)
+  }, 20_000)
+
+  test('api error: a StopFailure alone keeps its own reason table', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'please FAIL')
+    expect(await turnClosed(fx)).toBe(true)
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toMatchObject({ reason: 'rate_limit' })
+
+    await prompt(fx, 'HOOK_AUTH please')
+    expect(await turnClosed(fx, 2)).toBe(true)
+    expect(fx.ingest.ofType('turn_failed')[1]?.payload).toMatchObject({ reason: 'auth_error' })
+  }, 20_000)
+
+  test('api error: a normal turn still completes with end_turn', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'hello')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toMatchObject({ stopReason: 'end_turn' })
+    expect(fx.ingest.ofType('turn_failed')).toHaveLength(0)
   }, 20_000)
 })
 

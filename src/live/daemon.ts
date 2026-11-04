@@ -76,7 +76,15 @@ import {
 } from './pane.ts'
 import { parseToolPolicy } from './policy.ts'
 import { type PermissionMode, START_FILE_FLAGS, type StartExtras, parseStartExtras } from './start-flags.ts'
-import { TranscriptTail, UsageLedger, assistantBlocks, assistantStopReason, classifyInterrupt } from './transcript.ts'
+import {
+  type ApiErrorClass,
+  TranscriptTail,
+  UsageLedger,
+  assistantBlocks,
+  assistantStopReason,
+  classifyApiError,
+  classifyInterrupt,
+} from './transcript.ts'
 
 /** The package version every daemon reply carries, so Laravel can tell which start contract it talks to. */
 export const DAEMON_VERSION: string = pkg.version
@@ -222,7 +230,7 @@ type Decision =
       message: string
     }
 
-type CloseCause = 'stop' | 'marker' | 'watchdog' | 'timeout' | 'deadline'
+type CloseCause = 'stop' | 'marker' | 'watchdog' | 'timeout' | 'deadline' | 'api_error'
 
 interface Dialog {
   toolCallId: string
@@ -500,6 +508,7 @@ class LivePane {
   private skippedLines = 0
   private lastAssistantText: string | undefined
   private lastStopReason: string | null = null
+  private apiError: ApiErrorClass | undefined
   private settled = false
   private lastActivityAt = Date.now()
   private sessionEndReason: string | undefined
@@ -846,6 +855,7 @@ class LivePane {
     this.settled = false
     this.lastAssistantText = undefined
     this.lastStopReason = null
+    this.apiError = undefined
     this.queue.push(turnStarted(this.turn.promptId))
     this.submitted.fire()
 
@@ -1062,12 +1072,19 @@ class LivePane {
     // The text and usage written before Stop go out before the turn ends.
     await this.syncTranscript()
     this.closeTurn(
-      turnCompleted(
-        apiStopReason(this.lastStopReason),
-        text(payload.last_assistant_message) ?? this.lastAssistantText ?? '',
+      this.endOfTurn(
+        turnCompleted(
+          apiStopReason(this.lastStopReason),
+          text(payload.last_assistant_message) ?? this.lastAssistantText ?? '',
+        ),
       ),
       'stop',
     )
+  }
+
+  /** A turn the CLI ended on an API error record is a failure, whatever hook or watchdog closes it. */
+  private endOfTurn(completed: EventDraft): EventDraft {
+    return this.apiError === undefined ? completed : turnFailedWith(this.apiError.reason, this.apiError.detail)
   }
 
   private async onStopFailure(payload: Payload): Promise<void> {
@@ -1139,10 +1156,11 @@ class LivePane {
         continue
       }
 
-      // 2. Text, thinking and the message's token counts.
+      // 2. Text, thinking and the message's token counts. An error record's text streams but is no answer.
+      const failure = classifyApiError(record)
       for (const block of assistantBlocks(record)) {
         this.queue.push(block.kind === 'text' ? outputChunk(block.text) : thinkingChunk(block.text))
-        if (block.kind === 'text') {
+        if (block.kind === 'text' && failure === null) {
           this.lastAssistantText = block.text
         }
       }
@@ -1157,6 +1175,16 @@ class LivePane {
         this.settled = this.lastStopReason !== null && this.lastStopReason !== 'tool_use'
       } else if (record.type === 'user') {
         this.settled = false
+      }
+
+      // 4. A later record in the turn means the CLI retried and recovered; a usage limit is final, no hook is promised.
+      if (failure !== null) {
+        this.apiError = failure
+        if (failure.reason === 'usage_limit') {
+          this.closeTurn(turnFailedWith(failure.reason, failure.detail), 'api_error')
+        }
+      } else if (record.type === 'assistant' || record.type === 'user') {
+        this.apiError = undefined
       }
     }
   }
@@ -1178,7 +1206,7 @@ class LivePane {
       const quiet = Date.now() - this.lastActivityAt >= this.daemon.timings.watchdogQuietMs
       const idle = this.dialog === undefined && this.openTools.size === 0 && !this.compacting && this.settled
       if (this.turn !== undefined && quiet && idle) {
-        this.closeTurn(turnCompleted('watchdog', this.lastAssistantText ?? ''), 'watchdog')
+        this.closeTurn(this.endOfTurn(turnCompleted('watchdog', this.lastAssistantText ?? '')), 'watchdog')
       }
 
       // Heartbeats and this monitor are no activity; a retaining pane is ended by its retention timer, and a prompt
