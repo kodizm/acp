@@ -1,0 +1,962 @@
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import { type CtlResult, HEARTBEAT_INTERVAL_MS, LiveDaemon, type LiveDaemonOptions } from '@/live/daemon.ts'
+import type { LiveEvent } from '@/live/events.ts'
+import { paneAlive } from '@/live/pane.ts'
+
+// Runs the daemon in-process against a real tmux (socket kdz-test) and a stub CLI. The stub reads the pane's
+// --settings file and runs its hook commands exactly as the CLI does (sh -c, payload on stdin, stdout as the
+// decision), so every hook goes through the real `tmuxd hook` helper and the daemon's unix socket. Hook payload and
+// transcript shapes follow what CLI 2.1.280 produced in a captured real session.
+const SOCKET = 'kdz-test'
+const PACKAGE_ROOT = join(import.meta.dir, '..', '..', '..')
+const ENTRY = join(PACKAGE_ROOT, 'src', 'index.ts')
+const API_KEY = 'kgw-FAKE0000000000000000000000'
+const AUTH_TOKEN = 'plain-known-auth-value-42'
+
+const STUB = `import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
+const args = process.argv.slice(2)
+const dir = dirname(process.argv[1])
+const flag = (name) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1] }
+const settings = JSON.parse(readFileSync(flag('--settings'), 'utf8'))
+writeFileSync(join(dir, 'args.json'), JSON.stringify(args))
+writeFileSync(join(dir, 'env.json'), JSON.stringify(process.env))
+const resume = flag('--resume')
+const sid = resume ?? crypto.randomUUID()
+const transcript = join(process.env.HOME, '.claude', 'projects', 'stub', sid + '.jsonl')
+mkdirSync(dirname(transcript), { recursive: true })
+const now = () => new Date().toISOString()
+const record = (value) => appendFileSync(transcript, JSON.stringify(value) + '\\n')
+const usage = { input_tokens: 7, output_tokens: 11, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }
+const assistant = (id, block, stop) => record({
+  type: 'assistant', isSidechain: false, timestamp: now(),
+  message: { id, role: 'assistant', model: 'claude-stub', stop_reason: stop, content: [block], usage },
+})
+const marker = (text) => record({
+  type: 'user', isSidechain: false, timestamp: now(), message: { role: 'user', content: [{ type: 'text', text }] },
+})
+
+async function hook(event, extra = {}) {
+  const entry = settings.hooks?.[event]?.[0]?.hooks?.[0]
+  if (entry === undefined) return ''
+  const payload = { session_id: sid, transcript_path: transcript, cwd: process.cwd(), hook_event_name: event, ...extra }
+  const child = Bun.spawn(['sh', '-c', entry.command], {
+    stdin: new TextEncoder().encode(JSON.stringify(payload)),
+    stdout: 'pipe',
+    stderr: 'ignore',
+  })
+  const timer = setTimeout(() => child.kill(), entry.timeout * 1000)
+  const out = await new Response(child.stdout).text()
+  await child.exited
+  clearTimeout(timer)
+  return out
+}
+
+let running = false
+let waitingHuman = null
+let waitingEsc = null
+let turn = 0
+
+async function submit(prompt) {
+  running = true
+  turn += 1
+  const mid = 'msg_stub_' + turn
+  const toolUseId = 'toolu_STUB' + turn
+  await hook('UserPromptSubmit', { prompt, prompt_id: crypto.randomUUID(), permission_mode: 'default' })
+  if (prompt.includes('TOOL')) {
+    const input = { command: 'touch stub.txt' }
+    assistant(mid, { type: 'tool_use', id: toolUseId, name: 'Bash', input }, 'tool_use')
+    await hook('PreToolUse', { tool_name: 'Bash', tool_input: input, tool_use_id: toolUseId })
+    const out = await hook('PermissionRequest', { tool_name: 'Bash', tool_input: input, permission_suggestions: [] })
+    appendFileSync(join(dir, 'decisions.log'), JSON.stringify(out) + '\\n')
+    let behavior = out === '' ? '' : JSON.parse(out).hookSpecificOutput.decision.behavior
+    if (behavior === '') {
+      behavior = await new Promise((resolve) => { waitingHuman = resolve })
+    }
+    if (behavior === 'interrupted') {
+      marker('[Request interrupted by user for tool use]')
+      running = false
+      return
+    }
+    if (behavior === 'allow') {
+      await hook('PostToolUse', {
+        tool_name: 'Bash', tool_input: input, tool_use_id: toolUseId, tool_response: { stdout: 'ran', stderr: '' },
+      })
+    }
+    assistant(mid + 'b', { type: 'text', text: 'tool ' + behavior }, 'end_turn')
+    await hook('Stop', { last_assistant_message: 'tool ' + behavior, stop_hook_active: false })
+  } else if (prompt.includes('HANG')) {
+    assistant(mid, { type: 'text', text: 'hanging' }, 'end_turn')
+  } else if (prompt.includes('SLOW') || prompt.includes('MUTE')) {
+    assistant(mid, { type: 'thinking', thinking: 'slow' }, null)
+    await new Promise((resolve) => { waitingEsc = resolve })
+    if (prompt.includes('SLOW')) marker('[Request interrupted by user]')
+  } else if (prompt.includes('FAIL')) {
+    await hook('StopFailure', { error: 'rate_limit', error_details: '429 Too Many Requests', last_assistant_message: '' })
+  } else {
+    assistant(mid, { type: 'thinking', thinking: 'thinking about ' + prompt }, 'end_turn')
+    assistant(mid, {
+      type: 'text',
+      text: 'echo ' + prompt + ' key=' + process.env.ANTHROPIC_API_KEY + ' auth=' + process.env.ANTHROPIC_AUTH_TOKEN,
+    }, 'end_turn')
+    await hook('Stop', { last_assistant_message: 'done ' + process.env.ANTHROPIC_AUTH_TOKEN, stop_hook_active: false })
+  }
+  running = false
+}
+
+function onEnter(line) {
+  if (waitingHuman !== null) {
+    const resolve = waitingHuman
+    waitingHuman = null
+    resolve('allow')
+    return
+  }
+  if (line.trim() === '' || running) return
+  if (line.startsWith('/')) {
+    appendFileSync(join(dir, 'commands.log'), line + '\\n')
+    return
+  }
+  void submit(line)
+}
+
+function onEsc() {
+  if (waitingHuman !== null) {
+    const resolve = waitingHuman
+    waitingHuman = null
+    resolve('interrupted')
+  }
+  if (waitingEsc !== null) {
+    const resolve = waitingEsc
+    waitingEsc = null
+    resolve()
+  }
+}
+
+Bun.spawnSync(['stty', 'raw', '-echo'], { stdin: 'inherit' })
+process.stdout.write('\\x1b[?2004h')
+let buffer = ''
+process.stdin.on('data', (chunk) => {
+  const text = chunk.toString('utf8').replaceAll('\\x1b[200~', '').replaceAll('\\x1b[201~', '')
+  for (const char of text) {
+    if (char === '\\x1b') { onEsc(); continue }
+    if (char === '\\x15') { buffer = ''; continue }
+    if (char === '\\r') { const line = buffer; buffer = ''; onEnter(line); continue }
+    buffer += char
+  }
+})
+await hook('SessionStart', { source: resume === undefined ? 'startup' : 'resume', model: 'claude-stub' })
+`
+
+type PermissionMode = 'pending' | 'fail' | 'hang' | 'auto'
+
+class FakeIngest {
+  public readonly events: LiveEvent[] = []
+  public readonly bearers: string[] = []
+  public readonly opened: Record<string, unknown>[] = []
+  public lastSeq = 0
+  public failEvents = 0
+  public staleGen = false
+  public permissionMode: PermissionMode = 'pending'
+  public answer: Record<string, unknown> = {
+    status: 'pending',
+  }
+  public polls = 0
+  private server: ReturnType<typeof Bun.serve> | undefined
+
+  public get url(): string {
+    return `http://127.0.0.1:${this.server?.port}/internal/live`
+  }
+
+  public start(): void {
+    this.server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: (request) => this.handle(request),
+    })
+  }
+
+  public stop(): void {
+    this.server?.stop(true)
+  }
+
+  public types(): string[] {
+    return this.events.map((event) => event.type)
+  }
+
+  public ofType(type: string): LiveEvent[] {
+    return this.events.filter((event) => event.type === type)
+  }
+
+  private async handle(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname
+    this.bearers.push(request.headers.get('authorization') ?? '')
+
+    if (request.method === 'POST' && path === '/internal/live/events') {
+      return this.ingest((await request.json()) as { events: LiveEvent[] })
+    }
+    if (request.method === 'POST' && path === '/internal/live/permissions') {
+      this.opened.push((await request.json()) as Record<string, unknown>)
+      if (this.permissionMode === 'fail') {
+        return Response.json({ error: { code: 'server_error', message: 'boom' } }, { status: 500 })
+      }
+      if (this.permissionMode === 'hang') {
+        return new Promise<Response>(() => {})
+      }
+      if (this.permissionMode === 'auto') {
+        return Response.json({ id: null, status: 'allowed', optionId: 'allow' })
+      }
+
+      return Response.json({ id: '019e0000-0000-7000-8000-00000000f001', status: 'pending' }, { status: 201 })
+    }
+    if (request.method === 'GET' && path === '/internal/live/permissions/019e0000-0000-7000-8000-00000000f001') {
+      this.polls += 1
+
+      return Response.json({ id: '019e0000-0000-7000-8000-00000000f001', ...this.answer })
+    }
+
+    return Response.json({ error: { code: 'not_found', message: 'nope' } }, { status: 404 })
+  }
+
+  private ingest(body: { events: LiveEvent[] }): Response {
+    if (this.failEvents > 0) {
+      this.failEvents -= 1
+
+      return Response.json({ error: { code: 'server_error', message: 'boom' } }, { status: 500 })
+    }
+    if (this.staleGen) {
+      return Response.json({ error: { code: 'stale_gen', message: 'stale', currentGen: 2 } }, { status: 409 })
+    }
+
+    let applied = 0
+    let duplicates = 0
+    for (const event of body.events) {
+      if (event.seq <= this.lastSeq) {
+        duplicates += 1
+        continue
+      }
+      if (event.seq > this.lastSeq + 1) {
+        return Response.json(
+          { error: { code: 'seq_gap', message: 'gap', expectedSeq: this.lastSeq + 1 } },
+          { status: 409 },
+        )
+      }
+      this.events.push(event)
+      this.lastSeq = event.seq
+      applied += 1
+    }
+
+    return Response.json({ ok: true, lastSeq: this.lastSeq, applied, duplicates })
+  }
+}
+
+interface Fixture {
+  dir: string
+  cwd: string
+  home: string
+  stub: string
+  settingsBase: string
+  baseSettings: string
+  socketPath: string
+  ingest: FakeIngest
+  daemon: LiveDaemon
+  idle: { count: number }
+  pane: string
+}
+
+let root = ''
+let counter = 0
+const fixtures: Fixture[] = []
+
+function token(gen: number): string {
+  const payload = Buffer.from(JSON.stringify({ audience: 'live', gen, sid: 'FAKE' })).toString('base64url')
+
+  return `kdz-int-jwt.${payload}.FAKESIGNATURE${gen}${counter}`
+}
+
+async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return true
+    }
+    await Bun.sleep(25)
+  }
+
+  return check()
+}
+
+async function readOrEmpty(path: string): Promise<string> {
+  const file = Bun.file(path)
+
+  return (await file.exists()) ? file.text() : ''
+}
+
+async function writeSecretFile(path: string, content: string, mode = 0o600): Promise<string> {
+  await writeFile(path, content)
+  await chmod(path, mode)
+
+  return path
+}
+
+async function fixture(options: Partial<LiveDaemonOptions> = {}): Promise<Fixture> {
+  counter += 1
+  const dir = join(root, `c${counter}`)
+  const cwd = join(dir, 'work')
+  const home = join(dir, 'home')
+  const settingsBase = join(dir, 'settings')
+  for (const path of [cwd, home, settingsBase]) {
+    await mkdir(path, { recursive: true })
+  }
+
+  const stub = join(dir, 'claude')
+  await writeFile(stub, `#!${process.execPath}\n${STUB}`)
+  await chmod(stub, 0o755)
+
+  const baseSettings = join(dir, 'kodizm-live-base.json')
+  await writeFile(baseSettings, JSON.stringify({ permissions: { deny: ['WebFetch', 'WebSearch'] } }))
+
+  const ingest = new FakeIngest()
+  ingest.start()
+
+  const idle = { count: 0 }
+  const socketPath = join(dir, 'd.sock')
+  const daemon = new LiveDaemon({
+    socketPath,
+    tmuxSocket: SOCKET,
+    claudeBin: stub,
+    baseSettingsPath: baseSettings,
+    helperArgv: [process.execPath, ENTRY],
+    home,
+    timings: {
+      heartbeatMs: 60_000,
+      watchdogQuietMs: 60_000,
+      cancelTimeoutMs: 1_500,
+      permissionPollMs: 100,
+      ingestTimeoutMs: 1_000,
+      monitorMs: 100,
+      transcriptPollMs: 50,
+      retryBaseMs: 20,
+      retryMaxMs: 200,
+    },
+    onIdle: () => {
+      idle.count += 1
+    },
+    ...options,
+  })
+  await daemon.listen()
+
+  const fx = {
+    dir,
+    cwd,
+    home,
+    stub,
+    settingsBase,
+    baseSettings,
+    socketPath,
+    ingest,
+    daemon,
+    idle,
+    pane: `kdz-live-${counter}`,
+  }
+  fixtures.push(fx)
+
+  return fx
+}
+
+function envFile(fx: Fixture, gen = 1): string {
+  return [
+    `KODIZM_LIVE_INGEST_URL=${fx.ingest.url}`,
+    `KODIZM_LIVE_TOKEN=${token(gen)}`,
+    `KODIZM_LIVE_GEN=${gen}`,
+    `ANTHROPIC_API_KEY=${API_KEY}`,
+    `ANTHROPIC_AUTH_TOKEN=${AUTH_TOKEN}`,
+    '',
+  ].join('\n')
+}
+
+async function start(fx: Fixture): Promise<CtlResult> {
+  const path = await writeSecretFile(join(fx.dir, 'live.env'), envFile(fx))
+
+  return fx.daemon.ctl('start', {
+    pane: fx.pane,
+    cwd: fx.cwd,
+    'settings-base': fx.settingsBase,
+    'env-file': path,
+  })
+}
+
+async function prompt(fx: Fixture, text: string): Promise<CtlResult> {
+  counter += 1
+  const path = join(fx.dir, `prompt-${counter}.txt`)
+  await writeFile(path, text)
+
+  return fx.daemon.ctl('prompt', {
+    pane: fx.pane,
+    file: path,
+  })
+}
+
+async function status(fx: Fixture): Promise<Record<string, unknown>> {
+  return (await fx.daemon.ctl('status', { pane: fx.pane })).data ?? {}
+}
+
+async function turnClosed(fx: Fixture, count = 1): Promise<boolean> {
+  return waitUntil(
+    () => fx.ingest.ofType('turn_completed').length + fx.ingest.ofType('turn_failed').length >= count,
+    8000,
+  )
+}
+
+beforeAll(async () => {
+  // /tmp keeps the unix socket path under the 104-byte macOS limit.
+  root = await mkdtemp('/tmp/kdzd-')
+})
+
+afterEach(async () => {
+  for (const fx of fixtures.splice(0)) {
+    await fx.daemon.close()
+    fx.ingest.stop()
+  }
+})
+
+afterAll(async () => {
+  Bun.spawnSync(['tmux', '-L', SOCKET, 'kill-server'])
+  await rm(root, { recursive: true, force: true })
+})
+
+describe('start', () => {
+  test('launches the CLI with the pane settings, keeps the token out of the pane and deletes the env file', async () => {
+    const fx = await fixture()
+
+    const result = await start(fx)
+
+    expect(result.ok).toBe(true)
+    expect(result.code).toBe('ok')
+    expect(result.data).toMatchObject({ pane: fx.pane, gen: 1, resumed: false })
+    expect(typeof result.data?.pid).toBe('number')
+    expect(typeof result.data?.claudeSessionId).toBe('string')
+    expect(await Bun.file(join(fx.dir, 'live.env')).exists()).toBe(false)
+
+    // 1. The CLI runs on the pane settings file, restricted to the user source.
+    const args = JSON.parse(await readFile(join(fx.dir, 'args.json'), 'utf8')) as string[]
+    const settingsPath = args[args.indexOf('--settings') + 1] ?? ''
+    expect(args).toContain('--setting-sources')
+    expect(settingsPath.startsWith(fx.settingsBase)).toBe(true)
+    expect((await stat(settingsPath)).mode & 0o777).toBe(0o600)
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
+    expect(settings.permissions.deny).toEqual(['WebFetch', 'WebSearch'])
+    expect(settings.disableAllHooks).toBe(false)
+
+    // 2. The pane gets the auth env only; the ingest token, URL and gen never reach it or the settings file.
+    const env = JSON.parse(await readFile(join(fx.dir, 'env.json'), 'utf8')) as Record<string, string>
+    expect(env.ANTHROPIC_API_KEY).toBe(API_KEY)
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe(AUTH_TOKEN)
+    for (const name of ['KODIZM_LIVE_TOKEN', 'KODIZM_LIVE_INGEST_URL', 'KODIZM_LIVE_GEN']) {
+      expect(env[name]).toBeUndefined()
+    }
+    expect(JSON.stringify(env)).not.toContain('kdz-int-jwt')
+    expect(JSON.stringify(settings)).not.toContain('kdz-int-jwt')
+
+    // 3. session_started opens the stream at seq 1 of gen 1, with the bearer from the env file.
+    expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+    expect(fx.ingest.events[0]).toMatchObject({
+      type: 'session_started',
+      seq: 1,
+      gen: 1,
+      payload: {
+        claudeSessionId: result.data?.claudeSessionId,
+        model: 'claude-stub',
+        source: 'startup',
+      },
+    })
+    expect(fx.ingest.events[0]?.ts).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
+    expect(fx.ingest.bearers[0]).toStartWith('Bearer kdz-int-jwt.')
+  }, 20_000)
+
+  test('refuses an env file that is not 0600, missing flags, a second start of the pane and the pane cap', async () => {
+    const fx = await fixture({ maxPanes: 1 })
+    const loose = await writeSecretFile(join(fx.dir, 'loose.env'), envFile(fx), 0o644)
+
+    const refusedMode = await fx.daemon.ctl('start', {
+      pane: fx.pane,
+      cwd: fx.cwd,
+      'settings-base': fx.settingsBase,
+      'env-file': loose,
+    })
+    expect(refusedMode).toMatchObject({ ok: false, code: 'usage_error' })
+
+    expect(await fx.daemon.ctl('start', { pane: fx.pane })).toMatchObject({ ok: false, code: 'usage_error' })
+    expect(await fx.daemon.ctl('start', { pane: 'bad pane!', cwd: fx.cwd })).toMatchObject({ code: 'usage_error' })
+
+    expect((await start(fx)).ok).toBe(true)
+    expect(await start(fx)).toMatchObject({ ok: false, code: 'pane_exists' })
+
+    const other = await writeSecretFile(join(fx.dir, 'other.env'), envFile(fx))
+    const capped = await fx.daemon.ctl('start', {
+      pane: `${fx.pane}-b`,
+      cwd: fx.cwd,
+      'settings-base': fx.settingsBase,
+      'env-file': other,
+    })
+    expect(capped).toMatchObject({ ok: false, code: 'pane_cap' })
+    expect(await Bun.file(other).exists()).toBe(false)
+  }, 20_000)
+
+  test('reports an unknown pane as not running and refuses an unknown verb', async () => {
+    const fx = await fixture()
+
+    expect(await fx.daemon.ctl('status', { pane: 'nobody' })).toEqual({
+      ok: false,
+      code: 'pane_not_running',
+      data: {
+        pane: 'nobody',
+        running: false,
+      },
+    })
+    expect(await fx.daemon.ctl('explode', {})).toMatchObject({ ok: false, code: 'usage_error' })
+  })
+})
+
+describe('events', () => {
+  test('a turn streams in seq order with one gen, de-duplicated usage and every planted secret redacted', async () => {
+    const fx = await fixture()
+    // Two failed pushes first: the retry has to keep the order and lose nothing.
+    fx.ingest.failEvents = 2
+    await start(fx)
+
+    const result = await prompt(fx, 'hello there')
+    expect(result.ok).toBe(true)
+    expect(typeof result.data?.promptId).toBe('string')
+    expect(result.data?.bytes).toBe(11)
+    expect(await turnClosed(fx)).toBe(true)
+
+    const types = fx.ingest.types()
+    expect(types[0]).toBe('session_started')
+    expect(types.indexOf('turn_started')).toBeLessThan(types.indexOf('turn_completed'))
+    expect(types).toContain('thinking_chunk')
+    expect(types).toContain('output_chunk')
+    expect(fx.ingest.ofType('usage')).toHaveLength(1)
+    expect(fx.ingest.ofType('usage')[0]?.payload).toEqual({
+      inputTokens: 7,
+      outputTokens: 11,
+      cacheReadTokens: 100,
+      cacheCreationTokens: 5,
+    })
+    expect(fx.ingest.ofType('turn_started')[0]?.payload.promptId).toBe(result.data?.promptId)
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({
+      stopReason: 'end_turn',
+      lastAssistantMessage: 'done [REDACTED]',
+    })
+
+    // 1. Strictly increasing from 1 by exactly 1, one gen throughout.
+    expect(fx.ingest.events.map((event) => event.seq)).toEqual(fx.ingest.events.map((_event, index) => index + 1))
+    expect(new Set(fx.ingest.events.map((event) => event.gen))).toEqual(new Set([1]))
+
+    // 2. Neither the injected values nor the token reached the ingest.
+    const wire = JSON.stringify(fx.ingest.events)
+    expect(wire).not.toContain(API_KEY)
+    expect(wire).not.toContain(AUTH_TOKEN)
+    expect(wire).not.toContain('kdz-int-jwt')
+    expect(fx.ingest.ofType('output_chunk')[0]?.payload.text).toBe('echo hello there key=[REDACTED] auth=[REDACTED]')
+  }, 20_000)
+
+  test('emits a heartbeat on the interval while the pane lives, and the production interval is 20 s', async () => {
+    expect(HEARTBEAT_INTERVAL_MS).toBe(20_000)
+
+    const fx = await fixture()
+    fx.daemon.setTimings({ heartbeatMs: 200 })
+    await start(fx)
+
+    expect(await waitUntil(() => fx.ingest.ofType('heartbeat').length >= 3, 4000)).toBe(true)
+    expect(fx.ingest.ofType('heartbeat')[0]?.payload).toEqual({})
+  }, 20_000)
+
+  test('StopFailure fails the turn with a SessionFailureReason value', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'please FAIL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.ofType('turn_failed')[0]?.payload).toEqual({
+      reason: 'rate_limit',
+      detail: 'StopFailure rate_limit: 429 Too Many Requests',
+    })
+  }, 20_000)
+
+  test('a pane that dies on its own reports session_ended crashed and process_died, then the daemon goes idle', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    Bun.spawnSync(['tmux', '-L', SOCKET, 'kill-session', '-t', `=${fx.pane}`])
+
+    expect(await waitUntil(() => fx.ingest.ofType('process_died').length === 1)).toBe(true)
+    const types = fx.ingest.types()
+    expect(types.slice(-2)).toEqual(['session_ended', 'process_died'])
+    expect(fx.ingest.ofType('session_ended')[0]?.payload).toEqual({ reason: 'crashed' })
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+  }, 20_000)
+
+  test('a 409 stale_gen stops pushing, closes the pane and idles the daemon', async () => {
+    const fx = await fixture()
+    await start(fx)
+    expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+
+    fx.ingest.staleGen = true
+    await prompt(fx, 'hello')
+
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+    expect((await fx.daemon.ctl('status', { pane: fx.pane })).code).toBe('pane_not_running')
+  }, 20_000)
+})
+
+describe('delivery guard and turn end', () => {
+  test('refuses a prompt while a turn runs, and the watchdog closes a turn whose Stop never came', async () => {
+    const fx = await fixture()
+    fx.daemon.setTimings({ watchdogQuietMs: 600 })
+    await start(fx)
+
+    expect((await prompt(fx, 'HANG please')).ok).toBe(true)
+    expect(await status(fx)).toMatchObject({ busy: true })
+    expect(await prompt(fx, 'second')).toMatchObject({ ok: false, code: 'busy' })
+
+    expect(await turnClosed(fx)).toBe(true)
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toEqual({
+      stopReason: 'watchdog',
+      lastAssistantMessage: 'hanging',
+    })
+    expect(await status(fx)).toMatchObject({ busy: false })
+  }, 20_000)
+
+  test('rejects a prompt the sanitiser refuses and sends nothing', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    expect(await prompt(fx, '  /clear')).toEqual({
+      ok: false,
+      code: 'prompt_rejected',
+      data: {
+        rule: 'leading_slash',
+      },
+    })
+    expect(await prompt(fx, '!rm -rf .')).toMatchObject({ code: 'prompt_rejected', data: { rule: 'leading_bang' } })
+    expect(fx.ingest.ofType('turn_started')).toHaveLength(0)
+  }, 20_000)
+
+  test('cancel closes the turn on the transcript marker', async () => {
+    const fx = await fixture()
+    await start(fx)
+    await prompt(fx, 'SLOW work')
+    expect(await status(fx)).toMatchObject({ busy: true })
+
+    expect(await fx.daemon.ctl('cancel', { pane: fx.pane })).toEqual({
+      ok: true,
+      code: 'ok',
+      data: {
+        wasBusy: true,
+        detectedBy: 'transcript_marker',
+      },
+    })
+    expect(fx.ingest.ofType('turn_completed')[0]?.payload).toMatchObject({ stopReason: 'interrupted' })
+  }, 20_000)
+
+  test('cancel closes the turn on its timeout when the Esc left no marker, and is a no-op when idle', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    expect(await fx.daemon.ctl('cancel', { pane: fx.pane })).toEqual({
+      ok: true,
+      code: 'ok',
+      data: {
+        wasBusy: false,
+      },
+    })
+
+    await prompt(fx, 'MUTE work')
+    expect(await fx.daemon.ctl('cancel', { pane: fx.pane })).toMatchObject({
+      ok: true,
+      data: {
+        wasBusy: true,
+        detectedBy: 'timeout',
+      },
+    })
+    expect(await turnClosed(fx)).toBe(true)
+    expect(await status(fx)).toMatchObject({ busy: false })
+  }, 20_000)
+
+  test('command types an allowlisted slash command and refuses bad flags', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    expect(await fx.daemon.ctl('command', { pane: fx.pane, name: 'compact' })).toEqual({
+      ok: true,
+      code: 'ok',
+      data: {
+        name: 'compact',
+      },
+    })
+    expect(await fx.daemon.ctl('command', { pane: fx.pane, name: 'model', arg: 'opus' })).toMatchObject({
+      ok: true,
+      data: {
+        name: 'model',
+        arg: 'opus',
+      },
+    })
+    expect(await waitUntil(async () => (await readOrEmpty(join(fx.dir, 'commands.log'))).includes('/model'))).toBe(true)
+    expect(await readOrEmpty(join(fx.dir, 'commands.log'))).toBe('/compact\n/model opus\n')
+
+    const refused: Array<Record<string, string>> = [
+      { name: 'model' },
+      { name: 'clear', arg: 'x' },
+      { name: 'exit' },
+      { name: 'model', arg: 'op us' },
+    ]
+    for (const args of refused) {
+      expect(await fx.daemon.ctl('command', { pane: fx.pane, ...args })).toMatchObject({ code: 'usage_error' })
+    }
+    expect(await fx.daemon.ctl('command', { pane: 'nobody', name: 'compact' })).toMatchObject({
+      code: 'pane_not_running',
+    })
+  }, 20_000)
+})
+
+describe('permissions', () => {
+  test('an operator allow reaches the hook as allow, correlated to the tool call of the PreToolUse', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    await prompt(fx, 'run the TOOL')
+    expect(await waitUntil(() => fx.ingest.polls >= 2)).toBe(true)
+    expect(await status(fx)).toMatchObject({ dialogOpen: true })
+    expect(await prompt(fx, 'sneaky')).toMatchObject({ ok: false, code: 'dialog_open' })
+
+    fx.ingest.answer = { status: 'allowed', optionId: 'allow' }
+    expect(await turnClosed(fx)).toBe(true)
+
+    const [decision] = (await readOrEmpty(join(fx.dir, 'decisions.log'))).trim().split('\n')
+    expect(JSON.parse(JSON.parse(decision ?? '""'))).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: {
+          behavior: 'allow',
+        },
+      },
+    })
+    expect(fx.ingest.opened[0]).toEqual({
+      gen: 1,
+      toolCallId: 'toolu_STUB1',
+      title: 'Bash: touch stub.txt',
+      kind: 'execute',
+      rawInput: {
+        command: 'touch stub.txt',
+      },
+      options: [
+        {
+          optionId: 'allow',
+          kind: 'allow_once',
+        },
+        {
+          optionId: 'deny',
+          kind: 'reject_once',
+        },
+      ],
+    })
+    expect(fx.ingest.ofType('permission_request')[0]?.payload.toolCallId).toBe('toolu_STUB1')
+    expect(fx.ingest.ofType('tool_call_begin')[0]?.payload).toEqual({
+      toolCallId: 'toolu_STUB1',
+      name: 'Bash',
+      input: {
+        command: 'touch stub.txt',
+      },
+    })
+    expect(fx.ingest.ofType('tool_call_end')[0]?.payload).toEqual({
+      toolCallId: 'toolu_STUB1',
+      status: 'completed',
+      output: 'ran',
+    })
+    expect(await status(fx)).toMatchObject({ dialogOpen: false, busy: false })
+  }, 20_000)
+
+  test('an operator deny reaches the hook with its message and the unrun tool call ends failed', async () => {
+    const fx = await fixture()
+    fx.ingest.answer = { status: 'denied', optionId: 'deny', message: 'Denied by the operator.' }
+    await start(fx)
+
+    await prompt(fx, 'run the TOOL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    const [decision] = (await readOrEmpty(join(fx.dir, 'decisions.log'))).trim().split('\n')
+    expect(JSON.parse(JSON.parse(decision ?? '""')).hookSpecificOutput.decision).toEqual({
+      behavior: 'deny',
+      message: 'Denied by the operator.',
+    })
+    expect(fx.ingest.ofType('tool_call_end')[0]?.payload).toMatchObject({ toolCallId: 'toolu_STUB1', status: 'failed' })
+  }, 20_000)
+
+  test('an auto-approved request answers allow without polling', async () => {
+    const fx = await fixture()
+    fx.ingest.permissionMode = 'auto'
+    await start(fx)
+
+    await prompt(fx, 'run the TOOL')
+    expect(await turnClosed(fx)).toBe(true)
+
+    expect(fx.ingest.polls).toBe(0)
+    expect(await readOrEmpty(join(fx.dir, 'decisions.log'))).toContain('allow')
+  }, 20_000)
+
+  for (const mode of ['fail', 'hang'] as const) {
+    test(`a ${mode === 'fail' ? 'failed (500)' : 'timed-out'} open prints no decision and the dialog stays open`, async () => {
+      const fx = await fixture()
+      fx.ingest.permissionMode = mode
+      fx.daemon.setTimings({ ingestTimeoutMs: 300 })
+      await start(fx)
+
+      await prompt(fx, 'run the TOOL')
+      expect(await waitUntil(async () => (await readOrEmpty(join(fx.dir, 'decisions.log'))) !== '')).toBe(true)
+
+      // 1. The hook helper printed nothing: the dialog is left to a human.
+      expect(await readOrEmpty(join(fx.dir, 'decisions.log'))).toBe('""\n')
+      expect(fx.ingest.polls).toBe(0)
+
+      // 2. The guard still treats the dialog as open: a pasted Enter would answer it.
+      expect(await status(fx)).toMatchObject({ dialogOpen: true })
+      expect(await prompt(fx, 'sneaky')).toMatchObject({ ok: false, code: 'dialog_open' })
+
+      // 3. Esc closes a dialog without a hook, so cancel clears the state itself.
+      expect((await fx.daemon.ctl('cancel', { pane: fx.pane })).ok).toBe(true)
+      expect(await status(fx)).toMatchObject({ dialogOpen: false, busy: false })
+    }, 20_000)
+  }
+})
+
+describe('rotate-token', () => {
+  test('swaps the bearer for the next push and deletes the file', async () => {
+    const fx = await fixture()
+    await start(fx)
+    expect(await waitUntil(() => fx.ingest.events.length >= 1)).toBe(true)
+
+    const fresh = token(1)
+    const path = await writeSecretFile(join(fx.dir, 'token'), `${fresh}\n`)
+    expect(await fx.daemon.ctl('rotate-token', { pane: fx.pane, 'token-file': path })).toEqual({
+      ok: true,
+      code: 'ok',
+      data: {
+        gen: 1,
+      },
+    })
+    expect(await Bun.file(path).exists()).toBe(false)
+
+    await prompt(fx, 'after rotation')
+    expect(await turnClosed(fx)).toBe(true)
+    expect(fx.ingest.bearers.at(-1)).toBe(`Bearer ${fresh}`)
+  }, 20_000)
+
+  test('refuses a token of another gen and a file that is not 0600', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    const otherGen = await writeSecretFile(join(fx.dir, 'gen2'), token(2))
+    const loose = await writeSecretFile(join(fx.dir, 'loose'), token(1), 0o644)
+
+    expect(await fx.daemon.ctl('rotate-token', { pane: fx.pane, 'token-file': otherGen })).toMatchObject({
+      ok: false,
+      code: 'usage_error',
+    })
+    expect(await fx.daemon.ctl('rotate-token', { pane: fx.pane, 'token-file': loose })).toMatchObject({
+      ok: false,
+      code: 'usage_error',
+    })
+  }, 20_000)
+})
+
+describe('stop', () => {
+  test('kills the pane, emits session_ended stopped last and idles the daemon', async () => {
+    const fx = await fixture()
+    const started = await start(fx)
+
+    expect(await fx.daemon.ctl('stop', { pane: fx.pane })).toEqual({
+      ok: true,
+      code: 'ok',
+      data: {
+        claudeSessionId: started.data?.claudeSessionId,
+      },
+    })
+
+    expect(fx.ingest.events.at(-1)).toMatchObject({ type: 'session_ended', payload: { reason: 'stopped' } })
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+    expect(await waitUntil(() => fx.idle.count === 1)).toBe(true)
+    await Bun.sleep(300)
+    expect(fx.ingest.ofType('process_died')).toHaveLength(0)
+  }, 20_000)
+})
+
+describe('tmuxd command line', () => {
+  function cli(args: string[], env: Record<string, string> = {}) {
+    return Bun.spawnSync([process.execPath, ENTRY, 'tmuxd', ...args], {
+      env: {
+        ...process.env,
+        ...env,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+  }
+
+  test('--help names ctl, and an unknown verb is a usage_error line with exit 2', () => {
+    expect(cli(['--help']).stdout.toString()).toContain('ctl')
+
+    const result = cli(['ctl', 'explode'])
+    expect(result.exitCode).toBe(2)
+    expect(result.stdout.toString()).toBe('{"ok":false,"code":"usage_error"}\n')
+  })
+
+  test('a ctl verb against no daemon reports pane_not_running', () => {
+    const result = cli(['ctl', 'status', '--pane', 'x'], { KODIZM_TMUXD_SOCKET: join(root, 'none.sock') })
+
+    expect(result.exitCode).toBe(4)
+    expect(JSON.parse(result.stdout.toString())).toEqual({
+      ok: false,
+      code: 'pane_not_running',
+      data: {
+        pane: 'x',
+        running: false,
+      },
+    })
+  })
+
+  test('ctl start spawns the detached daemon, ctl stop ends it, and stdout carries one JSON line each', async () => {
+    const fx = await fixture()
+    const socketPath = join(fx.dir, 'cli.sock')
+    const env = {
+      KODIZM_TMUXD_SOCKET: socketPath,
+      KODIZM_TMUXD_TMUX_SOCKET: SOCKET,
+      KODIZM_LIVE_BASE_SETTINGS: fx.baseSettings,
+      CLAUDE_CODE_PATH: fx.stub,
+      HOME: fx.home,
+    }
+    const envPath = await writeSecretFile(join(fx.dir, 'cli.env'), envFile(fx))
+    const pane = `${fx.pane}-cli`
+
+    const started = cli(
+      ['ctl', 'start', '--pane', pane, '--cwd', fx.cwd, '--settings-base', fx.settingsBase, '--env-file', envPath],
+      env,
+    )
+    const lines = started.stdout.toString().split('\n')
+    expect(lines).toHaveLength(2)
+    expect(JSON.parse(lines[0] ?? '')).toMatchObject({ ok: true, code: 'ok', data: { pane, gen: 1 } })
+    expect(started.exitCode).toBe(0)
+
+    const running = cli(['ctl', 'status', '--pane', pane], env)
+    expect(JSON.parse(running.stdout.toString())).toMatchObject({ ok: true, data: { running: true, busy: false } })
+
+    const stopped = cli(['ctl', 'stop', '--pane', pane], env)
+    expect(stopped.exitCode).toBe(0)
+    expect(await waitUntil(async () => !(await Bun.file(socketPath).exists()))).toBe(true)
+  }, 30_000)
+})

@@ -416,5 +416,10 @@ export async function main(): Promise<void> {
 // 1. Top-level execution guard: only run main when invoked as the bin,
 //    not when imported by tests.
 if (import.meta.main) {
+  // `tmuxd` drives Live panes; it is not an ACP server and never reaches main().
+  if (process.argv[2] === 'tmuxd') {
+    const { runTmuxd } = await import('./live/ctl.ts')
+    process.exit(await runTmuxd(process.argv.slice(3)))
+  }
   await main()
 }
