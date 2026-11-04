@@ -115,6 +115,23 @@ describe('buildPaneSettings', () => {
     }
   })
 
+  test('keeps autoContinueAtUsageLimit off, also when the base file turns it on', async () => {
+    const options = {
+      helperArgv: ['bun'],
+      socketPath: '/s',
+      paneId: 'p',
+    }
+
+    const bare = await buildPaneSettings({ ...options, basePath: await baseFile({}) })
+    const forced = await buildPaneSettings({
+      ...options,
+      basePath: await baseFile({ autoContinueAtUsageLimit: true }),
+    })
+
+    expect(bare.autoContinueAtUsageLimit).toBe(false)
+    expect(forced.autoContinueAtUsageLimit).toBe(false)
+  })
+
   test('outlives the default permission row expiry of 30 minutes', () => {
     expect(PERMISSION_HOOK_TIMEOUT_S).toBeGreaterThan(30 * 60)
   })

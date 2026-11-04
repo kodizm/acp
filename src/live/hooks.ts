@@ -126,6 +126,8 @@ export async function buildPaneSettings(options: PaneSettingsOptions): Promise<R
   const settings: Record<string, unknown> = {
     ...base,
     disableAllHooks: false,
+    // CLI 2.1.318 defaults this on when flagSettings lacks the key; an unattended pane would sleep at a usage limit.
+    autoContinueAtUsageLimit: false,
     hooks,
   }
   if (options.rules !== undefined) {
