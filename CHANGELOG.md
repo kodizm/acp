@@ -2,6 +2,26 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-04
+
+### Added
+
+- **`kodizm-acp tmuxd`**: the Live session runtime. It keeps the real
+  interactive Claude Code CLI in a tmux pane inside the project container and
+  streams its hook and transcript events to Kodizm over a signed HTTP ingest,
+  instead of running a turn through the SDK. `tmuxd ctl <verb>` (start,
+  prompt, command, cancel, stop, rotate-token, status) is the command surface
+  for Laravel, `tmuxd hook <Event>` is the helper the per-pane settings file
+  runs, and `tmuxd daemon` owns the panes. The ACP server and both backends
+  are unchanged; `tmuxd` has its own entry point and writes one JSON line to
+  stdout.
+- Prompt text is sanitised (control bytes stripped, a first `!` or `/`
+  refused) and delivered by paste; slash commands go through a separate
+  allowlist. Events are redacted before they leave the container, and a
+  PermissionRequest hook answers only on an explicit decision.
+- The paste flags follow the installed tmux: `paste-buffer -S` exists only from
+  tmux 3.7, so older tmux (Debian 13 ships 3.5a) gets the call without it.
+
 ## [0.7.0] - 2026-11-03
 
 Entries for 0.5.5 to 0.6.9 were not kept in this file; `git log v0.5.4..v0.6.9` has them.
