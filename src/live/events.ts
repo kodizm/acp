@@ -164,10 +164,22 @@ export function turnFailed(hook: Payload): EventDraft {
   const error = text(hook.error) ?? 'unknown'
   const details = text(hook.error_details)
 
+  return turnFailedWith(
+    failureReason(error),
+    details === undefined ? `StopFailure ${error}` : `StopFailure ${error}: ${details}`.slice(0, TITLE_MAX * 2),
+  )
+}
+
+export function turnFailedWith(reason: string, detail: string): EventDraft {
   return draft('turn_failed', {
-    reason: FAILURE_REASONS[error] ?? 'api_error',
-    detail: details === undefined ? `StopFailure ${error}` : `StopFailure ${error}: ${details}`.slice(0, TITLE_MAX * 2),
+    reason,
+    detail,
   })
+}
+
+/** The SessionFailureReason a CLI error name maps to; a name the table does not know is an API-side failure. */
+export function failureReason(error: string): string {
+  return FAILURE_REASONS[error] ?? 'api_error'
 }
 
 export function sessionEnded(reason: SessionEndReason): EventDraft {

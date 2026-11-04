@@ -10,6 +10,7 @@ import {
   UsageLedger,
   assistantBlocks,
   assistantStopReason,
+  classifyApiError,
   classifyInterrupt,
   isMainChain,
 } from '@/live/transcript.ts'
@@ -71,6 +72,30 @@ function path(): string {
 
 function line(record: unknown): string {
   return `${JSON.stringify(record)}\n`
+}
+
+function apiError(error: string, status: number, text: string, overrides: Record<string, unknown> = {}) {
+  return {
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error,
+    apiErrorStatus: status,
+    isSidechain: false,
+    timestamp: '2026-11-04T02:06:11.000Z',
+    message: {
+      model: '<synthetic>',
+      stop_reason: 'stop_sequence',
+      content: [{ type: 'text', text }],
+    },
+    ...overrides,
+  }
+}
+
+// Every classification the fixture's records yield, read through the same parser the daemon uses.
+async function classifyFixture(name: string) {
+  const records = await new TranscriptTail(join(import.meta.dir, 'fixtures', 'transcripts', name)).poll()
+
+  return records.map(classifyApiError).filter((found) => found !== null)
 }
 
 beforeAll(async () => {
@@ -189,6 +214,85 @@ describe('classifyInterrupt', () => {
     expect(classifyInterrupt(twoBlocks)).toBeNull()
     expect(classifyInterrupt(noTimestamp)).toBeNull()
     expect(classifyInterrupt(assistant('msg_1', { type: 'text', text: INTERRUPT_MARKER }))).toBeNull()
+  })
+})
+
+describe('classifyApiError', () => {
+  test('reads a session limit with a reset time as usage_limit', async () => {
+    expect(await classifyFixture('usage-limit.jsonl')).toEqual([
+      {
+        reason: 'usage_limit',
+        detail: "API error 429: You've hit your session limit · resets 3pm",
+      },
+    ])
+  })
+
+  test('keeps the server throttle that denies being a usage limit as rate_limit', async () => {
+    const found = await classifyFixture('rate-limit-429.jsonl')
+
+    expect(found.map((item) => item.reason)).toEqual(['rate_limit'])
+    expect(found[0]?.detail).toStartWith('API error 429: ')
+  })
+
+  test('reads authentication_failed with status 401 as auth_error', async () => {
+    const found = await classifyFixture('auth-401.jsonl')
+
+    expect(found.map((item) => item.reason)).toEqual(['auth_error'])
+    expect(found[0]?.detail).toStartWith('API error 401: ')
+  })
+
+  test('needs isApiErrorMessage: limit text in an ordinary assistant record is not an error', () => {
+    const record = apiError('rate_limit', 429, "You've hit your session limit · resets 3pm", {
+      isApiErrorMessage: false,
+    })
+
+    expect(classifyApiError(record)).toBeNull()
+  })
+
+  test('ignores a sidechain record and a non-assistant record', () => {
+    const text = "You've hit your session limit · resets 3pm"
+
+    expect(classifyApiError(apiError('rate_limit', 429, text, { isSidechain: true }))).toBeNull()
+    expect(classifyApiError({ ...apiError('rate_limit', 429, text), type: 'user' })).toBeNull()
+  })
+
+  test('keeps rate_limit when the text says resets but names no limit', () => {
+    const record = apiError('rate_limit', 429, 'Too many requests, the window resets in 20 seconds')
+
+    expect(classifyApiError(record)?.reason).toBe('rate_limit')
+  })
+
+  test('keeps rate_limit when the text names a limit but no reset', () => {
+    const record = apiError('rate_limit', 429, "You've hit your weekly limit")
+
+    expect(classifyApiError(record)?.reason).toBe('rate_limit')
+  })
+
+  test('accepts a weekly limit and the hit-your phrasing', () => {
+    expect(classifyApiError(apiError('rate_limit', 429, 'Weekly limit reached · resets Mon 9am'))?.reason).toBe(
+      'usage_limit',
+    )
+    expect(classifyApiError(apiError('rate_limit', 429, "You've hit your Opus limit · resets 3pm"))?.reason).toBe(
+      'usage_limit',
+    )
+  })
+
+  test('only a rate_limit error can become usage_limit', () => {
+    const record = apiError('server_error', 500, "You've hit your session limit · resets 3pm")
+
+    expect(classifyApiError(record)?.reason).toBe('api_error')
+  })
+
+  test('falls back to the status when the error name is unknown, then to api_error', () => {
+    expect(classifyApiError(apiError('unknown', 429, 'slow down'))?.reason).toBe('rate_limit')
+    expect(classifyApiError(apiError('unknown', 401, 'who are you'))?.reason).toBe('auth_error')
+    expect(classifyApiError(apiError('unknown', 529, 'overloaded'))?.reason).toBe('api_error')
+  })
+
+  test('cuts the detail text at 200 characters', () => {
+    const found = classifyApiError(apiError('server_error', 500, 'x'.repeat(500)))
+
+    expect(found?.detail).toBe(`API error 500: ${'x'.repeat(200)}`)
   })
 })
 

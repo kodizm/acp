@@ -11,6 +11,8 @@
 
 import { stat } from 'node:fs/promises'
 
+import { failureReason } from './events.ts'
+
 export const INTERRUPT_MARKER = '[Request interrupted by user]'
 export const INTERRUPT_TOOL_MARKER = '[Request interrupted by user for tool use]'
 
@@ -31,7 +33,24 @@ export interface AssistantBlock {
   text: string
 }
 
+export interface ApiErrorClass {
+  reason: string
+  detail: string
+}
+
 const NEWLINE = 0x0a
+
+// A plan limit names itself and says when it lifts. The server throttle's own text can say "not your usage limit", so
+// the phrase alone never decides: the reset time has to be there too.
+const USAGE_LIMIT_TEXT = /\b(usage|session|weekly) limit\b|\bhit your\b[^.\n]*\blimit\b/i
+const LIMIT_RESETS = /resets?/i
+
+const STATUS_REASONS: Readonly<Record<number, string>> = {
+  429: 'rate_limit',
+  401: 'auth_error',
+}
+
+const API_ERROR_DETAIL_MAX = 200
 
 export class TranscriptTail {
   public readonly path: string
@@ -134,6 +153,44 @@ export function classifyInterrupt(record: TranscriptRecord): InterruptKind | nul
   }
 
   return null
+}
+
+/**
+ * Why a main-chain API error record failed the turn, null for any other record.
+ *
+ * The CLI writes the error as a synthetic assistant record flagged `isApiErrorMessage`. A plan usage limit and a plain
+ * 429 both arrive as `error: rate_limit`; only the text tells them apart, so `usage_limit` needs the rate_limit error,
+ * a limit phrase and a reset time. A name the lifecycle table does not know falls back to the HTTP status.
+ */
+export function classifyApiError(record: TranscriptRecord): ApiErrorClass | null {
+  if (record.type !== 'assistant' || !isMainChain(record) || record.isApiErrorMessage !== true) {
+    return null
+  }
+
+  const error = typeof record.error === 'string' ? record.error : 'unknown'
+  const status = typeof record.apiErrorStatus === 'number' ? record.apiErrorStatus : null
+  const message = assistantBlocks(record)
+    .filter((block) => block.kind === 'text')
+    .map((block) => block.text)
+    .join('\n')
+
+  return {
+    reason: apiErrorReason(error, status, message),
+    detail: `API error ${status ?? error}: ${message.slice(0, API_ERROR_DETAIL_MAX)}`,
+  }
+}
+
+function apiErrorReason(error: string, status: number | null, message: string): string {
+  if (error === 'rate_limit' && USAGE_LIMIT_TEXT.test(message) && LIMIT_RESETS.test(message)) {
+    return 'usage_limit'
+  }
+
+  const reason = failureReason(error)
+  if (reason !== 'api_error' || status === null) {
+    return reason
+  }
+
+  return STATUS_REASONS[status] ?? reason
 }
 
 /**
