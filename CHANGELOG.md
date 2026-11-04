@@ -13,10 +13,14 @@ All notable changes to `@kodizm/acp` are documented here. The format follows [Ke
   (read from `package.json`). The hand-off files are cleaned up after a refused
   or failed start. A `dontAsk` pane denies without calling the ingest. First-run
   seeding is part of the start.
-- **Unattended pane lifecycle.** A `--one-shot` pane closes once its
-  `turn_completed` is delivered. `--deadline-seconds` fails a turn that runs past it with reason
-  `deadline`. `--retain-failed-seconds` keeps a failed pane for inspection
-  instead of closing it. A pane started without these flags behaves as 0.8.2.
+- **Unattended pane lifecycle.** A `--one-shot` pane closes once its turn
+  event (`turn_completed` or `turn_failed`) was delivered.
+  `--retain-failed-seconds n` delays the close of a failed pane by n seconds
+  (default 0) and makes a pane without `--one-shot` close after a failed turn;
+  while retained the pane takes no prompt (`busy`), sends no heartbeat and
+  ignores an ingest 410. `--deadline-seconds` fails a turn that runs past it
+  with reason `deadline` and interrupts the pane. A pane started without these
+  flags behaves as 0.8.2.
 - **`usage_limit` is told apart from `rate_limit`.** The transcript API error
   is classified as `usage_limit` only when the entry is an API error message
   with the `rate_limit` error and a limit-resets text; every other 429 stays
@@ -34,8 +38,12 @@ All notable changes to `@kodizm/acp` are documented here. The format follows [Ke
 - The permission RPC helpers (`AcpServerLike`, `EmitLike`, `DEFERRED_SENTINEL`,
   `awaitPermissionResponse`) moved to `src/backends/permission-rpc.ts`, shared
   by both backends. No behaviour change.
-- A transcript API error now ends the turn as `turn_failed` instead of
-  `turn_completed` with stopReason `watchdog`.
+- A turn the CLI ends on a transcript API error is now reported as
+  `turn_failed` with the classified reason (`usage_limit`, `rate_limit`,
+  `auth_error` or `api_error`) instead of `turn_completed`, whether the Stop
+  hook or the watchdog closes it. A usage limit fails the turn at once; a later
+  assistant or user record in the same turn means the CLI recovered and clears
+  the error.
 
 ### Fixed
 
