@@ -277,6 +277,25 @@ describe('classifyApiError', () => {
     )
   })
 
+  test('needs resets as a word: a word that only contains it is no reset time', () => {
+    const record = apiError('rate_limit', 429, "You've hit your session limit · see the presets")
+
+    expect(classifyApiError(record)?.reason).toBe('rate_limit')
+  })
+
+  test('keeps the throttle that denies being a usage limit as rate_limit, a reset time included', () => {
+    const record = apiError(
+      'rate_limit',
+      429,
+      'API Error: Server is temporarily limiting requests (not your usage limit) · resets in 20 seconds',
+    )
+
+    expect(classifyApiError(record)?.reason).toBe('rate_limit')
+    expect(classifyApiError(apiError('rate_limit', 429, 'Not your limit, the window resets soon'))?.reason).toBe(
+      'rate_limit',
+    )
+  })
+
   test('only a rate_limit error can become usage_limit', () => {
     const record = apiError('server_error', 500, "You've hit your session limit · resets 3pm")
 

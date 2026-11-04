@@ -25,6 +25,7 @@ import { type Logger, createLogger } from '../util/logger.ts'
 import {
   type EventDraft,
   type LiveEvent,
+  type LiveEventType,
   type Payload,
   type PermissionOpenRequest,
   type SessionEndReason,
@@ -188,6 +189,8 @@ export interface DaemonTimings {
   secondMs: number
   /** How long a pane with no turn, dialog or compaction may sit without activity before it ends; 0 is off. */
   idleTimeoutMs: number
+  /** How long a pane that is about to end waits for its turn event to reach the ingest before it ends anyway. */
+  deliveryDrainMs: number
 }
 
 const DEFAULT_TIMINGS: DaemonTimings = {
@@ -203,6 +206,7 @@ const DEFAULT_TIMINGS: DaemonTimings = {
   retryMaxMs: 10_000,
   secondMs: 1_000,
   idleTimeoutMs: 0,
+  deliveryDrainMs: 120_000,
 }
 
 export interface LiveDaemonOptions {
@@ -516,7 +520,13 @@ class LivePane {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined
   private retentionTimer: ReturnType<typeof setTimeout> | undefined
+  private interruptTimer: ReturnType<typeof setTimeout> | undefined
+  /** The Esc a deadline pressed, until it was sent and its marker read, or the cancel timeout passed. */
+  private interrupt: { sent: boolean; marked: boolean } | undefined
   private isRetaining = false
+  /** Set in the tick afterTurn decides the pane ends; retention is one way to end. */
+  private ending = false
+  private teardown: Promise<void> | undefined
   private monitoring = false
   private closed = false
 
@@ -560,9 +570,12 @@ class LivePane {
     return this.turn !== undefined || this.compacting
   }
 
-  /** True while a failed pane waits out `--retain-failed-seconds` before it ends; it takes no input then. */
-  public get retaining(): boolean {
-    return this.isRetaining
+  /**
+   * True while the pane takes no input although no turn runs: it is about to end (a retained failed pane included),
+   * or the Esc of a deadline has not landed yet.
+   */
+  public get refusesInput(): boolean {
+    return this.ending || this.interrupt !== undefined
   }
 
   /** Start the transcript tail, the liveness monitor and the heartbeat once the pane runs. */
@@ -656,6 +669,8 @@ class LivePane {
     this.turn = undefined
     clearTimeout(this.deadlineTimer)
     this.deadlineTimer = undefined
+    // The idle clock counts from the end of the turn, not from its last transcript record.
+    this.lastActivityAt = Date.now()
     this.lastCloseCause = cause
     this.turnClosed.fire()
     this.afterTurn(draft.type)
@@ -671,13 +686,12 @@ class LivePane {
     return turnCompleted('interrupted', this.lastAssistantText ?? '')
   }
 
-  /** Kill the pane and report the end with `reason`. */
-  public async stop(reason: SessionEndReason = 'stopped'): Promise<void> {
-    this.close()
-    await killPane(this.pane)
-    this.queue.push(sessionEnded(reason))
-    await this.queue.drain(STOP_DRAIN_MS)
-    this.queue.stop()
+  /**
+   * Kill the pane and report the end with `reason`. A kill that fails is thrown and nothing is reported. A teardown
+   * already under way is awaited instead.
+   */
+  public stop(reason: SessionEndReason = 'stopped'): Promise<void> {
+    return this.tearDown(() => this.finish(reason, () => killPane(this.pane)))
   }
 
   /** Tear down without reporting: the daemon itself is shutting down. */
@@ -696,21 +710,44 @@ class LivePane {
     clearInterval(this.heartbeatTimer)
     clearTimeout(this.deadlineTimer)
     clearTimeout(this.retentionTimer)
+    clearTimeout(this.interruptTimer)
     this.clearDialog()
     this.removeMcpConfig()
+  }
+
+  // Stop, the daemon's own end, a stale stream and a death run once: a second caller gets the first one's promise.
+  private tearDown(run: () => Promise<void>): Promise<void> {
+    this.teardown ??= run()
+
+    return this.teardown
+  }
+
+  // close() runs before the first await, so no hook, tick or prompt finds the pane open once a teardown began.
+  private async finish(reason: SessionEndReason, kill: () => Promise<void>): Promise<void> {
+    try {
+      this.close()
+      await kill()
+      this.queue.push(sessionEnded(reason))
+      await this.queue.drain(STOP_DRAIN_MS)
+      this.queue.stop()
+    } finally {
+      this.daemon.remove(this)
+    }
   }
 
   /**
    * End an unattended pane after its turn: a one-shot pane after any turn, a failed turn when the pane is one-shot or
    * retains failures. A pane started without these flags never ends here, a failed turn included.
    */
-  private afterTurn(type: string): void {
-    if (this.closed || this.isRetaining) {
+  private afterTurn(type: LiveEventType): void {
+    if (this.closed || this.ending) {
       return
     }
 
+    // From the tick the end is decided the pane takes no prompt, while its turn event is still on the way.
     const { oneShot, retainFailedSeconds } = this.extras
     if (type === 'turn_completed' && oneShot) {
+      this.ending = true
       void this.guard('end', () => this.endAfterDelivery(0))
 
       return
@@ -719,7 +756,8 @@ class LivePane {
       return
     }
 
-    // Retention starts in this tick: no prompt, heartbeat or stale stream may reach the pane from here on.
+    // Retention starts in this tick too: no heartbeat or stale stream may reach the pane from here on.
+    this.ending = true
     if (retainFailedSeconds > 0) {
       this.isRetaining = true
       clearInterval(this.heartbeatTimer)
@@ -728,12 +766,12 @@ class LivePane {
   }
 
   /**
-   * Stop the pane once the turn event was acknowledged and `delayMs` passed, unless another end came first: a stale
-   * stream, a death, a ctl stop or the daemon's shutdown. close() clears the delay timer, which leaves this one
-   * waiting on a promise nobody resolves; nothing else holds it.
+   * Stop the pane once the turn event was acknowledged (or `deliveryDrainMs` passed) and `delayMs` passed, unless
+   * another end came first: a stale stream, a death, a ctl stop or the daemon's shutdown. close() clears the delay
+   * timer, which leaves this one waiting on a promise nobody resolves; nothing else holds it.
    */
   private async endAfterDelivery(delayMs: number): Promise<void> {
-    await this.queue.drain(STOP_DRAIN_MS)
+    await this.queue.drain(this.daemon.timings.deliveryDrainMs)
     if (this.closed) {
       return
     }
@@ -749,24 +787,35 @@ class LivePane {
     await this.end('stopped')
   }
 
-  /** The pane leaves by its own decision: killed, reported with `reason`, and out of the registry even if the kill fails. */
-  private async end(reason: SessionEndReason): Promise<void> {
-    try {
-      await this.stop(reason)
-    } finally {
-      this.daemon.remove(this)
-    }
+  /**
+   * The pane leaves by its own decision and nobody awaits the answer: a kill that fails is logged, and the end is
+   * reported and the pane leaves the registry all the same.
+   */
+  private end(reason: SessionEndReason): Promise<void> {
+    return this.tearDown(() => this.finish(reason, () => this.killLogged()))
   }
 
-  /** The turn ran out of time: it fails first, so the interrupt marker the Esc may write finds no open turn. */
+  /**
+   * The turn ran out of time: it fails first, so the interrupt marker the Esc may write finds no open turn. Until the
+   * Esc was sent and its marker read, or the cancel timeout passed, the pane takes no prompt: a marker read later
+   * would close the next turn.
+   */
   private async onDeadline(promptId: string, seconds: number): Promise<void> {
     if (this.closed || this.turn?.promptId !== promptId) {
       return
     }
 
     this.closeTurn(turnFailedWith('deadline', `The turn ran longer than ${seconds} seconds.`), 'deadline')
+    const interrupt = {
+      sent: false,
+      marked: false,
+    }
+    this.interrupt = interrupt
+    this.interruptTimer = setTimeout(() => this.endInterrupt(), this.daemon.timings.cancelTimeoutMs)
     try {
       await cancelPane(this.pane)
+      interrupt.sent = true
+      this.settleInterrupt()
     } catch (error) {
       if (!(error instanceof PaneError)) {
         throw error
@@ -776,6 +825,18 @@ class LivePane {
         reason: error.reason,
       })
     }
+  }
+
+  private settleInterrupt(): void {
+    if (this.interrupt?.sent === true && this.interrupt.marked) {
+      this.endInterrupt()
+    }
+  }
+
+  private endInterrupt(): void {
+    clearTimeout(this.interruptTimer)
+    this.interruptTimer = undefined
+    this.interrupt = undefined
   }
 
   // The config holds the MCP bearer token. A failed removal is logged and the rest of the teardown still runs.
@@ -795,18 +856,19 @@ class LivePane {
   }
 
   // The Laravel side reads this file after the pane is gone, so it is never removed. It is written redacted, like
-  // the event, and renamed into place so a reader never sees half a message.
+  // the event, to a fresh staging file and renamed into place so a reader never sees half a message.
   private persistLastAssistantMessage(message: string): void {
     const path = join(this.paneDir, LAST_MESSAGE_FILE)
-    const temp = `${path}.tmp`
+    const temp = `${path}.${randomUUID()}.tmp`
 
     try {
-      writeFileSync(temp, redactDeep(message, this.secrets), { mode: 0o600 })
+      writeFileSync(temp, redactDeep(message, this.secrets), { mode: 0o600, flag: 'wx' })
       renameSync(temp, path)
     } catch (error) {
       if (!isErrno(error)) {
         throw error
       }
+      rmSync(temp, { force: true })
       this.daemon.logger.error('tmuxd could not persist the last assistant message', {
         pane: this.id,
         code: error.code,
@@ -1149,9 +1211,15 @@ class LivePane {
       }
       this.lastActivityAt = Date.now()
 
-      // 1. Esc fires no hook: the marker is the only sign, and it also closes a dialog Esc dismissed.
+      // 1. Esc fires no hook: the marker is the only sign, and it also closes a dialog Esc dismissed. The marker of
+      // a deadline's Esc closes nothing: that turn has already failed.
       if (classifyInterrupt(record) !== null) {
-        this.closeTurn(this.interruptedTurn(), 'marker')
+        if (this.interrupt === undefined) {
+          this.closeTurn(this.interruptedTurn(), 'marker')
+        } else {
+          this.interrupt.marked = true
+          this.settleInterrupt()
+        }
         this.clearDialog()
         continue
       }
@@ -1178,12 +1246,13 @@ class LivePane {
       }
 
       // 4. A later record in the turn means the CLI retried and recovered; a usage limit is final, no hook is promised.
+      // A meta user record is the CLI's own note, not a sign of recovery.
       if (failure !== null) {
         this.apiError = failure
         if (failure.reason === 'usage_limit') {
           this.closeTurn(turnFailedWith(failure.reason, failure.detail), 'api_error')
         }
-      } else if (record.type === 'assistant' || record.type === 'user') {
+      } else if (record.type === 'assistant' || (record.type === 'user' && record.isMeta !== true)) {
         this.apiError = undefined
       }
     }
@@ -1196,7 +1265,12 @@ class LivePane {
     this.monitoring = true
 
     try {
-      if (!(await this.alive())) {
+      // A teardown that began while the probe ran owns the pane: no death, watchdog or idle end on top of it.
+      const alive = await this.alive()
+      if (this.closed) {
+        return
+      }
+      if (!alive) {
         await this.onDeath()
 
         return
@@ -1244,32 +1318,40 @@ class LivePane {
     if (this.closed) {
       return
     }
-    const turnRunning = this.turn !== undefined
-    this.close()
 
-    // An exit the CLI reported (/exit, logout) is an ordinary end; a silent one is a crash.
-    if (this.sessionEndReason !== undefined) {
-      this.queue.push(sessionEnded('stopped'))
-    } else {
-      this.queue.push(sessionEnded('crashed'))
-      this.queue.push(processDied())
-      if (turnRunning) {
-        this.queue.push(sessionFailed('process_died', 'claude exited while a turn was running.'))
+    await this.tearDown(async () => {
+      const turnRunning = this.turn !== undefined
+      this.close()
+
+      // An exit the CLI reported (/exit, logout) is an ordinary end; a silent one is a crash.
+      if (this.sessionEndReason !== undefined) {
+        this.queue.push(sessionEnded('stopped'))
+      } else {
+        this.queue.push(sessionEnded('crashed'))
+        this.queue.push(processDied())
+        if (turnRunning) {
+          this.queue.push(sessionFailed('process_died', 'claude exited while a turn was running.'))
+        }
       }
-    }
 
-    await this.queue.drain(STOP_DRAIN_MS)
-    this.queue.stop()
-    this.daemon.remove(this)
+      await this.queue.drain(STOP_DRAIN_MS)
+      this.queue.stop()
+      this.daemon.remove(this)
+    })
   }
 
+  // The stream is over, so nothing is reported. A closed pane already has its teardown, which a failed ctl stop
+  // may have rejected: that answer went to the stop's caller and is not raised again here.
   private async abandon(): Promise<void> {
     if (this.closed) {
       return
     }
-    this.close()
-    await this.killLogged()
-    this.daemon.remove(this)
+
+    await this.tearDown(async () => {
+      this.close()
+      await this.killLogged()
+      this.daemon.remove(this)
+    })
   }
 
   // Teardown paths nobody awaits: a pane that survives the kill is logged, the rest of the teardown still runs.
@@ -1794,7 +1876,7 @@ export class LiveDaemon {
     if (live.dialog !== undefined) {
       return refuse('dialog_open')
     }
-    if (live.busy || live.retaining || live.pendingPromptId !== undefined) {
+    if (live.busy || live.refusesInput || live.pendingPromptId !== undefined) {
       return refuse('busy')
     }
 

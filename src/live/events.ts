@@ -56,6 +56,9 @@ export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'watchdog' | 'i
 
 export type SessionEndReason = 'idle_timeout' | 'stopped' | 'crashed' | 'token_expired'
 
+/** The `turn_failed` reasons tmuxd sends; the ingest resolves each with SessionFailureReason `tryFrom`. */
+export type FailureReason = 'rate_limit' | 'auth_error' | 'api_error' | 'usage_limit' | 'deadline'
+
 /** Body of `POST /mcp/internal/live/permissions`, without the gen the daemon adds. */
 export interface PermissionOpenRequest {
   toolCallId: string
@@ -108,7 +111,7 @@ const OUTPUT_MAX = 16_000
  * StopFailure `error` values to the SessionFailureReason the ingest resolves with `tryFrom`. Anything not named here
  * is an API-side failure.
  */
-const FAILURE_REASONS: Readonly<Record<string, string>> = {
+const FAILURE_REASONS: Readonly<Record<string, FailureReason>> = {
   rate_limit: 'rate_limit',
   authentication_failed: 'auth_error',
   oauth_org_not_allowed: 'auth_error',
@@ -170,7 +173,7 @@ export function turnFailed(hook: Payload): EventDraft {
   )
 }
 
-export function turnFailedWith(reason: string, detail: string): EventDraft {
+export function turnFailedWith(reason: FailureReason, detail: string): EventDraft {
   return draft('turn_failed', {
     reason,
     detail,
@@ -178,7 +181,7 @@ export function turnFailedWith(reason: string, detail: string): EventDraft {
 }
 
 /** The SessionFailureReason a CLI error name maps to; a name the table does not know is an API-side failure. */
-export function failureReason(error: string): string {
+export function failureReason(error: string): FailureReason {
   return FAILURE_REASONS[error] ?? 'api_error'
 }
 

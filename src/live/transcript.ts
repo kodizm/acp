@@ -11,7 +11,7 @@
 
 import { stat } from 'node:fs/promises'
 
-import { failureReason } from './events.ts'
+import { type FailureReason, failureReason } from './events.ts'
 
 export const INTERRUPT_MARKER = '[Request interrupted by user]'
 export const INTERRUPT_TOOL_MARKER = '[Request interrupted by user for tool use]'
@@ -34,18 +34,19 @@ export interface AssistantBlock {
 }
 
 export interface ApiErrorClass {
-  reason: string
+  reason: FailureReason
   detail: string
 }
 
 const NEWLINE = 0x0a
 
-// A plan limit names itself and says when it lifts. The server throttle's own text can say "not your usage limit", so
-// the phrase alone never decides: the reset time has to be there too.
+// A plan limit names itself and says when it lifts. The server throttle's own text says "not your usage limit", so
+// the phrase alone never decides: the reset time has to be there too, and the throttle's denial rules it out.
 const USAGE_LIMIT_TEXT = /\b(usage|session|weekly) limit\b|\bhit your\b[^.\n]*\blimit\b/i
-const LIMIT_RESETS = /resets?/i
+const LIMIT_RESETS = /\bresets?\b/i
+const NOT_A_USAGE_LIMIT = /\bnot your (usage )?limit\b/i
 
-const STATUS_REASONS: Readonly<Record<number, string>> = {
+const STATUS_REASONS: Readonly<Record<number, FailureReason>> = {
   429: 'rate_limit',
   401: 'auth_error',
 }
@@ -180,8 +181,13 @@ export function classifyApiError(record: TranscriptRecord): ApiErrorClass | null
   }
 }
 
-function apiErrorReason(error: string, status: number | null, message: string): string {
-  if (error === 'rate_limit' && USAGE_LIMIT_TEXT.test(message) && LIMIT_RESETS.test(message)) {
+function apiErrorReason(error: string, status: number | null, message: string): FailureReason {
+  if (
+    error === 'rate_limit' &&
+    USAGE_LIMIT_TEXT.test(message) &&
+    LIMIT_RESETS.test(message) &&
+    !NOT_A_USAGE_LIMIT.test(message)
+  ) {
     return 'usage_limit'
   }
 

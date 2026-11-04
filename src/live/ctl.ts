@@ -40,7 +40,8 @@ Environment:
   KODIZM_TMUXD_SOCKET        daemon socket (default: $XDG_RUNTIME_DIR or the temp dir, kodizm-live-<uid>/tmuxd.sock)
   KODIZM_TMUXD_TMUX_SOCKET   tmux socket name (default: ${LIVE_SOCKET})
   KODIZM_TMUXD_MAX_PANES     panes per daemon (default: ${DEFAULT_MAX_PANES})
-  KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS  end a pane with no turn, dialog or activity for N seconds (default: off)
+  KODIZM_TMUXD_IDLE_TIMEOUT_SECONDS
+                             end a pane with no turn, dialog or activity for N seconds (default: off)
   KODIZM_LIVE_BASE_SETTINGS  base settings with the deny list (default: ${DEFAULT_BASE_SETTINGS_PATH})
   CLAUDE_CODE_PATH           claude binary (default: claude on PATH)
 `
