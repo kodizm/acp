@@ -14,6 +14,7 @@ import { createLogger } from '../util/logger.ts'
 import {
   type CtlCode,
   type CtlResult,
+  DAEMON_VERSION,
   DEFAULT_MAX_PANES,
   LiveDaemon,
   defaultSocketPath,
@@ -22,12 +23,16 @@ import {
 } from './daemon.ts'
 import { DEFAULT_BASE_SETTINGS_PATH, SocketRequestError, runHookHelper, socketRequest } from './hooks.ts'
 import { LIVE_SOCKET } from './pane.ts'
+import { START_FILE_FLAGS, parseStartExtras } from './start-flags.ts'
 
 export const USAGE = `Usage: kodizm-acp tmuxd <command>
 
 Commands:
   ctl <verb> [flags]                         Drive a Live pane through the daemon; prints one JSON line.
                                              Verbs: start, prompt, command, cancel, stop, rotate-token, status.
+                                             start also takes --permission-mode default|dontAsk, --one-shot 0|1,
+                                             --deadline-seconds N, --retain-failed-seconds N and
+                                             --mcp-config/--tool-policy/--system-prompt-file PATH.
   hook <Event> --pane <id> --socket <path>   Hook helper the pane settings run; reads the payload on stdin.
   daemon                                     Run the daemon in the foreground; ctl start spawns it detached.
 
@@ -42,15 +47,23 @@ Environment:
 const VERBS: ReadonlySet<string> = new Set(['start', 'prompt', 'command', 'cancel', 'stop', 'rotate-token', 'status'])
 
 // Flags naming a file: resolved against the caller's cwd, because the detached daemon has its own.
-const PATH_FLAGS: ReadonlySet<string> = new Set(['settings-base', 'env-file', 'file', 'token-file'])
+const PATH_FLAGS: ReadonlySet<string> = new Set([
+  'settings-base',
+  'env-file',
+  'file',
+  'token-file',
+  'mcp-config',
+  'tool-policy',
+  'system-prompt-file',
+])
 
-// The file Laravel hands each verb (token, auth env, prompt text): the daemon deletes it once read, ctl itself when
-// no daemon gets to read it.
-const HANDOFF_FLAGS: Readonly<Record<string, string>> = {
-  start: 'env-file',
-  prompt: 'file',
-  'rotate-token': 'token-file',
-}
+// The files Laravel hands each verb (token, auth env, prompt text, start config): the daemon deletes them once read,
+// ctl itself when no daemon gets to read them. A Map, because a verb like `constructor` is looked up here.
+const HANDOFF_FLAGS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['start', START_FILE_FLAGS],
+  ['prompt', ['file']],
+  ['rotate-token', ['token-file']],
+])
 
 /** A start waits for SessionStart (10 s) and the settings write; a prompt for up to four Enters. */
 const CTL_TIMEOUT_MS = 60_000
@@ -88,10 +101,15 @@ export async function runTmuxd(args: readonly string[]): Promise<number> {
 async function runCtl(args: readonly string[]): Promise<number> {
   const [verb, ...rest] = args
   const flags = parseFlags(rest)
-  if (verb === undefined || !VERBS.has(verb) || flags === null) {
+  if (
+    verb === undefined ||
+    !VERBS.has(verb) ||
+    flags === null ||
+    (verb === 'start' && parseStartExtras(flags) === null)
+  ) {
     await discardHandoff(verb, rest)
 
-    return print({ ok: false, code: 'usage_error' })
+    return print(ctlMade('usage_error'))
   }
 
   const socketPath = socketPathFromEnv()
@@ -116,8 +134,8 @@ async function runCtl(args: readonly string[]): Promise<number> {
 
     return print(
       error.reason === 'unreachable'
-        ? { ok: false, code: 'pane_not_running', data: { pane: flags.pane, running: false } }
-        : { ok: false, code: 'timeout' },
+        ? ctlMade('pane_not_running', { pane: flags.pane, running: false })
+        : ctlMade('timeout'),
     )
   }
 }
@@ -248,16 +266,31 @@ function parseFlags(args: readonly string[]): Record<string, string> | null {
  * up its file.
  */
 async function discardHandoff(verb: string | undefined, args: readonly string[]): Promise<void> {
-  const flag = verb === undefined ? undefined : HANDOFF_FLAGS[verb]
-  if (flag === undefined) {
+  const flags = verb === undefined ? undefined : HANDOFF_FLAGS.get(verb)
+  if (flags === undefined) {
     return
   }
 
   for (let index = 0; index < args.length - 1; index += 1) {
     const value = args[index + 1]
-    if (args[index] === `--${flag}` && value !== undefined) {
+    if (value !== undefined && flags.some((flag) => args[index] === `--${flag}`)) {
       await removeFile(resolve(value))
     }
+  }
+}
+
+/**
+ * A result ctl itself made, stamped with the version of this build. A daemon reply never passes through here: it is
+ * printed as received, so an older daemon's reply stays without the key.
+ */
+function ctlMade(code: CtlCode, data: Record<string, unknown> = {}): CtlResult {
+  return {
+    ok: false,
+    code,
+    data: {
+      daemon_version: DAEMON_VERSION,
+      ...data,
+    },
   }
 }
 

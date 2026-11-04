@@ -1265,12 +1265,13 @@ describe('stop', () => {
 })
 
 describe('tmuxd command line', () => {
-  function cli(args: string[], env: Record<string, string> = {}) {
+  function cli(args: string[], env: Record<string, string> = {}, cwd?: string) {
     return Bun.spawnSync([process.execPath, ENTRY, 'tmuxd', ...args], {
       env: {
         ...process.env,
         ...env,
       },
+      cwd,
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -1281,7 +1282,9 @@ describe('tmuxd command line', () => {
 
     const result = cli(['ctl', 'explode'])
     expect(result.exitCode).toBe(2)
-    expect(result.stdout.toString()).toBe('{"ok":false,"code":"usage_error"}\n')
+    expect(result.stdout.toString()).toBe(
+      `{"ok":false,"code":"usage_error","data":{"daemon_version":"${pkg.version}"}}\n`,
+    )
   })
 
   test('a ctl verb against no daemon reports pane_not_running', () => {
@@ -1292,9 +1295,106 @@ describe('tmuxd command line', () => {
       ok: false,
       code: 'pane_not_running',
       data: {
+        daemon_version: pkg.version,
         pane: 'x',
         running: false,
       },
+    })
+  })
+
+  describe('start validation before any daemon is asked', () => {
+    async function handoffFiles(): Promise<Record<string, string>> {
+      const dir = await mkdtemp(join(root, 'handoff-'))
+
+      return {
+        'env-file': await writeSecretFile(join(dir, 'live.env'), 'KODIZM_LIVE_TOKEN=kdz-int-jwt.FAKE.FAKE\n'),
+        'tool-policy': await writeSecretFile(join(dir, 'policy.json'), '{}'),
+        'system-prompt-file': await writeSecretFile(join(dir, 'system-prompt.md'), 'You run as a test pane.'),
+        'mcp-config': await writeSecretFile(join(dir, 'mcp.json'), '{"mcpServers":{}}'),
+      }
+    }
+
+    // Short, because a unix socket path is capped near 104 bytes on macOS.
+    function shortId(): string {
+      return crypto.randomUUID().slice(0, 8)
+    }
+
+    function fileArgs(files: Record<string, string>): string[] {
+      return Object.entries(files).flatMap(([flag, path]) => [`--${flag}`, path])
+    }
+
+    const cases: Array<[string, string[]]> = [
+      ['an unknown flag', ['--bogus', 'x']],
+      ['a bare flag without a value', ['--one-shot']],
+      ['a bad permission mode', ['--permission-mode', 'nope']],
+    ]
+
+    for (const [label, extra] of cases) {
+      test(`ctl start with ${label} is a usage_error, spawns no daemon and deletes all four hand-off files`, async () => {
+        const files = await handoffFiles()
+        const socketPath = join(root, `${shortId()}.sock`)
+
+        const result = cli(['ctl', 'start', '--pane', 'p', ...fileArgs(files), ...extra], {
+          KODIZM_TMUXD_SOCKET: socketPath,
+        })
+
+        expect(result.exitCode).toBe(2)
+        expect(JSON.parse(result.stdout.toString())).toEqual({
+          ok: false,
+          code: 'usage_error',
+          data: { daemon_version: pkg.version },
+        })
+        for (const path of Object.values(files)) {
+          expect(await Bun.file(path).exists()).toBe(false)
+        }
+        expect(await Bun.file(socketPath).exists()).toBe(false)
+      })
+    }
+
+    test('a relative path flag is resolved against the caller cwd before removal', async () => {
+      const dir = await mkdtemp(join(root, 'relative-'))
+      const policy = await writeSecretFile(join(dir, 'policy.json'), '{}')
+      const socketPath = join(root, `${shortId()}.sock`)
+
+      const result = cli(
+        ['ctl', 'start', '--pane', 'p', '--tool-policy', 'policy.json', '--bogus', 'x'],
+        { KODIZM_TMUXD_SOCKET: socketPath },
+        dir,
+      )
+
+      expect(result.exitCode).toBe(2)
+      expect(await Bun.file(policy).exists()).toBe(false)
+      expect(await Bun.file(socketPath).exists()).toBe(false)
+    })
+
+    test('a verb that is an Object.prototype name is a clean usage_error line, not a crash', () => {
+      const socketPath = join(root, `${shortId()}.sock`)
+
+      const result = cli(['ctl', 'constructor', '--pane', 'p'], { KODIZM_TMUXD_SOCKET: socketPath })
+
+      expect(result.exitCode).toBe(2)
+      expect(result.stdout.toString()).toBe(
+        `{"ok":false,"code":"usage_error","data":{"daemon_version":"${pkg.version}"}}\n`,
+      )
+      expect(result.stderr.toString()).toBe('')
+    })
+
+    test('ctl status with no daemon exits 4 with daemon_version and spawns nothing', () => {
+      const socketPath = join(root, `${shortId()}.sock`)
+
+      const result = cli(['ctl', 'status', '--pane', 'p'], { KODIZM_TMUXD_SOCKET: socketPath })
+
+      expect(result.exitCode).toBe(4)
+      expect(JSON.parse(result.stdout.toString())).toEqual({
+        ok: false,
+        code: 'pane_not_running',
+        data: {
+          daemon_version: pkg.version,
+          pane: 'p',
+          running: false,
+        },
+      })
+      expect(Object.keys(JSON.parse(result.stdout.toString()).data)[0]).toBe('daemon_version')
     })
   })
 
