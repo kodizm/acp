@@ -305,9 +305,11 @@ function paneEnv(options: CreatePaneOptions): PaneEnv {
 }
 
 function launchArgv(options: CreatePaneOptions): string[] {
-  // `--setting-sources user` keeps the repository's settings out, so a repo `disableAllHooks` cannot silence the
-  // hooks the daemon depends on.
-  const argv = [options.claudeBin ?? 'claude', '--settings', options.settingsPath, '--setting-sources', 'user']
+  // An empty `--setting-sources` loads no source but the `--settings` file (CLI 2.1.280). That keeps the repository's
+  // settings out, so a repo `disableAllHooks` cannot silence the hooks the daemon depends on, and keeps the user file
+  // out too: its clone guards (`Edit` denies on /workspace/.default and .repos) would block a main-checkout pane, and
+  // the pane file already carries everything else the user file holds.
+  const argv = [options.claudeBin ?? 'claude', '--settings', options.settingsPath, '--setting-sources', '']
   if (options.model !== undefined) {
     argv.push('--model', options.model)
   }

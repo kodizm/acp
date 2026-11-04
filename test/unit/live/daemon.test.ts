@@ -457,10 +457,10 @@ describe('start', () => {
     expect(typeof result.data?.claudeSessionId).toBe('string')
     expect(await Bun.file(join(fx.dir, 'live.env')).exists()).toBe(false)
 
-    // 1. The CLI runs on the pane settings file, restricted to the user source.
+    // 1. The CLI runs on the pane settings file alone: an empty source list loads no other settings file.
     const args = JSON.parse(await readFile(join(fx.dir, 'args.json'), 'utf8')) as string[]
     const settingsPath = args[args.indexOf('--settings') + 1] ?? ''
-    expect(args).toContain('--setting-sources')
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe('')
     expect(settingsPath.startsWith(fx.settingsBase)).toBe(true)
     expect((await stat(settingsPath)).mode & 0o777).toBe(0o600)
     const settings = JSON.parse(await readFile(settingsPath, 'utf8'))

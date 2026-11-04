@@ -2,6 +2,19 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-11-04
+
+### Fixed
+
+- **A main-checkout Live pane could not edit.** The pane loaded the user settings
+  file (`--setting-sources user`), whose clone guards deny `Edit` on
+  `/workspace/.default` and `/workspace/.repos`, so a pane started on the main
+  checkout had every Edit and Write refused. The pane now passes an empty
+  `--setting-sources`: it loads its own `--settings` file alone (which carries
+  everything else the user file holds), and the repository's settings stay out
+  as before. Verified on CLI 2.1.280: an empty list drops a user-scope deny and
+  keeps the `--settings` allow.
+
 ## [0.8.1] - 2026-11-04
 
 ### Fixed

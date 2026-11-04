@@ -1,6 +1,6 @@
 {
   "name": "@kodizm/acp",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Custom ACP server bridging Claude Code and opencode CLIs through a single Kodizm-flavored protocol surface.",
   "type": "module",
   "bin": {

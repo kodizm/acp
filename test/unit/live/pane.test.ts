@@ -188,8 +188,9 @@ describe('createPane', () => {
     const fx = await fixture()
     await launchReady(fx)
 
-    const args = (await readOrEmpty(join(fx.dir, 'args'))).trim().split('\n')
-    expect(args).toEqual(['--settings', join(fx.dir, 'settings.json'), '--setting-sources', 'user'])
+    // The stub prints one argument per line, so the empty source list is the blank line at the end.
+    const args = await readOrEmpty(join(fx.dir, 'args'))
+    expect(args).toBe(`--settings\n${join(fx.dir, 'settings.json')}\n--setting-sources\n\n`)
   })
 
   test('passes --resume with the session id', async () => {
