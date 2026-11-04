@@ -91,6 +91,7 @@ describe('sanitizeCommand', () => {
     ['/clear', '/clear'],
     ['/model opus', '/model opus'],
     ['/model claude-sonnet-4.5:1m_x', '/model claude-sonnet-4.5:1m_x'],
+    ['/model claude-opus-4-5[1m]', '/model claude-opus-4-5[1m]'],
     ['  /clear\n', '/clear'],
   ]
 
@@ -112,6 +113,8 @@ describe('sanitizeCommand', () => {
     ['/model opus; rm -rf /', 'invalid_model_alias'],
     ['/model opus\nsonnet', 'invalid_model_alias'],
     ['/model op\x1bus', 'invalid_model_alias'],
+    ['/model opus{1m}', 'invalid_model_alias'],
+    ['/model opus/1m', 'invalid_model_alias'],
     [`/model ${'a'.repeat(65)}`, 'invalid_model_alias'],
   ]
 

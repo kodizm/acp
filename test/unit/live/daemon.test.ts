@@ -64,6 +64,11 @@ let turn = 0
 async function submit(prompt) {
   running = true
   turn += 1
+  // A dialog that opens before the submit is confirmed: the daemon must stop pressing Enter.
+  if (prompt.includes('PREDIALOG')) {
+    await hook('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'pre' }, permission_suggestions: [] })
+    return
+  }
   const mid = 'msg_stub_' + turn
   const toolUseId = 'toolu_STUB' + turn
   await hook('UserPromptSubmit', { prompt, prompt_id: crypto.randomUUID(), permission_mode: 'default' })
@@ -378,7 +383,7 @@ function envFile(fx: Fixture, gen = 1): string {
   ].join('\n')
 }
 
-async function start(fx: Fixture): Promise<CtlResult> {
+async function start(fx: Fixture, extra: Record<string, string> = {}): Promise<CtlResult> {
   const path = await writeSecretFile(join(fx.dir, 'live.env'), envFile(fx))
 
   return fx.daemon.ctl('start', {
@@ -386,6 +391,7 @@ async function start(fx: Fixture): Promise<CtlResult> {
     cwd: fx.cwd,
     'settings-base': fx.settingsBase,
     'env-file': path,
+    ...extra,
   })
 }
 
@@ -505,6 +511,59 @@ describe('start', () => {
     expect(capped).toMatchObject({ ok: false, code: 'pane_cap' })
     expect(await Bun.file(other).exists()).toBe(false)
   }, 20_000)
+
+  test('launches the CLI on the --model it was given', async () => {
+    const fx = await fixture()
+
+    expect((await start(fx, { model: 'claude-opus-4-5[1m]' })).ok).toBe(true)
+
+    const args = JSON.parse(await readFile(join(fx.dir, 'args.json'), 'utf8')) as string[]
+    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'claude-opus-4-5[1m]'])
+  }, 20_000)
+
+  test('a usage_error start leaves no env file behind, an invalid --model included', async () => {
+    const fx = await fixture()
+    const refusals: Array<Record<string, string>> = [
+      { model: 'op us' },
+      { model: '' },
+      { model: `${'a'.repeat(65)}` },
+      { cwd: 'relative/work' },
+      { pane: 'bad pane!' },
+      { 'settings-base': 'relative' },
+    ]
+
+    for (const extra of refusals) {
+      expect(await start(fx, extra)).toMatchObject({ ok: false, code: 'usage_error' })
+      expect(await Bun.file(join(fx.dir, 'live.env')).exists()).toBe(false)
+    }
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 20_000)
+
+  test('prompt and rotate-token delete their hand-off file when the pane does not run', async () => {
+    const fx = await fixture()
+    const promptFile = join(fx.dir, 'orphan-prompt.txt')
+    const tokenFile = join(fx.dir, 'orphan-token')
+
+    await writeFile(promptFile, 'a prompt that must not linger')
+    expect(await fx.daemon.ctl('prompt', { pane: 'nobody', file: promptFile })).toMatchObject({
+      code: 'pane_not_running',
+    })
+    expect(await Bun.file(promptFile).exists()).toBe(false)
+
+    await writeFile(promptFile, 'a prompt without a pane flag')
+    expect(await fx.daemon.ctl('prompt', { file: promptFile })).toMatchObject({ code: 'usage_error' })
+    expect(await Bun.file(promptFile).exists()).toBe(false)
+
+    await writeSecretFile(tokenFile, token(1))
+    expect(await fx.daemon.ctl('rotate-token', { pane: 'nobody', 'token-file': tokenFile })).toMatchObject({
+      code: 'pane_not_running',
+    })
+    expect(await Bun.file(tokenFile).exists()).toBe(false)
+
+    await writeSecretFile(tokenFile, token(1))
+    expect(await fx.daemon.ctl('rotate-token', { 'token-file': tokenFile })).toMatchObject({ code: 'usage_error' })
+    expect(await Bun.file(tokenFile).exists()).toBe(false)
+  })
 
   test('reports an unknown pane as not running and refuses an unknown verb', async () => {
     const fx = await fixture()
@@ -631,6 +690,15 @@ describe('delivery guard and turn end', () => {
       lastAssistantMessage: 'hanging',
     })
     expect(await status(fx)).toMatchObject({ busy: false })
+  }, 20_000)
+
+  test('a dialog that opens during the Enter ladder stops it with dialog_open', async () => {
+    const fx = await fixture()
+    await start(fx)
+
+    expect(await prompt(fx, 'PREDIALOG now')).toEqual({ ok: false, code: 'dialog_open' })
+    expect(await status(fx)).toMatchObject({ dialogOpen: true, busy: false })
+    expect(fx.ingest.ofType('turn_started')).toHaveLength(0)
   }, 20_000)
 
   test('rejects a prompt the sanitiser refuses and sends nothing', async () => {
@@ -928,6 +996,34 @@ describe('tmuxd command line', () => {
         running: false,
       },
     })
+  })
+
+  test('a ctl verb against no daemon deletes its hand-off file', async () => {
+    const env = { KODIZM_TMUXD_SOCKET: join(root, 'none.sock') }
+    const dir = await mkdtemp(join(root, 'handoff-'))
+    const promptFile = join(dir, 'prompt.txt')
+    const tokenFile = join(dir, 'token')
+
+    await writeFile(promptFile, 'a prompt that must not linger')
+    expect(cli(['ctl', 'prompt', '--pane', 'x', '--file', promptFile], env).exitCode).toBe(4)
+    expect(await Bun.file(promptFile).exists()).toBe(false)
+
+    await writeSecretFile(tokenFile, token(1))
+    expect(cli(['ctl', 'rotate-token', '--pane', 'x', '--token-file', tokenFile], env).exitCode).toBe(4)
+    expect(await Bun.file(tokenFile).exists()).toBe(false)
+  })
+
+  test('a ctl usage_error before the daemon is asked still deletes the hand-off file', async () => {
+    const dir = await mkdtemp(join(root, 'handoff-'))
+    const envPath = join(dir, 'live.env')
+    await writeSecretFile(envPath, 'KODIZM_LIVE_TOKEN=kdz-int-jwt.FAKE.FAKE\n')
+
+    const result = cli(['ctl', 'start', '--env-file', envPath, '--pane', 'x', '--pane', 'y'], {
+      KODIZM_TMUXD_SOCKET: join(root, 'none.sock'),
+    })
+
+    expect(result.exitCode).toBe(2)
+    expect(await Bun.file(envPath).exists()).toBe(false)
   })
 
   test('ctl start spawns the detached daemon, ctl stop ends it, and stdout carries one JSON line each', async () => {

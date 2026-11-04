@@ -30,7 +30,11 @@ export class InputRejectedError extends Error {
 
 const TAB_REPLACEMENT = '    '
 
-const MODEL_ALIAS = /^[A-Za-z0-9._:-]{1,64}$/
+/**
+ * A model alias or id (`opus`, `claude-opus-4-5[1m]`): the `ctl start --model` flag and the `/model` command. The
+ * Laravel side validates with the same pattern (`live-ctl.v1.json`).
+ */
+export const MODEL_NAME = /^[A-Za-z0-9._:[\]-]{1,64}$/
 
 const BARE_COMMANDS: ReadonlySet<string> = new Set(['/compact', '/clear'])
 
@@ -89,7 +93,7 @@ export function sanitizeCommand(command: string): string {
   }
 
   const alias = trimmed.slice('/model '.length)
-  if (!MODEL_ALIAS.test(alias)) {
+  if (!MODEL_NAME.test(alias)) {
     throw new InputRejectedError('invalid_model_alias')
   }
 

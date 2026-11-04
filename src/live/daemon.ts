@@ -55,8 +55,9 @@ import {
   socketRequest,
   writePaneSettings,
 } from './hooks.ts'
-import { InputRejectedError, type InputRejectionReason, sanitizeCommand, sanitizePrompt } from './input.ts'
+import { InputRejectedError, type InputRejectionReason, MODEL_NAME, sanitizeCommand, sanitizePrompt } from './input.ts'
 import {
+  type DeliveryOutcome,
   LIVE_SOCKET,
   type Pane,
   PaneError,
@@ -1104,31 +1105,32 @@ export class LiveDaemon {
   }
 
   private async start(args: Readonly<Record<string, string>>): Promise<CtlResult> {
-    const { pane: id, cwd, resume } = args
-    const settingsBase = args['settings-base']
     const envFile = args['env-file']
-    if (id === undefined || !PANE_ID.test(id) || cwd === undefined || !isAbsolute(cwd)) {
-      return refuse('usage_error')
-    }
-    if (settingsBase === undefined || !isAbsolute(settingsBase) || envFile === undefined || !isAbsolute(envFile)) {
+    if (envFile === undefined || !isAbsolute(envFile)) {
       return refuse('usage_error')
     }
 
-    // The env file holds the token: whatever the outcome, it does not outlive this call.
+    // The env file holds the token: whatever the outcome, a refusal included, it does not outlive this call.
     try {
-      return await this.launch(id, cwd, settingsBase, envFile, resume)
+      return await this.launch(args, envFile)
     } finally {
       await removeFile(envFile)
     }
   }
 
-  private async launch(
-    id: string,
-    cwd: string,
-    settingsBase: string,
-    envFile: string,
-    resume: string | undefined,
-  ): Promise<CtlResult> {
+  private async launch(args: Readonly<Record<string, string>>, envFile: string): Promise<CtlResult> {
+    const { pane: id, cwd, model, resume } = args
+    const settingsBase = args['settings-base']
+    if (id === undefined || !PANE_ID.test(id) || cwd === undefined || !isAbsolute(cwd)) {
+      return refuse('usage_error')
+    }
+    if (settingsBase === undefined || !isAbsolute(settingsBase)) {
+      return refuse('usage_error')
+    }
+    if (model !== undefined && !MODEL_NAME.test(model)) {
+      return refuse('usage_error')
+    }
+
     // 1. State guards first, so a refused start never reads the token.
     if (this.panes.has(id)) {
       return refuse('pane_exists')
@@ -1168,6 +1170,7 @@ export class LiveDaemon {
         home: this.options.home,
         settingsPath,
         env: env.authEnv,
+        model,
         resumeSessionId: resume,
         claudeBin: this.options.claudeBin,
         socket: pane.socket,
@@ -1195,19 +1198,18 @@ export class LiveDaemon {
 
   private async prompt(args: Readonly<Record<string, string>>): Promise<CtlResult> {
     const { pane: id, file } = args
-    if (id === undefined || file === undefined || !isAbsolute(file)) {
+    if (file === undefined || !isAbsolute(file)) {
+      return refuse('usage_error')
+    }
+
+    // 1. The prompt file is Laravel's hand-off: read and gone before any refusal can return.
+    const content = await takeFile(file, readFileOrNull)
+    if (id === undefined || content === null) {
       return refuse('usage_error')
     }
     const live = this.panes.get(id)
     if (live === undefined) {
       return notRunning(id)
-    }
-
-    // 1. The prompt file is Laravel's hand-off; it is gone once read.
-    const content = await readFileOrNull(file)
-    await removeFile(file)
-    if (content === null) {
-      return refuse('usage_error')
     }
 
     // 2. A pasted Enter would answer an open dialog; a running turn would queue the text behind it.
@@ -1229,12 +1231,25 @@ export class LiveDaemon {
     const promptId = randomUUID()
     live.pendingPromptId = promptId
     live.submitted.arm()
+
+    // 4. A dialog can open between two Enters of the ladder; the next Enter would answer it.
+    let outcome: DeliveryOutcome
     try {
-      await deliverPrompt(live.pane, content, (timeoutMs) => live.submitted.wait(timeoutMs))
+      outcome = await deliverPrompt(
+        live.pane,
+        content,
+        (timeoutMs) => live.submitted.wait(timeoutMs),
+        () => live.dialog !== undefined,
+      )
     } catch (error) {
       live.pendingPromptId = undefined
 
       return deliveryFailure(error, id)
+    }
+    if (outcome === 'aborted') {
+      live.pendingPromptId = undefined
+
+      return refuse('dialog_open')
     }
 
     return accept({
@@ -1346,7 +1361,13 @@ export class LiveDaemon {
   private async rotateToken(args: Readonly<Record<string, string>>): Promise<CtlResult> {
     const id = args.pane
     const file = args['token-file']
-    if (id === undefined || file === undefined || !isAbsolute(file)) {
+    if (file === undefined || !isAbsolute(file)) {
+      return refuse('usage_error')
+    }
+
+    // The token file is gone before any refusal can return.
+    const content = await takeFile(file, readSecretFile)
+    if (id === undefined) {
       return refuse('usage_error')
     }
     const live = this.panes.get(id)
@@ -1354,8 +1375,6 @@ export class LiveDaemon {
       return notRunning(id)
     }
 
-    const content = await readSecretFile(file)
-    await removeFile(file)
     const token = content?.trim() ?? ''
     if (token === '' || tokenGen(token) !== live.gen) {
       return refuse('usage_error')
@@ -1549,7 +1568,17 @@ async function readFileOrNull(path: string): Promise<string | null> {
   })
 }
 
-async function removeFile(path: string): Promise<void> {
+/** Read a hand-off file and delete it, also when the read throws. */
+async function takeFile(path: string, read: (path: string) => Promise<string | null>): Promise<string | null> {
+  try {
+    return await read(path)
+  } finally {
+    await removeFile(path)
+  }
+}
+
+/** Delete a file; one already gone counts as deleted. */
+export async function removeFile(path: string): Promise<void> {
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') {
       throw error

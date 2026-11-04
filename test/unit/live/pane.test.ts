@@ -13,6 +13,7 @@ import {
   deliverPrompt,
   killPane,
   paneAlive,
+  supportsPasteBufferS,
 } from '@/live/pane.ts'
 
 // Runs against a real tmux on its own socket. The pane program is a stub that records its argv and env, puts the pty
@@ -138,7 +139,51 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+describe('supportsPasteBufferS', () => {
+  const cases: ReadonlyArray<[string, boolean]> = [
+    ['tmux 3.5a', false],
+    ['tmux 3.6', false],
+    ['tmux 3.6b', false],
+    ['tmux 3.7', true],
+    ['tmux 3.7c', true],
+    ['tmux 3.8', true],
+    ['tmux next-3.9', true],
+    ['tmux 4.0', true],
+    ['tmux 10.1', true],
+    ['tmux 2.9a', false],
+    ['tmux 3.5a\n', false],
+    ['tmux master', false],
+    ['tmux', false],
+    ['', false],
+    ['garbage', false],
+    ['3.8', false],
+  ]
+
+  for (const [output, expected] of cases) {
+    test(`${JSON.stringify(output)} -> ${expected}`, () => {
+      expect(supportsPasteBufferS(output)).toBe(expected)
+    })
+  }
+})
+
 describe('createPane', () => {
+  test('passes --model as its own argv element', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { model: 'claude-opus-4-5[1m]' })
+
+    const args = (await readOrEmpty(join(fx.dir, 'args'))).trim().split('\n')
+    expect(args.slice(-2)).toEqual(['--model', 'claude-opus-4-5[1m]'])
+  })
+
+  for (const model of ['op us', '--dangerously-skip-permissions', '', 'a'.repeat(65), 'opus;id']) {
+    test(`rejects the model ${JSON.stringify(model)} before tmux runs`, async () => {
+      const fx = await fixture()
+
+      await expect(launch(fx, { model })).rejects.toMatchObject({ reason: 'invalid_model' })
+      expect(tmux('has-session', '-t', `=kdz-pane-${counter}`).exitCode).not.toBe(0)
+    })
+  }
+
   test('launches the program with --settings and the setting source restriction', async () => {
     const fx = await fixture()
     await launchReady(fx)
@@ -267,9 +312,64 @@ describe('deliverPrompt', () => {
     const pane = await launchReady(fx)
     const text = 'first line\nsecond line: çğıöşü 漢字 🙂\n  indented !not-bash /not-slash\nC-c literal'
 
-    await deliverPrompt(pane, text, confirmOnCarriageReturn(fx))
+    expect(await deliverPrompt(pane, text, confirmOnCarriageReturn(fx))).toBe('submitted')
 
     expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}${text}${BRACKET_CLOSE}\r`)
+  })
+
+  test('stops the Enter ladder once abortIf turns true and reports the abort', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    let checks = 0
+
+    const outcome = await deliverPrompt(
+      pane,
+      'hello',
+      async () => false,
+      () => {
+        checks += 1
+        return checks === 2
+      },
+    )
+
+    expect(outcome).toBe('aborted')
+    expect(checks).toBe(2)
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}hello${BRACKET_CLOSE}\r`)
+  })
+
+  test('sends no Enter at all when abortIf is true from the start', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+
+    expect(
+      await deliverPrompt(
+        pane,
+        'hello',
+        async () => false,
+        () => true,
+      ),
+    ).toBe('aborted')
+    await Bun.sleep(100)
+    expect(await readOrEmpty(join(fx.dir, 'input'))).toBe(`${BRACKET_OPEN}hello${BRACKET_CLOSE}`)
+  })
+
+  test('reports submitted when the submit signal already fired as abortIf turns true', async () => {
+    const fx = await fixture()
+    const pane = await launchReady(fx)
+    const windows: number[] = []
+
+    const outcome = await deliverPrompt(
+      pane,
+      'hello',
+      async (timeoutMs) => {
+        windows.push(timeoutMs)
+        return timeoutMs === 0
+      },
+      () => windows.length > 0,
+    )
+
+    expect(outcome).toBe('submitted')
+    expect(windows).toEqual([328, 0])
   })
 
   test('pastes the sanitised bytes, not the raw ones', async () => {

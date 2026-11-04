@@ -11,7 +11,7 @@
 import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { sanitizeCommand, sanitizePrompt } from './input.ts'
+import { MODEL_NAME, sanitizeCommand, sanitizePrompt } from './input.ts'
 
 export const LIVE_SOCKET = 'kodizm-live'
 
@@ -36,9 +36,13 @@ const RESUME_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/
 // Variables a parent Claude session would set; inherited, they override the pane's own session and transcript.
 const DROPPED_ENV: ReadonlySet<string> = new Set(['CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION'])
 
+// `paste-buffer -S` arrived in tmux 3.7; the image's Debian 13 ships 3.5a, which refuses the flag.
+const PASTE_S_SINCE: readonly [number, number] = [3, 7]
+
 export type PaneFailureReason =
   | 'invalid_pane_id'
   | 'invalid_resume_id'
+  | 'invalid_model'
   | 'tmux_failed'
   | 'start_timeout'
   | 'not_submitted'
@@ -59,6 +63,9 @@ export class PaneError extends Error {
  */
 export type ConfirmSignal = (timeoutMs: number) => Promise<boolean>
 
+/** `aborted`: `abortIf` turned true before the submit signal; the text may still sit in the composer. */
+export type DeliveryOutcome = 'submitted' | 'aborted'
+
 export interface Pane {
   /** tmux session name; also the prefix of the pane's paste buffers. */
   readonly id: string
@@ -77,6 +84,8 @@ export interface CreatePaneOptions {
    */
   env?: Readonly<Record<string, string>>
   resumeSessionId?: string
+  /** Matches {@link MODEL_NAME} and does not start with `-`, so the CLI cannot read it as an option. */
+  model?: string
   claudeBin?: string
   socket?: string
   /** Called with {@link SESSION_START_TIMEOUT_MS}; on false the pane is killed and `start_timeout` thrown. */
@@ -85,11 +94,30 @@ export interface CreatePaneOptions {
 
 let bufferSequence = 0
 
+// Keyed by the tmux binary path: the answer of `tmux -V` cannot change while the process runs.
+const pasteSFlags = new Map<string, Promise<boolean>>()
+
+/**
+ * Whether `tmux -V` output names a tmux with `paste-buffer -S` (3.7 or later). `next-3.9` is a development build
+ * ahead of 3.9; anything unreadable counts as an old tmux, which pastes fine without the flag.
+ */
+export function supportsPasteBufferS(versionOutput: string): boolean {
+  const match = /^tmux (?:next-)?(\d+)\.(\d+)[a-z]?$/.exec(versionOutput.trim())
+  if (match === null) {
+    return false
+  }
+
+  const major = Number(match[1])
+  const minor = Number(match[2])
+
+  return major > PASTE_S_SINCE[0] || (major === PASTE_S_SINCE[0] && minor >= PASTE_S_SINCE[1])
+}
+
 /**
  * Start the CLI in a new detached tmux session.
  *
- * @throws {PaneError} `invalid_pane_id`, `invalid_resume_id`, `tmux_failed` (an existing id included) or
- *   `start_timeout`.
+ * @throws {PaneError} `invalid_pane_id`, `invalid_resume_id`, `invalid_model`, `tmux_failed` (an existing id
+ *   included) or `start_timeout`.
  */
 export async function createPane(options: CreatePaneOptions): Promise<Pane> {
   const pane: Pane = {
@@ -97,12 +125,15 @@ export async function createPane(options: CreatePaneOptions): Promise<Pane> {
     socket: options.socket ?? LIVE_SOCKET,
   }
 
-  // 1. Both values end up in tmux and CLI argv: one could be read as a target, the other as an option.
+  // 1. These values end up in tmux and CLI argv: the id could be read as a target, the others as an option.
   if (!PANE_ID.test(pane.id)) {
     throw new PaneError('invalid_pane_id')
   }
   if (options.resumeSessionId !== undefined && !RESUME_ID.test(options.resumeSessionId)) {
     throw new PaneError('invalid_resume_id')
+  }
+  if (options.model !== undefined && (!MODEL_NAME.test(options.model) || options.model.startsWith('-'))) {
+    throw new PaneError('invalid_model')
   }
 
   // 2. Without trust and onboarding the CLI opens a dialog that withholds every hook and defaults to exit.
@@ -154,15 +185,21 @@ export async function createPane(options: CreatePaneOptions): Promise<Pane> {
 /**
  * Paste a prompt and submit it.
  *
- * The text is sanitised here, so no caller can skip it. It is pasted as one bracketed paste (`-S` keeps control
- * bytes from turning into caret text, `-r` keeps LF), then Enter goes separately. Enter is re-sent on the
- * {@link SUBMIT_WINDOWS_MS} ladder until `confirmSubmitted` sees the submit signal. The caller must make sure no
- * permission dialog is open: Enter would answer it.
+ * The text is sanitised here, so no caller can skip it. It is pasted as one bracketed paste (`-r` keeps LF; on tmux
+ * 3.7 and later `-S` keeps control bytes from turning into caret text, and older tmux does not rewrite them at all),
+ * then Enter goes separately. Enter is re-sent on the {@link SUBMIT_WINDOWS_MS} ladder until `confirmSubmitted`
+ * sees the submit signal. The caller must make sure no permission dialog is open when it calls, and passes
+ * `abortIf` for one that opens meanwhile: it is asked before every Enter, because Enter would answer the dialog.
  *
  * @throws {InputRejectedError} for text the prompt channel refuses; nothing is sent then.
  * @throws {PaneError} `pane_dead`, `tmux_failed` or `not_submitted`.
  */
-export async function deliverPrompt(pane: Pane, text: string, confirmSubmitted: ConfirmSignal): Promise<void> {
+export async function deliverPrompt(
+  pane: Pane,
+  text: string,
+  confirmSubmitted: ConfirmSignal,
+  abortIf?: () => boolean,
+): Promise<DeliveryOutcome> {
   const payload = sanitizePrompt(text)
 
   // 1. The buffer is named per delivery so two panes, or two deliveries, never paste each other's text.
@@ -171,7 +208,8 @@ export async function deliverPrompt(pane: Pane, text: string, confirmSubmitted: 
   await runOnPane(pane, ['load-buffer', '-b', buffer, '-'], new TextEncoder().encode(payload))
 
   // 2. `-d` deletes the buffer once pasted; a failed paste leaves it, so it is deleted by hand.
-  const pasted = await run(pane.socket, ['paste-buffer', '-p', '-d', '-r', '-S', '-b', buffer, '-t', paneTarget(pane)])
+  const flags = (await pasteKeepsControlBytes()) ? ['-p', '-d', '-r', '-S'] : ['-p', '-d', '-r']
+  const pasted = await run(pane.socket, ['paste-buffer', ...flags, '-b', buffer, '-t', paneTarget(pane)])
   if (pasted.exitCode !== 0) {
     await run(pane.socket, ['delete-buffer', '-b', buffer])
     await failOnPane(pane, pasted.stderr)
@@ -180,9 +218,13 @@ export async function deliverPrompt(pane: Pane, text: string, confirmSubmitted: 
   // 3. The signal, not the delay, decides: a late Enter after a submit only hits an empty composer.
   await Bun.sleep(PASTE_ENTER_DELAY_MS)
   for (const windowMs of SUBMIT_WINDOWS_MS) {
+    // 4. A dialog after a late submit signal is the turn's own: the prompt went in, so that is no abort.
+    if (abortIf?.() === true) {
+      return (await confirmSubmitted(0)) ? 'submitted' : 'aborted'
+    }
     await runOnPane(pane, ['send-keys', '-t', paneTarget(pane), 'Enter'])
     if (await confirmSubmitted(windowMs)) {
-      return
+      return 'submitted'
     }
   }
 
@@ -266,6 +308,9 @@ function launchArgv(options: CreatePaneOptions): string[] {
   // `--setting-sources user` keeps the repository's settings out, so a repo `disableAllHooks` cannot silence the
   // hooks the daemon depends on.
   const argv = [options.claudeBin ?? 'claude', '--settings', options.settingsPath, '--setting-sources', 'user']
+  if (options.model !== undefined) {
+    argv.push('--model', options.model)
+  }
   if (options.resumeSessionId !== undefined) {
     argv.push('--resume', options.resumeSessionId)
   }
@@ -343,12 +388,45 @@ interface RunOptions {
   path?: string
 }
 
-async function run(socket: string, args: readonly string[], options: RunOptions = {}): Promise<TmuxResult> {
-  // 1. Resolved on the daemon's PATH: the client PATH may be the pane's, which need not contain tmux.
+// Resolved on the daemon's PATH: the client PATH may be the pane's, which need not contain tmux.
+function tmuxBinary(): string {
   const binary = Bun.which('tmux')
   if (binary === null) {
     throw new PaneError('tmux_failed', 'tmux is not on PATH')
   }
+
+  return binary
+}
+
+/** Asked once per tmux binary: whether this tmux takes `paste-buffer -S`. */
+function pasteKeepsControlBytes(): Promise<boolean> {
+  const binary = tmuxBinary()
+  let known = pasteSFlags.get(binary)
+  if (known === undefined) {
+    known = tmuxVersion(binary).then(supportsPasteBufferS)
+    pasteSFlags.set(binary, known)
+  }
+
+  return known
+}
+
+async function tmuxVersion(binary: string): Promise<string> {
+  const child = Bun.spawn([binary, '-V'], {
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+    },
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+  })
+  const [exitCode, output] = await Promise.all([child.exited, new Response(child.stdout).text()])
+
+  return exitCode === 0 ? output : ''
+}
+
+async function run(socket: string, args: readonly string[], options: RunOptions = {}): Promise<TmuxResult> {
+  // 1. The binary on the daemon's PATH, whatever PATH the client gets.
+  const binary = tmuxBinary()
 
   // 2. Only PATH and TMUX_TMPDIR (where the socket lives) reach the client, and so the server's global env.
   const env: Record<string, string> = {

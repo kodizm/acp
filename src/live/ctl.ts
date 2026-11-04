@@ -18,6 +18,7 @@ import {
   LiveDaemon,
   defaultSocketPath,
   exitCodeFor,
+  removeFile,
 } from './daemon.ts'
 import { DEFAULT_BASE_SETTINGS_PATH, SocketRequestError, runHookHelper, socketRequest } from './hooks.ts'
 import { LIVE_SOCKET } from './pane.ts'
@@ -42,6 +43,14 @@ const VERBS: ReadonlySet<string> = new Set(['start', 'prompt', 'command', 'cance
 
 // Flags naming a file: resolved against the caller's cwd, because the detached daemon has its own.
 const PATH_FLAGS: ReadonlySet<string> = new Set(['settings-base', 'env-file', 'file', 'token-file'])
+
+// The file Laravel hands each verb (token, auth env, prompt text): the daemon deletes it once read, ctl itself when
+// no daemon gets to read it.
+const HANDOFF_FLAGS: Readonly<Record<string, string>> = {
+  start: 'env-file',
+  prompt: 'file',
+  'rotate-token': 'token-file',
+}
 
 /** A start waits for SessionStart (10 s) and the settings write; a prompt for up to four Enters. */
 const CTL_TIMEOUT_MS = 60_000
@@ -80,6 +89,8 @@ async function runCtl(args: readonly string[]): Promise<number> {
   const [verb, ...rest] = args
   const flags = parseFlags(rest)
   if (verb === undefined || !VERBS.has(verb) || flags === null) {
+    await discardHandoff(verb, rest)
+
     return print({ ok: false, code: 'usage_error' })
   }
 
@@ -97,6 +108,11 @@ async function runCtl(args: readonly string[]): Promise<number> {
       throw error
     }
     process.stderr.write(`${JSON.stringify({ level: 'warn', message: error.message, verb })}\n`)
+
+    // A daemon that timed out may still read its file; one never reached will not.
+    if (error.reason === 'unreachable') {
+      await discardHandoff(verb, rest)
+    }
 
     return print(
       error.reason === 'unreachable'
@@ -225,6 +241,24 @@ function parseFlags(args: readonly string[]): Record<string, string> | null {
   }
 
   return flags
+}
+
+/**
+ * Delete the hand-off file of a verb no daemon will read. Scans the raw args, so a malformed flag list still gives
+ * up its file.
+ */
+async function discardHandoff(verb: string | undefined, args: readonly string[]): Promise<void> {
+  const flag = verb === undefined ? undefined : HANDOFF_FLAGS[verb]
+  if (flag === undefined) {
+    return
+  }
+
+  for (let index = 0; index < args.length - 1; index += 1) {
+    const value = args[index + 1]
+    if (args[index] === `--${flag}` && value !== undefined) {
+      await removeFile(resolve(value))
+    }
+  }
 }
 
 function toResult(response: unknown): CtlResult {
