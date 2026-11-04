@@ -8,10 +8,11 @@
  * Timings come from the spike on CLI 2.1.280 (`NUM` lines of the spike results), at twice the measured p95.
  */
 
-import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 
 import { MODEL_NAME, sanitizeCommand, sanitizePrompt } from './input.ts'
+import type { PermissionMode } from './start-flags.ts'
 
 export const LIVE_SOCKET = 'kodizm-live'
 
@@ -86,6 +87,11 @@ export interface CreatePaneOptions {
   resumeSessionId?: string
   /** Matches {@link MODEL_NAME} and does not start with `-`, so the CLI cannot read it as an option. */
   model?: string
+  /** Absolute path of an MCP config file; the pane then loads that file's servers and no others. */
+  mcpConfig?: string
+  /** Absolute path of a file the CLI appends to its system prompt; only the path ever reaches argv. */
+  systemPromptFile?: string
+  permissionMode?: PermissionMode
   claudeBin?: string
   socket?: string
   /** Called with {@link SESSION_START_TIMEOUT_MS}; on false the pane is killed and `start_timeout` thrown. */
@@ -139,7 +145,11 @@ export async function createPane(options: CreatePaneOptions): Promise<Pane> {
   // 2. Without trust and onboarding the CLI opens a dialog that withholds every hook and defaults to exit.
   const env = paneEnv(options)
   const cwd = await realpath(options.cwd)
-  await seedTrust(env.CLAUDE_CONFIG_DIR === undefined ? [env.HOME] : [env.HOME, env.CLAUDE_CONFIG_DIR], cwd)
+  await seedTrust(
+    env.CLAUDE_CONFIG_DIR === undefined ? [env.HOME] : [env.HOME, env.CLAUDE_CONFIG_DIR],
+    await trustRoots(cwd),
+    approvedKeySuffix(options.env?.ANTHROPIC_API_KEY),
+  )
 
   // 3. tmux overwrites TERM from default-terminal and PATH from the client, so neither goes through -e.
   const { PATH: path, TERM: term, ...sessionEnv } = env
@@ -301,6 +311,8 @@ function paneEnv(options: CreatePaneOptions): PaneEnv {
     HOME: options.home,
     CI: '1',
     TERM: 'xterm-256color',
+    // A background task outlives the turn that started it, which a one-shot pane cannot allow; no caller overrides it.
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
   }
 }
 
@@ -310,6 +322,16 @@ function launchArgv(options: CreatePaneOptions): string[] {
   // out too: its clone guards (`Edit` denies on /workspace/.default and .repos) would block a main-checkout pane, and
   // the pane file already carries everything else the user file holds.
   const argv = [options.claudeBin ?? 'claude', '--settings', options.settingsPath, '--setting-sources', '']
+  if (options.permissionMode !== undefined) {
+    argv.push('--permission-mode', options.permissionMode)
+  }
+  if (options.mcpConfig !== undefined) {
+    // `--mcp-config` takes any number of values, so the strict flag has to follow the path directly.
+    argv.push('--mcp-config', options.mcpConfig, '--strict-mcp-config')
+  }
+  if (options.systemPromptFile !== undefined) {
+    argv.push('--append-system-prompt-file', options.systemPromptFile)
+  }
   if (options.model !== undefined) {
     argv.push('--model', options.model)
   }
@@ -321,27 +343,161 @@ function launchArgv(options: CreatePaneOptions): string[] {
 }
 
 /**
- * Mark onboarding done and the working directory trusted in each `.claude.json`, keeping whatever else it holds.
- * The trust entry is keyed by realpath: macOS `/tmp` is `/private/tmp`.
+ * The directories the CLI may ask to trust: the working directory, the repository root above it, and for a linked
+ * worktree the main checkout. A missing `.git`, gitdir or commondir adds no root; any other read error
+ * propagates. Reads files only, never runs git.
  */
-async function seedTrust(dirs: readonly string[], cwd: string): Promise<void> {
+async function trustRoots(cwd: string): Promise<string[]> {
+  const roots = new Set([cwd])
+  const repository = await findGitEntry(cwd)
+  if (repository === null) {
+    return [...roots]
+  }
+
+  roots.add(repository.root)
+  if (repository.isFile) {
+    const main = await worktreeMainRoot(repository.root)
+    if (main !== null) {
+      roots.add(main)
+    }
+  }
+
+  return [...roots]
+}
+
+/** The nearest directory at or above `start` that holds a `.git` entry. */
+async function findGitEntry(start: string): Promise<{ root: string; isFile: boolean } | null> {
+  let dir = start
+  while (true) {
+    const entry = await statIfPresent(join(dir, '.git'))
+    if (entry !== null) {
+      return {
+        root: dir,
+        isFile: entry.isFile(),
+      }
+    }
+
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return null
+    }
+    dir = parent
+  }
+}
+
+/**
+ * The main checkout of the linked worktree rooted at `root`: its `.git` file names the worktree's git dir, whose
+ * `commondir` points at the main `.git`.
+ */
+async function worktreeMainRoot(root: string): Promise<string | null> {
+  const gitfile = await readTextIfPresent(join(root, '.git'))
+  const target = gitfile === null ? undefined : /^gitdir:\s*(.+?)\s*$/m.exec(gitfile)?.[1]
+  if (target === undefined) {
+    return null
+  }
+
+  const gitdir = resolve(root, target)
+  const commondir = await readTextIfPresent(join(gitdir, 'commondir'))
+  if (commondir === null) {
+    return null
+  }
+
+  return realpathIfPresent(dirname(resolve(gitdir, commondir.trim())))
+}
+
+async function statIfPresent(path: string): Promise<Awaited<ReturnType<typeof stat>> | null> {
+  try {
+    return await stat(path)
+  } catch (error) {
+    if (isAbsent(error)) {
+      return null
+    }
+
+    throw error
+  }
+}
+
+async function readTextIfPresent(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8')
+  } catch (error) {
+    if (isAbsent(error)) {
+      return null
+    }
+
+    throw error
+  }
+}
+
+async function realpathIfPresent(path: string): Promise<string | null> {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    if (isAbsent(error)) {
+      return null
+    }
+
+    throw error
+  }
+}
+
+function isAbsent(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+}
+
+/** What the CLI keeps in `customApiKeyResponses.approved` for a key: its last 20 characters. */
+function approvedKeySuffix(apiKey: string | undefined): string | undefined {
+  return apiKey === undefined || apiKey === '' ? undefined : apiKey.slice(-20)
+}
+
+function approveKey(current: unknown, suffix: string): Record<string, unknown> {
+  const responses = isRecord(current) ? current : {}
+  const approved = stringList(responses.approved)
+
+  return {
+    ...responses,
+    approved: approved.includes(suffix) ? approved : [...approved, suffix],
+    rejected: stringList(responses.rejected),
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+/**
+ * Mark onboarding done and every root trusted in each `.claude.json`, and approve the API key suffix so the CLI does
+ * not ask about the key, keeping whatever else the file holds. The trust entries are keyed by realpath: macOS `/tmp`
+ * is `/private/tmp`.
+ */
+async function seedTrust(
+  dirs: readonly string[],
+  roots: readonly string[],
+  keySuffix: string | undefined,
+): Promise<void> {
   for (const dir of dirs) {
     const path = join(dir, '.claude.json')
     const config = await readConfig(path)
     const projects = isRecord(config.projects) ? config.projects : {}
-    const project = isRecord(projects[cwd]) ? projects[cwd] : {}
 
-    projects[cwd] = {
-      allowedTools: [],
-      ...project,
-      hasTrustDialogAccepted: true,
-      hasCompletedProjectOnboarding: true,
+    for (const root of roots) {
+      const project = isRecord(projects[root]) ? projects[root] : {}
+
+      projects[root] = {
+        allowedTools: [],
+        ...project,
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      }
     }
     const seeded = {
       theme: 'dark',
       ...config,
       hasCompletedOnboarding: true,
       projects,
+      ...(keySuffix === undefined
+        ? {}
+        : { customApiKeyResponses: approveKey(config.customApiKeyResponses, keySuffix) }),
     }
 
     // The CLI reads this file at start; a rename keeps it from seeing a half-written one.
