@@ -130,6 +130,114 @@ describe('buildPaneSettings', () => {
     await expect(buildPaneSettings({ ...options, basePath: await baseFile([1, 2]) })).rejects.toThrow()
   })
 
+  describe('with permission rules', () => {
+    const options = {
+      helperArgv: ['bun'],
+      socketPath: '/s',
+      paneId: 'p',
+    }
+
+    test('keeps the base deny list and appends the rule deny entries', async () => {
+      const settings = await buildPaneSettings({
+        ...options,
+        basePath: await baseFile({ permissions: { deny: ['WebFetch'] }, model: 'opus' }),
+        rules: {
+          allow: ['Read'],
+          deny: ['Read(//proc/**)'],
+          ask: ['Bash(git push*)'],
+        },
+      })
+
+      expect(settings.permissions).toEqual({
+        allow: ['Read'],
+        deny: ['WebFetch', 'Read(//proc/**)'],
+        ask: ['Bash(git push*)'],
+      })
+      expect(settings.model).toBe('opus')
+    })
+
+    test('removes a rule entry the base already holds', async () => {
+      const settings = await buildPaneSettings({
+        ...options,
+        basePath: await baseFile({ permissions: { deny: ['WebFetch', 'WebSearch'], allow: ['Read'] } }),
+        rules: {
+          allow: ['Read', 'Grep'],
+          deny: ['WebSearch', 'Bash'],
+          ask: [],
+        },
+      })
+
+      expect(settings.permissions).toEqual({
+        allow: ['Read', 'Grep'],
+        deny: ['WebFetch', 'WebSearch', 'Bash'],
+        ask: [],
+      })
+    })
+
+    test('creates the permissions key when the base has none', async () => {
+      const settings = await buildPaneSettings({
+        ...options,
+        basePath: await baseFile({ model: 'opus' }),
+        rules: {
+          allow: [],
+          deny: ['Edit(//etc/**)'],
+          ask: [],
+        },
+      })
+
+      expect(settings.permissions).toEqual({
+        allow: [],
+        deny: ['Edit(//etc/**)'],
+        ask: [],
+      })
+    })
+
+    test('keeps a base defaultMode and never writes one itself', async () => {
+      const withMode = await buildPaneSettings({
+        ...options,
+        basePath: await baseFile({ permissions: { defaultMode: 'acceptEdits' } }),
+        rules: {
+          allow: ['Read'],
+          deny: ['Bash'],
+          ask: ['Edit'],
+        },
+      })
+      const withoutMode = await buildPaneSettings({
+        ...options,
+        basePath: await baseFile({}),
+        rules: {
+          allow: ['Read'],
+          deny: [],
+          ask: [],
+        },
+      })
+
+      expect(withMode.permissions).toEqual({
+        defaultMode: 'acceptEdits',
+        allow: ['Read'],
+        deny: ['Bash'],
+        ask: ['Edit'],
+      })
+      expect(withoutMode.permissions).not.toHaveProperty('defaultMode')
+    })
+
+    test('gives the base permissions unchanged without rules', async () => {
+      const base = {
+        permissions: {
+          deny: ['WebFetch'],
+          defaultMode: 'acceptEdits',
+        },
+        model: 'opus',
+      }
+      const settings = await buildPaneSettings({ ...options, basePath: await baseFile(base) })
+      const bare = await buildPaneSettings({ ...options, basePath: await baseFile({}) })
+
+      expect(settings.permissions).toEqual(base.permissions)
+      expect(settings.model).toBe('opus')
+      expect(bare).not.toHaveProperty('permissions')
+    })
+  })
+
   test('writePaneSettings writes the file with mode 0600', async () => {
     const path = join(root, 'pane.settings.json')
     await writePaneSettings(path, {

@@ -57,6 +57,15 @@ export interface PaneSettingsOptions {
   helperArgv: readonly string[]
   socketPath: string
   paneId: string
+  /** Rules of the session's tool policy, appended after the base file's own entries. */
+  rules?: PermissionRules
+}
+
+/** CLI `permissions` rule strings, already translated from the canonical tool policy. */
+export interface PermissionRules {
+  allow: string[]
+  deny: string[]
+  ask: string[]
 }
 
 export interface HookHelperOptions {
@@ -86,6 +95,9 @@ export class SocketRequestError extends Error {
  * `disableAllHooks: false` so nothing the base or a later layer sets can silence them. Hooks the base declares are
  * replaced, not merged: the daemon's hooks are the only ones a Live pane runs.
  *
+ * With `rules`, each of `permissions.allow|deny|ask` is the base entries followed by the rule entries, deduped; every
+ * other base `permissions` key (a `defaultMode` included) is kept, and no mode is ever written here.
+ *
  * @throws when the base file is missing or does not hold a JSON object
  */
 export async function buildPaneSettings(options: PaneSettingsOptions): Promise<Record<string, unknown>> {
@@ -111,10 +123,32 @@ export async function buildPaneSettings(options: PaneSettingsOptions): Promise<R
     ]),
   )
 
-  return {
+  const settings: Record<string, unknown> = {
     ...base,
     disableAllHooks: false,
     hooks,
+  }
+  if (options.rules !== undefined) {
+    settings.permissions = mergePermissions(base.permissions, options.rules)
+  }
+
+  return settings
+}
+
+function mergePermissions(base: unknown, rules: PermissionRules): Record<string, unknown> {
+  const permissions = isRecord(base) ? base : {}
+  const merge = (list: keyof PermissionRules): string[] => {
+    const own = permissions[list]
+    const entries = Array.isArray(own) ? own.filter((entry) => typeof entry === 'string') : []
+
+    return [...new Set([...entries, ...rules[list]])]
+  }
+
+  return {
+    ...permissions,
+    allow: merge('allow'),
+    deny: merge('deny'),
+    ask: merge('ask'),
   }
 }
 
