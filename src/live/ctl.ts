@@ -19,7 +19,7 @@ import {
   LiveDaemon,
   defaultSocketPath,
   exitCodeFor,
-  removeFile,
+  removeHandoffFiles,
 } from './daemon.ts'
 import { DEFAULT_BASE_SETTINGS_PATH, SocketRequestError, runHookHelper, socketRequest } from './hooks.ts'
 import { LIVE_SOCKET } from './pane.ts'
@@ -263,7 +263,7 @@ function parseFlags(args: readonly string[]): Record<string, string> | null {
 
 /**
  * Delete the hand-off file of a verb no daemon will read. Scans the raw args, so a malformed flag list still gives
- * up its file.
+ * up its file. A file that cannot be removed goes to stderr by flag and errno code; the reply line still follows.
  */
 async function discardHandoff(verb: string | undefined, args: readonly string[]): Promise<void> {
   const flags = verb === undefined ? undefined : HANDOFF_FLAGS.get(verb)
@@ -271,11 +271,19 @@ async function discardHandoff(verb: string | undefined, args: readonly string[])
     return
   }
 
+  const files: Array<[string, string]> = []
   for (let index = 0; index < args.length - 1; index += 1) {
     const value = args[index + 1]
-    if (value !== undefined && flags.some((flag) => args[index] === `--${flag}`)) {
-      await removeFile(resolve(value))
+    const flag = flags.find((name) => args[index] === `--${name}`)
+    if (value !== undefined && flag !== undefined) {
+      files.push([flag, resolve(value)])
     }
+  }
+
+  for (const failure of await removeHandoffFiles(files)) {
+    process.stderr.write(
+      `${JSON.stringify({ level: 'error', message: 'tmuxd ctl could not remove a hand-off file', ...failure })}\n`,
+    )
   }
 }
 

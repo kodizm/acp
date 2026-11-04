@@ -8,6 +8,7 @@
  * Timings come from the spike on CLI 2.1.280 (`NUM` lines of the spike results), at twice the measured p95.
  */
 
+import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
@@ -99,6 +100,9 @@ export interface CreatePaneOptions {
 }
 
 let bufferSequence = 0
+
+// The tail of the seedTrust chain: settles once the last queued seed did, whatever its outcome.
+let seeding: Promise<void> = Promise.resolve()
 
 // Keyed by the tmux binary path: the answer of `tmux -V` cannot change while the process runs.
 const pasteSFlags = new Map<string, Promise<boolean>>()
@@ -466,11 +470,22 @@ function stringList(value: unknown): string[] {
 }
 
 /**
+ * Seed the `.claude.json` files one start after the other. Every pane of a daemon shares a home, so two concurrent
+ * read-modify-writes would drop each other's roots. A failed seed rejects for its own caller only; the next one runs.
+ */
+function seedTrust(dirs: readonly string[], roots: readonly string[], keySuffix: string | undefined): Promise<void> {
+  const seeded = seeding.then(() => writeTrust(dirs, roots, keySuffix))
+  seeding = seeded.catch(() => undefined)
+
+  return seeded
+}
+
+/**
  * Mark onboarding done and every root trusted in each `.claude.json`, and approve the API key suffix so the CLI does
  * not ask about the key, keeping whatever else the file holds. The trust entries are keyed by realpath: macOS `/tmp`
  * is `/private/tmp`.
  */
-async function seedTrust(
+async function writeTrust(
   dirs: readonly string[],
   roots: readonly string[],
   keySuffix: string | undefined,
@@ -502,7 +517,7 @@ async function seedTrust(
 
     // The CLI reads this file at start; a rename keeps it from seeing a half-written one.
     await mkdir(dir, { recursive: true })
-    const staging = `${path}.${process.pid}.tmp`
+    const staging = `${path}.${randomUUID()}.tmp`
     await writeFile(staging, JSON.stringify(seeded, null, 2), { mode: 0o600 })
     await rename(staging, path)
   }

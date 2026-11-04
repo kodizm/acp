@@ -1,5 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
@@ -11,6 +11,7 @@ import {
 } from '@/live/daemon.ts'
 import type { LiveEvent } from '@/live/events.ts'
 import { paneAlive } from '@/live/pane.ts'
+import type { Logger } from '@/util/logger.ts'
 import pkg from '../../../package.json' with { type: 'json' }
 
 // Runs the daemon in-process against a real tmux (socket kdz-test) and a stub CLI. The stub reads the pane's
@@ -610,16 +611,45 @@ interface Handoff {
   mcp: string
 }
 
-async function handoff(fx: Fixture, overrides: { policy?: string; mcpMode?: number } = {}): Promise<Handoff> {
+interface HandoffOverrides {
+  policy?: string
+  mcpMode?: number
+  promptMode?: number
+  /** Prefix of the file names, so concurrent starts of one fixture do not share files. */
+  tag?: string
+}
+
+async function handoff(fx: Fixture, overrides: HandoffOverrides = {}): Promise<Handoff> {
+  const tag = overrides.tag ?? ''
+
   return {
-    env: await writeSecretFile(join(fx.dir, 'live.env'), envFile(fx)),
-    policy: await writeSecretFile(join(fx.dir, 'policy.json'), overrides.policy ?? POLICY),
-    prompt: await writeSecretFile(join(fx.dir, 'system-prompt.md'), 'You run as a test pane.'),
+    env: await writeSecretFile(join(fx.dir, `${tag}live.env`), envFile(fx)),
+    policy: await writeSecretFile(join(fx.dir, `${tag}policy.json`), overrides.policy ?? POLICY),
+    prompt: await writeSecretFile(
+      join(fx.dir, `${tag}system-prompt.md`),
+      'You run as a test pane.',
+      overrides.promptMode ?? 0o600,
+    ),
     mcp: await writeSecretFile(
-      join(fx.dir, 'mcp.json'),
+      join(fx.dir, `${tag}mcp.json`),
       JSON.stringify({ mcpServers: { kodizm: { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }),
       overrides.mcpMode ?? 0o600,
     ),
+  }
+}
+
+/** A logger that keeps every error line it gets, for asserting what a cleanup reported. */
+function capturingLogger(): Logger & { errors: Array<{ message: string; meta: Record<string, unknown> }> } {
+  const errors: Array<{ message: string; meta: Record<string, unknown> }> = []
+
+  return {
+    errors,
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: (message, meta = {}) => {
+      errors.push({ message, meta })
+    },
   }
 }
 
@@ -647,6 +677,11 @@ async function remaining(paths: readonly string[]): Promise<string[]> {
   return left
 }
 
+/** The four hand-off paths a start names, as it named them. */
+function namedFiles(args: Record<string, string>): string[] {
+  return ['env-file', 'tool-policy', 'system-prompt-file', 'mcp-config'].flatMap((flag) => args[flag] ?? [])
+}
+
 async function paneSettings(fx: Fixture, pane = fx.pane): Promise<{ permissions: Record<string, string[]> }> {
   return JSON.parse(await readFile(join(fx.settingsBase, `${pane}.settings.json`), 'utf8'))
 }
@@ -672,15 +707,16 @@ describe('start contract v2', () => {
 
   test('a usage_error start removes all four hand-off files', async () => {
     const fx = await fixture()
-    const cases: Array<{ extra: Record<string, string>; policy?: string; mcpMode?: number }> = [
+    const cases: Array<{ extra: Record<string, string> } & HandoffOverrides> = [
       { extra: { bogus: '1' } },
       { extra: { 'permission-mode': 'yolo' } },
       { extra: {}, policy: 'not json' },
       { extra: {}, mcpMode: 0o644 },
+      { extra: {}, promptMode: 0o644 },
     ]
 
-    for (const { extra, policy, mcpMode } of cases) {
-      const files = await handoff(fx, { policy, mcpMode })
+    for (const { extra, ...overrides } of cases) {
+      const files = await handoff(fx, overrides)
       expect(await fx.daemon.ctl('start', startArgs(fx, files, extra))).toMatchObject({
         ok: false,
         code: 'usage_error',
@@ -690,31 +726,145 @@ describe('start contract v2', () => {
     expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
   }, 20_000)
 
-  test('relative extra paths and a symlinked mcp-config, tool-policy or env file are usage_error', async () => {
+  test('relative extra paths and a symlinked hand-off file are usage_error and remove every absolute file', async () => {
     const fx = await fixture()
+    // 1. A relative path is never unlinked; the three absolute files the start named are.
     for (const flag of ['tool-policy', 'system-prompt-file', 'mcp-config']) {
       const files = await handoff(fx)
-      expect(await fx.daemon.ctl('start', startArgs(fx, files, { [flag]: 'relative/file' }))).toMatchObject({
+      const args = startArgs(fx, files, { [flag]: 'relative/file' })
+      expect(await fx.daemon.ctl('start', args)).toMatchObject({
         code: 'usage_error',
       })
+      expect(await remaining(namedFiles(args).filter((path) => path !== 'relative/file'))).toEqual([])
     }
 
-    // 1. Each target is a valid 0600 file on its own: only the link makes the start fail.
+    // 2. Each target is a valid 0600 file on its own: only the link makes the start fail.
     for (const [flag, content] of [
       ['mcp-config', '{"mcpServers":{}}'],
       ['tool-policy', POLICY],
       ['env-file', envFile(fx)],
+      ['system-prompt-file', 'You run as a test pane.'],
     ] as const) {
       const files = await handoff(fx)
       const target = await writeSecretFile(join(fx.dir, `target-${flag}`), content)
       const link = join(fx.dir, `link-${flag}`)
       await symlink(target, link)
-      expect(await fx.daemon.ctl('start', startArgs(fx, files, { [flag]: link }))).toMatchObject({
+      const args = startArgs(fx, files, { [flag]: link })
+      expect(await fx.daemon.ctl('start', args)).toMatchObject({
         code: 'usage_error',
       })
-      expect(await remaining([link])).toEqual([])
+      expect(namedFiles(args)).toContain(link)
+      expect(await remaining(namedFiles(args))).toEqual([])
     }
     expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 20_000)
+
+  test('a start whose cwd does not exist fails at launch and removes all four hand-off files', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+
+    expect(await fx.daemon.ctl('start', startArgs(fx, files, { cwd: join(fx.dir, 'missing') }))).toMatchObject({
+      ok: false,
+      code: 'usage_error',
+    })
+
+    expect(await remaining(Object.values(files))).toEqual([])
+    expect(await status(fx)).toMatchObject({ running: false })
+  }, 20_000)
+
+  test('a refused start whose tool-policy is a directory still removes the other files and logs the flag', async () => {
+    const logger = capturingLogger()
+    const fx = await fixture({ logger })
+    const files = await handoff(fx)
+    const directory = join(fx.dir, 'policy-dir')
+    await mkdir(directory)
+
+    expect(await fx.daemon.ctl('start', startArgs(fx, files, { 'tool-policy': directory }))).toMatchObject({
+      ok: false,
+      code: 'usage_error',
+    })
+
+    expect(await remaining([files.env, files.prompt, files.mcp])).toEqual([])
+    const failure = logger.errors.find((entry) => entry.meta.flag === 'tool-policy')
+    expect(failure?.meta.code).toBeString()
+    expect(JSON.stringify(logger.errors)).not.toContain(directory)
+  }, 20_000)
+
+  test('concurrent starts of one pane id give exactly one ok and one pane_exists', async () => {
+    const fx = await fixture()
+    const first = await handoff(fx, { tag: 'a-' })
+    const second = await handoff(fx, { tag: 'b-' })
+
+    const results = await Promise.all([
+      fx.daemon.ctl('start', startArgs(fx, first)),
+      fx.daemon.ctl('start', startArgs(fx, second)),
+    ])
+
+    expect(results.map((result) => result.code).sort()).toEqual(['ok', 'pane_exists'])
+    expect(await status(fx)).toMatchObject({ running: true })
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(true)
+  }, 20_000)
+
+  test('concurrent starts past the pane cap give exactly one ok and one pane_cap', async () => {
+    const fx = await fixture({ maxPanes: 1 })
+    const first = await handoff(fx, { tag: 'a-' })
+    const second = await handoff(fx, { tag: 'b-' })
+
+    const results = await Promise.all([
+      fx.daemon.ctl('start', startArgs(fx, first)),
+      fx.daemon.ctl('start', startArgs(fx, second, { pane: `${fx.pane}-b` })),
+    ])
+
+    expect(results.map((result) => result.code).sort()).toEqual(['ok', 'pane_cap'])
+  }, 20_000)
+
+  test('a start whose pid lookup fails kills the pane, frees its slot and removes all four files', async () => {
+    const fx = await fixture({ maxPanes: 1 })
+    const files = await handoff(fx)
+    const spawn = Bun.spawn.bind(Bun)
+    const spy = spyOn(Bun, 'spawn').mockImplementation(((
+      command: string[],
+      options?: Bun.SpawnOptions.OptionsObject,
+    ) => {
+      if (command.includes('display-message')) {
+        throw Object.assign(new Error('spawn failed'), { code: 'EAGAIN' })
+      }
+
+      return spawn(command, options)
+    }) as typeof Bun.spawn)
+
+    let result: CtlResult
+    try {
+      result = await fx.daemon.ctl('start', startArgs(fx, files))
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(result).toMatchObject({ ok: false, code: 'usage_error' })
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+    expect(await status(fx)).toMatchObject({ running: false })
+    expect(await remaining(Object.values(files))).toEqual([])
+    expect((await start(fx, { pane: `${fx.pane}-next` })).ok).toBe(true)
+  }, 20_000)
+
+  test('an mcp-config reached through a symlinked parent is denied under the given and the real path', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+    const realDir = join(fx.dir, 'handoff-real')
+    const linkedDir = join(fx.dir, 'handoff-link')
+    await mkdir(realDir)
+    await symlink(realDir, linkedDir)
+    await writeSecretFile(join(realDir, 'mcp.json'), '{"mcpServers":{}}')
+    const given = join(linkedDir, 'mcp.json')
+    const real = await realpath(given)
+    expect(real).not.toBe(given)
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, files, { 'mcp-config': given }))).ok).toBe(true)
+
+    const deny = (await paneSettings(fx)).permissions.deny ?? []
+    expect(deny).toContain(`Read(/${given})`)
+    expect(deny).toContain(`Read(/${real})`)
+    expect(deny.filter((rule) => rule === `Read(/${real})`)).toHaveLength(1)
   }, 20_000)
 
   test('pane_exists and pane_cap refusals remove all four hand-off files', async () => {
@@ -746,14 +896,15 @@ describe('start contract v2', () => {
     expect(args[args.indexOf('--append-system-prompt-file') + 1]).toBe(files.prompt)
     expect(args).not.toContain('--permission-mode')
 
-    // 2. The policy lands after the base deny, and the pane may not read its own bearer file.
+    // 2. The policy lands after the base deny, and the pane may not read its own bearer file under either spelling
+    // (on macOS /tmp is /private/tmp, elsewhere both are one path).
     const settings = await paneSettings(fx)
     expect(settings.permissions.deny).toEqual([
       'WebFetch',
       'WebSearch',
       'Bash(git push*)',
       'Read(//proc/**)',
-      `Read(/${files.mcp})`,
+      ...[...new Set([files.mcp, await realpath(files.mcp)])].map((path) => `Read(/${path})`),
     ])
     expect(settings.permissions.allow).toEqual(['Bash(git status:*)'])
 
@@ -1350,6 +1501,31 @@ describe('tmuxd command line', () => {
         expect(await Bun.file(socketPath).exists()).toBe(false)
       })
     }
+
+    test('ctl start with a directory as one hand-off path still deletes the other three and prints the reply', async () => {
+      const files = await handoffFiles()
+      const directory = await mkdtemp(join(root, 'policy-dir-'))
+      const socketPath = join(root, `${shortId()}.sock`)
+
+      const result = cli(
+        ['ctl', 'start', '--pane', 'p', ...fileArgs({ ...files, 'tool-policy': directory }), '--bogus', 'x'],
+        { KODIZM_TMUXD_SOCKET: socketPath },
+      )
+
+      expect(result.exitCode).toBe(2)
+      expect(JSON.parse(result.stdout.toString())).toEqual({
+        ok: false,
+        code: 'usage_error',
+        data: { daemon_version: pkg.version },
+      })
+      for (const flag of ['env-file', 'system-prompt-file', 'mcp-config']) {
+        expect(await Bun.file(files[flag] ?? '').exists()).toBe(false)
+      }
+      const stderr = result.stderr.toString()
+      expect(stderr).toContain('"flag":"tool-policy"')
+      expect(stderr).not.toContain(directory)
+      expect(await Bun.file(socketPath).exists()).toBe(false)
+    })
 
     test('a relative path flag is resolved against the caller cwd before removal', async () => {
       const dir = await mkdtemp(join(root, 'relative-'))

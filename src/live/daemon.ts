@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { rmSync } from 'node:fs'
-import { chmod, lstat, mkdir, readFile, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, realpath, unlink } from 'node:fs/promises'
 import { type Server, type Socket, createServer } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
 
@@ -239,6 +239,20 @@ interface StartEnv {
   token: string
   gen: number
   authEnv: Record<string, string>
+}
+
+/** A start whose flags passed validation: every path is absolute. */
+interface StartRequest {
+  id: string
+  cwd: string
+  model: string | undefined
+  resume: string | undefined
+  envFile: string
+  settingsBase: string
+  policyFile: string | undefined
+  systemPromptFile: string | undefined
+  mcpConfig: string | undefined
+  extras: StartExtras
 }
 
 /**
@@ -1101,6 +1115,8 @@ export class LiveDaemon {
   public readonly logger: Logger
   public timings: DaemonTimings
   private readonly panes = new Map<string, LivePane>()
+  // Ids of starts past their guards but not yet in `panes`; never an id that is in `panes` too.
+  private readonly starting = new Set<string>()
   private server: Server | undefined
 
   public constructor(private readonly options: LiveDaemonOptions) {
@@ -1219,7 +1235,7 @@ export class LiveDaemon {
 
       return result
     } finally {
-      await removeHandoff(args, result?.ok === true)
+      await removeHandoff(args, result?.ok === true, this.logger)
     }
   }
 
@@ -1246,15 +1262,39 @@ export class LiveDaemon {
       return refuse('usage_error')
     }
 
-    // 2. State guards next, so a refused start never reads the token.
-    if (this.panes.has(id)) {
+    // 2. State guards next, so a refused start never reads the token. A start between its guards and its
+    // registration counts as a pane already: the id is reserved in the same tick the guards pass.
+    if (this.panes.has(id) || this.starting.has(id)) {
       return refuse('pane_exists')
     }
-    if (this.panes.size >= (this.options.maxPanes ?? DEFAULT_MAX_PANES)) {
+    if (this.panes.size + this.starting.size >= (this.options.maxPanes ?? DEFAULT_MAX_PANES)) {
       return refuse('pane_cap')
     }
+    this.starting.add(id)
 
-    // 3. The env and policy files are read; the prompt and MCP config only reach the CLI as paths, never read here.
+    try {
+      return await this.open({
+        id,
+        cwd,
+        model,
+        resume,
+        envFile,
+        settingsBase,
+        policyFile,
+        systemPromptFile,
+        mcpConfig,
+        extras,
+      })
+    } finally {
+      this.starting.delete(id)
+    }
+  }
+
+  /** The start past its guards, holding the reservation of `request.id`, which it hands over to the registry. */
+  private async open(request: StartRequest): Promise<CtlResult> {
+    const { id, cwd, model, resume, envFile, settingsBase, policyFile, systemPromptFile, mcpConfig, extras } = request
+
+    // 1. The env and policy files are read; the prompt and MCP config only reach the CLI as paths, never read here.
     const content = await readSecretFile(envFile)
     const env = content === null ? null : parseStartEnv(content)
     if (env === null) {
@@ -1270,7 +1310,11 @@ export class LiveDaemon {
       return refuse('usage_error')
     }
 
-    // 4. The settings file carries the hooks and the rules, never the token.
+    // 2. The CLI matches a Read deny against the path it is given and its symlink chain, so a read through the real
+    // path of the MCP config needs a rule of its own.
+    const mcpSpellings = mcpConfig === undefined ? [] : [...new Set([mcpConfig, await realpath(mcpConfig)])]
+
+    // 3. The settings file carries the hooks and the rules, never the token.
     const settingsPath = join(settingsBase, `${id}.settings.json`)
     await mkdir(settingsBase, { recursive: true, mode: 0o700 })
     await writePaneSettings(settingsPath, {
@@ -1278,10 +1322,11 @@ export class LiveDaemon {
       helperArgv: this.options.helperArgv,
       socketPath: this.options.socketPath,
       paneId: id,
-      rules: paneRules(policy, mcpConfig, extras.permissionMode),
+      rules: paneRules(policy, mcpSpellings, extras.permissionMode),
     })
 
-    // 5. Registered before launch: SessionStart arrives while createPane still waits for it.
+    // 4. Registered before launch: SessionStart arrives while createPane still waits for it. The reservation ends in
+    // the same tick, so the pane is never counted twice nor not at all.
     const pane: Pane = {
       id,
       socket: this.options.tmuxSocket ?? LIVE_SOCKET,
@@ -1296,6 +1341,7 @@ export class LiveDaemon {
       extras,
       mcpConfig,
     )
+    this.starting.delete(id)
     this.panes.set(id, live)
 
     try {
@@ -1321,8 +1367,16 @@ export class LiveDaemon {
       return refuse(launchFailure(error))
     }
 
-    // 6. The pane runs: the pid backs the liveness check and the answer.
-    live.pid = await panePid(pane)
+    // 5. The pane runs: the pid backs the liveness check and the answer. A pane whose pid cannot be read is not
+    // handed out: it would run without a monitor, hold a slot and lose its MCP config while the CLI still needs it.
+    try {
+      live.pid = await panePid(pane)
+    } catch (error) {
+      this.panes.delete(id)
+      await live.dispose()
+
+      return refuse(launchFailure(error))
+    }
     live.begin()
 
     return accept({
@@ -1684,17 +1738,15 @@ function parseStartEnv(content: string): StartEnv | null {
 
 /**
  * The rules a pane's settings add to the base file, or undefined when nothing applies. A pane given an MCP config may
- * not read it (it holds the server's bearer), and a dontAsk pane may not enter plan mode, which would leave dontAsk.
+ * not read it under any of `mcpPaths` (it holds the server's bearer), and a dontAsk pane may not enter plan mode,
+ * which would leave dontAsk.
  */
 function paneRules(
   policy: PermissionRules | undefined,
-  mcpConfig: string | undefined,
+  mcpPaths: readonly string[],
   mode: PermissionMode | undefined,
 ): PermissionRules | undefined {
-  const deny = [
-    ...(mcpConfig === undefined ? [] : [`Read(/${mcpConfig})`]),
-    ...(mode === 'dontAsk' ? ['EnterPlanMode'] : []),
-  ]
+  const deny = [...mcpPaths.map((path) => `Read(/${path})`), ...(mode === 'dontAsk' ? ['EnterPlanMode'] : [])]
   if (policy === undefined && deny.length === 0) {
     return undefined
   }
@@ -1712,15 +1764,54 @@ function optionalAbsolute(path: string | undefined): boolean {
 
 /**
  * Remove the hand-off files a start named. A relative path is never unlinked; the MCP config is kept when `keepMcp`.
+ * A file that cannot be removed is logged by its flag and errno code and never fails the start.
  */
-async function removeHandoff(args: Readonly<Record<string, string>>, keepMcp: boolean): Promise<void> {
-  for (const flag of START_FILE_FLAGS) {
+async function removeHandoff(args: Readonly<Record<string, string>>, keepMcp: boolean, logger: Logger): Promise<void> {
+  const files = START_FILE_FLAGS.flatMap((flag): Array<[string, string]> => {
     const path = args[flag]
-    if (path === undefined || !isAbsolute(path) || (keepMcp && flag === 'mcp-config')) {
-      continue
-    }
-    await removeFile(path)
+
+    return path === undefined || !isAbsolute(path) || (keepMcp && flag === 'mcp-config') ? [] : [[flag, path]]
+  })
+
+  for (const failure of await removeHandoffFiles(files)) {
+    logger.error('tmuxd could not remove a hand-off file', { ...failure })
   }
+}
+
+/** A hand-off file a cleanup could not remove: the flag that named it and the errno code, never the path. */
+export interface HandoffRemovalFailure {
+  flag: string
+  code: string
+}
+
+/**
+ * Remove hand-off files given as `[flag, path]` pairs, the MCP config first because it holds a bearer. Every file is
+ * attempted: a filesystem error (EISDIR, EPERM, EACCES) is collected and the rest still go. An error without an errno
+ * code is a bug and propagates.
+ */
+export async function removeHandoffFiles(
+  files: ReadonlyArray<readonly [string, string]>,
+): Promise<HandoffRemovalFailure[]> {
+  const ordered = [
+    ...files.filter(([flag]) => flag === 'mcp-config'),
+    ...files.filter(([flag]) => flag !== 'mcp-config'),
+  ]
+  const failures: HandoffRemovalFailure[] = []
+  for (const [flag, path] of ordered) {
+    try {
+      await removeFile(path)
+    } catch (error) {
+      if (!isErrno(error)) {
+        throw error
+      }
+      failures.push({
+        flag,
+        code: error.code,
+      })
+    }
+  }
+
+  return failures
 }
 
 /** True for a regular 0600 file that is no symlink; a missing path is false. Nothing is read. */
@@ -1766,7 +1857,7 @@ async function takeFile(path: string, read: (path: string) => Promise<string | n
 }
 
 /** Delete a file; one already gone counts as deleted. */
-export async function removeFile(path: string): Promise<void> {
+async function removeFile(path: string): Promise<void> {
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') {
       throw error
@@ -1872,7 +1963,7 @@ function deliveryFailure(error: unknown, id: string): CtlResult {
   return error.reason === 'pane_dead' ? notRunning(id) : refuse('timeout')
 }
 
-function isErrno(error: unknown): error is NodeJS.ErrnoException {
+function isErrno(error: unknown): error is NodeJS.ErrnoException & { code: string } {
   return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
 }
 

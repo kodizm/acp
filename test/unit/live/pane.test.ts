@@ -389,6 +389,34 @@ describe('createPane', () => {
     expect(Object.keys(config.projects)).toEqual([worktree])
   })
 
+  test('concurrent starts on one home both succeed and keep every trust root', async () => {
+    const shared = await fixture()
+    const others = [await fixture(), await fixture(), await fixture()]
+
+    await Promise.all(others.map((fx, index) => launch(fx, { home: shared.home, id: `kdz-pane-concurrent-${index}` })))
+
+    const config = JSON.parse(await readFile(join(shared.home, '.claude.json'), 'utf8'))
+    for (const fx of others) {
+      expect(config.projects[fx.cwd].hasTrustDialogAccepted).toBe(true)
+    }
+  })
+
+  test('a start whose seeding fails does not block a concurrent start on another home', async () => {
+    const broken = await fixture()
+    await writeFile(join(broken.home, '.claude.json'), '[]')
+    const healthy = await fixture()
+
+    const [failed, started] = await Promise.allSettled([
+      launch(broken, { id: 'kdz-pane-broken-home' }),
+      launch(healthy, { id: 'kdz-pane-healthy-home' }),
+    ])
+
+    expect(failed.status).toBe('rejected')
+    expect(started.status).toBe('fulfilled')
+    const config = JSON.parse(await readFile(join(healthy.home, '.claude.json'), 'utf8'))
+    expect(config.projects[healthy.cwd].hasTrustDialogAccepted).toBe(true)
+  })
+
   test('approves the last 20 characters of the api key, keeping the rejected list', async () => {
     const fx = await fixture()
     await writeFile(
