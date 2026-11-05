@@ -42,7 +42,7 @@ const NEWLINE = 0x0a
 
 // A plan limit names itself and says when it lifts. The server throttle's own text says "not your usage limit", so
 // the phrase alone never decides: the reset time has to be there too, and the throttle's denial rules it out.
-const USAGE_LIMIT_TEXT = /\b(usage|session|weekly) limit\b|\bhit your\b[^.\n]*\blimit\b/i
+const USAGE_LIMIT_TEXT = /\b(usage|session|weekly) limit\b|\bhit your\b[^.\n]*\blimit\b|\bout of extra usage\b/i
 const LIMIT_RESETS = /\bresets?\b/i
 const NOT_A_USAGE_LIMIT = /\bnot your (usage )?limit\b/i
 

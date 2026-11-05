@@ -277,6 +277,30 @@ describe('classifyApiError', () => {
     )
   })
 
+  test('reads every limit sentence the CLI renders as usage_limit', () => {
+    // Texts of getLimitReachedText in the CLI: each rateLimitType, the Sonnet and Opus weekly variants, the
+    // fallback, and the overage sentence with no extra usage left.
+    const rendered = [
+      "You've hit your session limit · resets 3pm",
+      "You've hit your weekly limit · resets Mon 9am",
+      "You've hit your Sonnet limit · resets Mon 9am",
+      "You've hit your Opus limit · resets Mon 9am",
+      "You've hit your usage limit · resets 3pm",
+      "You've hit your limit · resets 3pm",
+      "You're out of extra usage · resets 3pm",
+    ]
+
+    for (const text of rendered) {
+      expect(classifyApiError(apiError('rate_limit', 429, `API Error: ${text}`))?.reason).toBe('usage_limit')
+    }
+  })
+
+  test('keeps the 429 the CLI renders without quota headers as rate_limit', () => {
+    const record = apiError('rate_limit', 429, 'API Error: Request rejected (429) · slow down')
+
+    expect(classifyApiError(record)?.reason).toBe('rate_limit')
+  })
+
   test('needs resets as a word: a word that only contains it is no reset time', () => {
     const record = apiError('rate_limit', 429, "You've hit your session limit · see the presets")
 
