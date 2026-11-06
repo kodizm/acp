@@ -56,11 +56,15 @@ const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
  * Read the content of a `--features` file: the canonical `features` object of the wire, translated by the same
  * function the SDK sessions use, so one family means the same tools on both transports.
  *
- * `simple` narrows `tools` to web fetch and web search; its settings and strict-MCP effects are what a pane does
- * anyway (an empty `--setting-sources` and `--strict-mcp-config`).
+ * An unknown key is ignored, as the SDK path ignores it: a family Laravel learns before this package must not stop
+ * every automated pane from starting.
  *
- * @returns `null` for content that is no JSON object, carries an unknown key or a mistyped value, names a tool that
- *   is not a plain identifier, or gives an empty `tools` list (`--tools ""` would switch every built-in tool off).
+ * `simple` is refused. The SDK reaches web fetch and web search in that mode by skipping the settings files, whose
+ * base deny list blocks both tools; a pane always runs on its settings file, so the same narrowing would leave it no
+ * usable built-in tool.
+ *
+ * @returns `null` for content that is no JSON object, has a mistyped value, sets `simple`, names a tool that is not a
+ *   plain identifier, or gives an empty `tools` list (`--tools ""` would switch every built-in tool off).
  */
 export function parsePaneFeatures(content: string, permissionMode: PermissionMode | undefined): PaneFeatures | null {
   let json: unknown
@@ -70,8 +74,8 @@ export function parsePaneFeatures(content: string, permissionMode: PermissionMod
     return null
   }
 
-  const parsed = FeaturesSchema.strict().safeParse(json)
-  if (!parsed.success) {
+  const parsed = FeaturesSchema.safeParse(json)
+  if (!parsed.success || parsed.data.simple === true) {
     return null
   }
   const names = parsed.data.tools

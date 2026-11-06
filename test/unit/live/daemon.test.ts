@@ -958,7 +958,7 @@ describe('start contract v2', () => {
 
   test('a bad features file is a usage_error that starts no pane and removes every hand-off file', async () => {
     const fx = await fixture()
-    const contents = ['not json', '{"tools":[]}', '{"tools":["-x"]}', '{"unknown":true}']
+    const contents = ['not json', '{"tools":[]}', '{"tools":["-x"]}', '{"simple":true}']
 
     for (const content of contents) {
       const files = await handoff(fx)

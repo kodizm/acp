@@ -12,8 +12,10 @@ All notable changes to `@kodizm/acp` are documented here. The format follows [Ke
   with `--tools` (the built-in set), `--disallowedTools` (bare names, which the
   CLI removes from the model's context) and the matching `CLAUDE_CODE_DISABLE_*`
   env. A pane without the flag offers the whole tool set, as before. Content
-  that is not a features object, an empty or non-identifier tool name, or a
-  file that is not private is a `usage_error` and starts no pane. Measured on
+  that is not a features object, `simple: true` (the base settings deny both
+  web tools it would leave), an empty or non-identifier tool name, or a file
+  that is not private is a `usage_error` and starts no pane; an unknown key
+  is ignored, as on the SDK path. Measured on
   CLI 2.1.318 with a bare prompt: 22.9k prompt tokens by default, 8.8k with
   `--tools Bash,Read`, 18.0k with every family disallowed.
 

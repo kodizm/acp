@@ -178,15 +178,18 @@ describe('parsePaneFeatures', () => {
     expect(parsePaneFeatures('{}', undefined)).toEqual({ tools: undefined, disallowedTools: [], env: {} })
   })
 
-  test('simple mode narrows the tools to web fetch and web search', () => {
-    expect(parsePaneFeatures('{"simple":true}', undefined)?.tools).toEqual(['WebFetch', 'WebSearch'])
+  test('ignores a key it does not know, as the SDK path does', () => {
+    expect(parsePaneFeatures('{"someNewFamily":false,"todos":false}', undefined)?.disallowedTools).toContain(
+      'TodoWrite',
+    )
   })
 
   test('rejects what no pane may start with', () => {
     const bad = [
       'not json',
       '[]',
-      '{"unknown":true}',
+      // The base settings deny both web tools, so simple mode would leave a pane no usable built-in tool.
+      '{"simple":true}',
       '{"todos":"no"}',
       '{"tools":[]}',
       '{"tools":["--dangerously-skip-permissions"]}',
