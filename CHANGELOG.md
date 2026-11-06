@@ -2,6 +2,27 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-11-06
+
+### Added
+
+- **`ctl start --features PATH`.** A 0600 hand-off file holding the canonical
+  `features` object (the wire field SDK sessions already carry). The daemon
+  translates it with the same function the SDK driver uses and starts the pane
+  with `--tools` (the built-in set), `--disallowedTools` (bare names, which the
+  CLI removes from the model's context) and the matching `CLAUDE_CODE_DISABLE_*`
+  env. A pane without the flag offers the whole tool set, as before. Content
+  that is not a features object, an empty or non-identifier tool name, or a
+  file that is not private is a `usage_error` and starts no pane. Measured on
+  CLI 2.1.318 with a bare prompt: 22.9k prompt tokens by default, 8.8k with
+  `--tools Bash,Read`, 18.0k with every family disallowed.
+
+### Fixed
+
+- **`usage_limit` covers the out-of-extra-usage sentence.** The CLI renders
+  "You're out of extra usage · resets <time>" when the overage credit is spent
+  too; it stayed `rate_limit` and the turn waited instead of closing.
+
 ## [0.9.0] - 2026-11-04
 
 ### Added

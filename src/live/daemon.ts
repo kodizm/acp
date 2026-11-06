@@ -76,7 +76,14 @@ import {
   paneAlive,
 } from './pane.ts'
 import { parseToolPolicy } from './policy.ts'
-import { type PermissionMode, START_FILE_FLAGS, type StartExtras, parseStartExtras } from './start-flags.ts'
+import {
+  type PaneFeatures,
+  type PermissionMode,
+  START_FILE_FLAGS,
+  type StartExtras,
+  parsePaneFeatures,
+  parseStartExtras,
+} from './start-flags.ts'
 import {
   type ApiErrorClass,
   TranscriptTail,
@@ -273,6 +280,7 @@ interface StartRequest {
   policyFile: string | undefined
   systemPromptFile: string | undefined
   mcpConfig: string | undefined
+  featuresFile: string | undefined
   extras: StartExtras
 }
 
@@ -1517,6 +1525,7 @@ export class LiveDaemon {
     const policyFile = args['tool-policy']
     const systemPromptFile = args['system-prompt-file']
     const mcpConfig = args['mcp-config']
+    const featuresFile = args.features
     if (id === undefined || !PANE_ID.test(id) || cwd === undefined || !isAbsolute(cwd)) {
       return refuse('usage_error')
     }
@@ -1529,7 +1538,10 @@ export class LiveDaemon {
 
     // 1. An unknown flag or a bad extra fails the start, and so does an optional path that is not absolute.
     const extras = parseStartExtras(args)
-    if (extras === null || [policyFile, systemPromptFile, mcpConfig].some((path) => !optionalAbsolute(path))) {
+    if (
+      extras === null ||
+      [policyFile, systemPromptFile, mcpConfig, featuresFile].some((path) => !optionalAbsolute(path))
+    ) {
       return refuse('usage_error')
     }
 
@@ -1554,6 +1566,7 @@ export class LiveDaemon {
         policyFile,
         systemPromptFile,
         mcpConfig,
+        featuresFile,
         extras,
       })
     } finally {
@@ -1563,9 +1576,22 @@ export class LiveDaemon {
 
   /** The start past its guards, holding the reservation of `request.id`, which it hands over to the registry. */
   private async open(request: StartRequest): Promise<CtlResult> {
-    const { id, cwd, model, resume, envFile, settingsBase, policyFile, systemPromptFile, mcpConfig, extras } = request
+    const {
+      id,
+      cwd,
+      model,
+      resume,
+      envFile,
+      settingsBase,
+      policyFile,
+      systemPromptFile,
+      mcpConfig,
+      featuresFile,
+      extras,
+    } = request
 
-    // 1. The env and policy files are read; the prompt and MCP config only reach the CLI as paths, never read here.
+    // 1. The env, policy and features files are read; the prompt and MCP config only reach the CLI as paths, never
+    // read here.
     const content = await readSecretFile(envFile)
     const env = content === null ? null : parseStartEnv(content)
     if (env === null) {
@@ -1578,6 +1604,11 @@ export class LiveDaemon {
     }
     const policy = policyFile === undefined ? undefined : await readToolPolicy(policyFile)
     if (policy === null) {
+      return refuse('usage_error')
+    }
+    const features =
+      featuresFile === undefined ? undefined : await readPaneFeatures(featuresFile, extras.permissionMode)
+    if (features === null) {
       return refuse('usage_error')
     }
 
@@ -1622,11 +1653,13 @@ export class LiveDaemon {
         cwd,
         home: this.options.home,
         settingsPath,
-        env: env.authEnv,
+        env: { ...env.authEnv, ...features?.env },
         model,
         resumeSessionId: resume,
         mcpConfig,
         systemPromptFile,
+        tools: features?.tools,
+        disallowedTools: features?.disallowedTools,
         permissionMode: extras.permissionMode,
         claudeBin: this.options.claudeBin,
         socket: pane.socket,
@@ -2108,6 +2141,16 @@ async function readToolPolicy(path: string): Promise<PermissionRules | null> {
   const content = await readSecretFile(path)
 
   return content === null ? null : parseToolPolicy(content)
+}
+
+/** The tool surface of a features file, or null when the file is no secret file or no valid features object. */
+async function readPaneFeatures(
+  path: string,
+  permissionMode: PermissionMode | undefined,
+): Promise<PaneFeatures | null> {
+  const content = await readSecretFile(path)
+
+  return content === null ? null : parsePaneFeatures(content, permissionMode)
 }
 
 async function readFileOrNull(path: string): Promise<string | null> {

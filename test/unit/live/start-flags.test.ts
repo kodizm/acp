@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { START_FILE_FLAGS, START_FLAGS, parseStartExtras } from '@/live/start-flags.ts'
+import { START_FILE_FLAGS, START_FLAGS, parsePaneFeatures, parseStartExtras } from '@/live/start-flags.ts'
 
 const BASE_ARGS: Readonly<Record<string, string>> = {
   pane: 'p1',
@@ -9,7 +9,7 @@ const BASE_ARGS: Readonly<Record<string, string>> = {
 }
 
 describe('START_FLAGS', () => {
-  test('holds exactly the thirteen start flag names', () => {
+  test('holds exactly the fourteen start flag names', () => {
     expect([...START_FLAGS].sort()).toEqual(
       [
         'pane',
@@ -21,6 +21,7 @@ describe('START_FLAGS', () => {
         'mcp-config',
         'tool-policy',
         'system-prompt-file',
+        'features',
         'permission-mode',
         'one-shot',
         'deadline-seconds',
@@ -29,8 +30,8 @@ describe('START_FLAGS', () => {
     )
   })
 
-  test('file flags are the four hand-off files, all known start flags', () => {
-    expect([...START_FILE_FLAGS]).toEqual(['env-file', 'tool-policy', 'system-prompt-file', 'mcp-config'])
+  test('file flags are the five hand-off files, all known start flags', () => {
+    expect([...START_FILE_FLAGS]).toEqual(['env-file', 'tool-policy', 'system-prompt-file', 'mcp-config', 'features'])
     for (const flag of START_FILE_FLAGS) {
       expect(START_FLAGS.has(flag)).toBe(true)
     }
@@ -142,5 +143,60 @@ describe('parseStartExtras, unknown keys', () => {
 
   test('rejects a flag that belongs to another ctl command', () => {
     expect(parseStartExtras({ ...BASE_ARGS, 'token-file': '/tmp/t' })).toBeNull()
+  })
+})
+
+describe('parsePaneFeatures', () => {
+  const REVIEWER = JSON.stringify({
+    todos: false,
+    subagents: false,
+    backgroundTasks: false,
+    scheduling: false,
+    planMode: false,
+    worktree: false,
+    notebook: false,
+    clientTools: false,
+    autoMemory: false,
+    bundledSkills: false,
+    tools: ['Bash', 'Read'],
+  })
+
+  test('translates the reviewer role the way an SDK session does', () => {
+    const features = parsePaneFeatures(REVIEWER, 'dontAsk')
+
+    expect(features?.tools).toEqual(['Bash', 'Read'])
+    expect(features?.disallowedTools).toEqual(expect.arrayContaining(['TodoWrite', 'Agent', 'Monitor', 'NotebookEdit']))
+    expect(features?.env).toEqual({
+      CLAUDE_CODE_DISABLE_CRON: '1',
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '1',
+    })
+  })
+
+  test('an empty object changes nothing', () => {
+    expect(parsePaneFeatures('{}', undefined)).toEqual({ tools: undefined, disallowedTools: [], env: {} })
+  })
+
+  test('simple mode narrows the tools to web fetch and web search', () => {
+    expect(parsePaneFeatures('{"simple":true}', undefined)?.tools).toEqual(['WebFetch', 'WebSearch'])
+  })
+
+  test('rejects what no pane may start with', () => {
+    const bad = [
+      'not json',
+      '[]',
+      '{"unknown":true}',
+      '{"todos":"no"}',
+      '{"tools":[]}',
+      '{"tools":["--dangerously-skip-permissions"]}',
+      '{"tools":["Bash,Read"]}',
+      '{"tools":["Bash Read"]}',
+      `{"tools":["${'A'.repeat(65)}"]}`,
+    ]
+
+    for (const content of bad) {
+      expect(parsePaneFeatures(content, 'dontAsk')).toBeNull()
+    }
   })
 })

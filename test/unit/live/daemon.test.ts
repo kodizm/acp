@@ -924,6 +924,60 @@ describe('start contract v2', () => {
     expect(await remaining(Object.values(capped))).toEqual([])
   }, 20_000)
 
+  test('a features file narrows the tool surface and the env, and is removed with the other hand-off files', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(
+      join(fx.dir, 'features.json'),
+      JSON.stringify({ todos: false, scheduling: false, autoMemory: false, tools: ['Bash', 'Read'] }),
+    )
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, await handoff(fx), { features }))).ok).toBe(true)
+    expect(await Bun.file(features).exists()).toBe(false)
+
+    const args = await stubArgs(fx)
+    expect(args[args.indexOf('--tools') + 1]).toBe('Bash,Read')
+    const removed = (args[args.indexOf('--disallowedTools') + 1] ?? '').split(',')
+    expect(removed).toEqual(expect.arrayContaining(['TodoWrite', 'TaskCreate', 'Monitor', 'CronCreate']))
+    expect(removed).not.toContain('Agent')
+
+    const env = JSON.parse(await readFile(join(fx.dir, 'env.json'), 'utf8')) as Record<string, string>
+    expect(env.CLAUDE_CODE_DISABLE_CRON).toBe('1')
+    expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
+    expect(env.ANTHROPIC_API_KEY).toBe(API_KEY)
+  }, 20_000)
+
+  test('a start without a features file offers the CLI its whole tool set', async () => {
+    const fx = await fixture()
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, await handoff(fx)))).ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    expect(args).not.toContain('--tools')
+    expect(args).not.toContain('--disallowedTools')
+  }, 20_000)
+
+  test('a bad features file is a usage_error that starts no pane and removes every hand-off file', async () => {
+    const fx = await fixture()
+    const contents = ['not json', '{"tools":[]}', '{"tools":["-x"]}', '{"unknown":true}']
+
+    for (const content of contents) {
+      const files = await handoff(fx)
+      const features = await writeSecretFile(join(fx.dir, 'features.json'), content)
+
+      expect(await fx.daemon.ctl('start', startArgs(fx, files, { features }))).toMatchObject({
+        ok: false,
+        code: 'usage_error',
+      })
+      expect(await remaining([...Object.values(files), features])).toEqual([])
+    }
+
+    const loose = await writeSecretFile(join(fx.dir, 'loose.json'), '{}', 0o644)
+    expect(await fx.daemon.ctl('start', startArgs(fx, await handoff(fx), { features: loose }))).toMatchObject({
+      code: 'usage_error',
+    })
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 30_000)
+
   test('a started pane keeps only its mcp-config, launches on the extras and drops the file on stop', async () => {
     const fx = await fixture()
     const files = await handoff(fx)

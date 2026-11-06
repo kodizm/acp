@@ -92,6 +92,10 @@ export interface CreatePaneOptions {
   mcpConfig?: string
   /** Absolute path of a file the CLI appends to its system prompt; only the path ever reaches argv. */
   systemPromptFile?: string
+  /** The built-in tool set the CLI offers (`--tools`); every name is a plain identifier, the list is never empty. */
+  tools?: readonly string[]
+  /** Bare tool names the CLI removes from the model's context (`--disallowedTools`). */
+  disallowedTools?: readonly string[]
   permissionMode?: PermissionMode
   claudeBin?: string
   socket?: string
@@ -335,6 +339,13 @@ function launchArgv(options: CreatePaneOptions): string[] {
   }
   if (options.systemPromptFile !== undefined) {
     argv.push('--append-system-prompt-file', options.systemPromptFile)
+  }
+  // Both flags are variadic in the CLI, so each list is one comma-joined element and the next flag ends it.
+  if (options.tools !== undefined) {
+    argv.push('--tools', options.tools.join(','))
+  }
+  if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
+    argv.push('--disallowedTools', options.disallowedTools.join(','))
   }
   if (options.model !== undefined) {
     argv.push('--model', options.model)
