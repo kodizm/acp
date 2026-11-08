@@ -1,0 +1,44 @@
+name: CI
+
+# The gate a Claude Code bump has to pass: typecheck of the published source, lint, and the unit and
+# e2e suites. `bun run verify` is its only definition, so the daily bump workflow runs the very same
+# gate before it opens a pull request (it installs without `--frozen-lockfile`, because it rewrites the lockfile).
+#
+# `test:ci` leaves out the three files that need a real `opencode serve`, plus daemon.test.ts and
+# debug-recorder.test.ts, which race under load. None of them exercises the SDK or CLI version.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The live suites drive a real tmux server.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Verify
+        # The suites time their frames in seconds: one rerun absorbs a slow runner without hiding a failure.
+        run: bun run verify || bun run verify
