@@ -1,0 +1,159 @@
+name: Claude stable bump
+
+# Keeps the Claude Code CLI that the agent image installs on the official `stable` channel.
+#
+# Every day it reads the stable pointer and finds the SDK release that bundles that CLI. When that
+# differs from the pin it moves the pin, runs the same gate as CI, merges the change and publishes
+# the new package. The image repository follows the published version by itself (acp-follow.yml
+# there), and only its build gates decide whether `:latest` moves.
+#
+# Only the default GITHUB_TOKEN is used. Its pushes and tags start no other workflow except
+# workflow_dispatch, so the gate runs inside this job and publish.yml is dispatched explicitly.
+#
+# A release this workflow merged but could not publish is retried by the next run: the pin is then
+# current, but the version in package.json is missing on npm and its changelog entry carries the
+# workflow's name. A version a person bumped by hand is never published from here.
+#
+# A red run needs a person: the stable pointers disagree, the gate failed, or a step after the merge
+# failed. To publish by hand, push the tag (that starts publish.yml); dispatch publish.yml on a tag only
+# when this workflow pushed it, because a tag pushed with a person's credentials already starts it.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: claude-stable-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # `set -o pipefail` matters here: without it `tee` hides a failing resolver and the run stays green.
+      - name: Resolve the stable SDK
+        id: resolve
+        run: |
+          set -euo pipefail
+          bun run scripts/claude-stable.ts resolve | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Report when nothing changes
+        if: steps.resolve.outputs.kind != 'bump' && steps.resolve.outputs.recover != 'true'
+        env:
+          KIND: ${{ steps.resolve.outputs.kind }}
+          CLI: ${{ steps.resolve.outputs.cli }}
+          REASON: ${{ steps.resolve.outputs.reason }}
+        run: |
+          if [ "${KIND}" = "wait" ]; then
+            echo "::warning title=Claude stable bump is waiting::${REASON}"
+          fi
+          echo "Stable is Claude Code ${CLI}: ${KIND}." >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Move the pin
+        if: steps.resolve.outputs.kind == 'bump'
+        id: apply
+        env:
+          SDK: ${{ steps.resolve.outputs.sdk }}
+          CLI: ${{ steps.resolve.outputs.cli }}
+        run: |
+          set -euo pipefail
+          bun run scripts/claude-stable.ts apply --sdk "${SDK}" --cli "${CLI}" | tee -a "${GITHUB_OUTPUT}"
+          bun install
+
+      # The live suites drive a real tmux server.
+      - name: Install tmux
+        if: steps.resolve.outputs.kind == 'bump' || steps.resolve.outputs.recover == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      - name: Verify
+        if: steps.resolve.outputs.kind == 'bump'
+        run: bun run verify || bun run verify
+
+      - name: Open and merge the pull request
+        if: steps.resolve.outputs.kind == 'bump'
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK: ${{ steps.resolve.outputs.sdk }}
+          CLI: ${{ steps.resolve.outputs.cli }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="bot/claude-stable-${CLI}"
+          title="chore(deps): follow Claude Code ${CLI} on the stable channel"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "${branch}"
+          git add package.json bun.lock CHANGELOG.md
+          git commit -m "${title}" -m "The stable channel serves Claude Code ${CLI}, bundled by SDK ${SDK}. Released as ${VERSION}."
+
+          # A bot branch and its pull request survive a failed merge; reuse them so the next run can finish the job.
+          git push --force origin "${branch}"
+          url="$(gh pr list --head "${branch}" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "${url}" ]; then
+            url="$(gh pr create --base main --head "${branch}" --title "${title}" --body "Opened by the claude-stable-bump workflow.
+
+          The stable channel now serves Claude Code ${CLI}, which SDK ${SDK} bundles. Typecheck, lint and the unit and e2e suites passed in the workflow before this pull request was opened. Merging it releases @kodizm/acp ${VERSION}.")"
+          fi
+
+          gh pr merge "${url}" --merge --delete-branch
+          echo "commit=$(gh pr view "${url}" --json mergeCommit --jq .mergeCommit.oid)" >> "${GITHUB_OUTPUT}"
+
+      # The merge commit may carry changes that landed on main meanwhile, so it is verified again before it is tagged.
+      - name: Tag and publish
+        if: steps.resolve.outputs.kind == 'bump' || steps.resolve.outputs.recover == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          COMMIT: ${{ steps.merge.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          commit="${COMMIT:-$(git rev-parse origin/main)}"
+          git checkout --detach "${commit}"
+          bun install --frozen-lockfile
+          bun run verify || bun run verify
+
+          if ! git rev-parse -q --verify "refs/tags/v${VERSION}" > /dev/null; then
+            git tag -a "v${VERSION}" -m "v${VERSION}" "${commit}"
+            git push origin "v${VERSION}"
+          fi
+          gh workflow run publish.yml --ref "v${VERSION}"
+
+      - name: Wait for npm
+        if: steps.resolve.outputs.kind == 'bump' || steps.resolve.outputs.recover == 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 40); do
+            if [ "$(npm view "@kodizm/acp@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
+              echo "@kodizm/acp ${VERSION} is on npm." | tee -a "${GITHUB_STEP_SUMMARY}"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::@kodizm/acp ${VERSION} did not reach npm within ten minutes."
+          exit 1
