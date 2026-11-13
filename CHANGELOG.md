@@ -9,13 +9,19 @@ All notable changes to `@kodizm/acp` are documented here. The format follows [Ke
 - **`ctl start --prompt-mode append|system|agent`.** How the role prompt
   reaches the pane. `append` (also the default when the flag is absent)
   keeps passing the prompt file as `--append-system-prompt-file`; `system`
-  passes it as `--system-prompt-file`, replacing the CLI's default prompt.
-  Any other value is a `usage_error`.
+  passes it as `--system-prompt-file`, replacing the CLI's default prompt, and
+  needs `--system-prompt-file` (without it the start is a `usage_error`
+  rather than a launch on the default prompt). Any other value is a
+  `usage_error`.
 - **`ctl start --agent PLUGIN:AGENT`.** The `agent` prompt mode runs the main
   session as a plugin agent (`--agent`) whose body is the whole prompt. The
-  start needs `--prompt-mode agent`, `--agent` (letters, digits and `_.:-`,
-  up to 80 characters, no leading dash) and `--plugin-dir`, and takes no
-  `--system-prompt-file`; anything else is a `usage_error` and starts no pane.
+  start needs `--prompt-mode agent`, `--agent` and `--plugin-dir`, and takes
+  neither `--system-prompt-file` nor `--resume` (with a resume the CLI falls
+  back to its default prompt when it does not know the agent, with no error);
+  anything else is a `usage_error` and starts no pane. The agent is
+  plugin-qualified, `<plugin>:<agent>`: letters, digits and `_.-` on each
+  side, at most 40 and 60 characters, no leading dash. A bare name is refused
+  because the CLI would also match it against its built-in agents.
   `--tools` still decides the final tool list.
 - **`ctl start --cli-config-file PATH`.** A per-role JSON hand-off file
   (absolute, 0600, removed after the start like the other hand-off files):
@@ -24,9 +30,12 @@ All notable changes to `@kodizm/acp` are documented here. The format follows [Ke
   its one pinned value, merged after the feature env) and
   `disableSlashCommands` (adds `--disable-slash-commands`). An unknown key, a
   scoped or wildcard tool rule, an env name outside the allowlist or a value
-  other than the pinned one is a `usage_error` whose reply names the key in
-  `cli_config_key` and never echoes a value. The allowlist holds no auth,
-  ingest, `HOME` or `PATH` variable.
+  other than the pinned one is a `usage_error` whose reply may carry
+  `cli_config_key`: `disallowedTools`, `env`, `env.<NAME>` for an allowlisted
+  name at a wrong value, or `disableSlashCommands`; an unknown key or content
+  that is no JSON object carries no key, so a reply never echoes a value or a
+  name the caller chose. The allowlist holds no auth, ingest, `HOME` or `PATH`
+  variable.
 
 A start that sends none of the three flags launches exactly as on 0.9.3.
 

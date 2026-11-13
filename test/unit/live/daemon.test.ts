@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
-import { idleTimeoutMs } from '@/live/ctl.ts'
+import { idleTimeoutMs, runTmuxd } from '@/live/ctl.ts'
 import {
   type CtlResult,
   DAEMON_VERSION,
@@ -1056,6 +1056,9 @@ describe('start contract v2', () => {
       { drop: ['prompt-mode'], extra: agentExtra },
       { drop: [], extra: { ...agentExtra, 'prompt-mode': 'system' } },
       { drop: [], extra: { 'prompt-mode': 'replace' } },
+      { drop: ['system-prompt-file'], extra: { 'prompt-mode': 'system' } },
+      { drop: ['system-prompt-file'], extra: { ...agentExtra, resume: '11111111-2222-3333-4444-555555555555' } },
+      { drop: ['system-prompt-file'], extra: { ...agentExtra, agent: 'reviewer' } },
     ]
 
     for (const { drop, extra } of cases) {
@@ -1122,6 +1125,27 @@ describe('start contract v2', () => {
     expect(env.KODIZM_LIVE_TOKEN).toBeUndefined()
   }, 20_000)
 
+  test('a tool denied by both the features and the cli config reaches the CLI once, in the features order', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(join(fx.dir, 'features.json'), JSON.stringify({ todos: false }))
+    const cliConfig = await writeSecretFile(
+      join(fx.dir, 'cli-config.json'),
+      JSON.stringify({ disallowedTools: ['Write', 'TodoWrite', 'Edit'] }),
+    )
+
+    const result = await fx.daemon.ctl(
+      'start',
+      startArgs(fx, await handoff(fx), { features, 'cli-config-file': cliConfig }),
+    )
+    expect(result.ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    const denied = (args[args.indexOf('--disallowedTools') + 1] ?? '').split(',')
+    expect(denied.filter((tool) => tool === 'TodoWrite')).toHaveLength(1)
+    expect(denied.indexOf('TodoWrite')).toBe(0)
+    expect(denied.slice(-2)).toEqual(['Write', 'Edit'])
+  }, 20_000)
+
   test('a cli config alone denies its tools, and one without the switch keeps slash commands', async () => {
     const fx = await fixture()
     const cliConfig = await writeSecretFile(
@@ -1142,11 +1166,13 @@ describe('start contract v2', () => {
     const fx = await fixture()
     const cases: Array<[string, string | undefined]> = [
       ['not json', undefined],
-      ['{"settings":{"model":"x"}}', 'settings'],
+      ['{"settings":{"model":"x"}}', undefined],
+      ['{"sk-ant-api03-do-not-echo":1}', undefined],
       ['{"disallowedTools":["Bash(rm *)"]}', 'disallowedTools'],
-      ['{"env":{"ANTHROPIC_BASE_URL":"https://do-not-echo.example"}}', 'env.ANTHROPIC_BASE_URL'],
-      ['{"env":{"HOME":"/do-not-echo"}}', 'env.HOME'],
-      ['{"env":{"PATH":"/do-not-echo"}}', 'env.PATH'],
+      ['{"env":{"ANTHROPIC_BASE_URL":"https://do-not-echo.example"}}', 'env'],
+      ['{"env":{"sk-ant-api03-do-not-echo":"1"}}', 'env'],
+      ['{"env":{"HOME":"/do-not-echo"}}', 'env'],
+      ['{"env":{"PATH":"/do-not-echo"}}', 'env'],
       ['{"env":{"CLAUDE_CODE_DISABLE_WORKFLOWS":"do-not-echo"}}', 'env.CLAUDE_CODE_DISABLE_WORKFLOWS'],
       ['{"disableSlashCommands":"yes"}', 'disableSlashCommands'],
     ]
@@ -1176,6 +1202,41 @@ describe('start contract v2', () => {
     expect(await remaining(Object.values(relativeFiles))).toEqual([])
     expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
   }, 40_000)
+
+  test('ctl resolves a relative cli-config and features path, so the daemon reads and removes both', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(join(fx.dir, 'features.json'), '{}')
+    const cliConfig = await writeSecretFile(join(fx.dir, 'cli-config.json'), '{"disallowedTools":["Monitor"]}')
+    const args = startArgs(fx, await handoff(fx), {
+      features: relative(process.cwd(), features),
+      'cli-config-file': relative(process.cwd(), cliConfig),
+    })
+    const argv = Object.entries(args).flatMap(([flag, value]) => [`--${flag}`, value])
+
+    const written: string[] = []
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk))
+
+      return true
+    })
+    const previousSocket = process.env.KODIZM_TMUXD_SOCKET
+    process.env.KODIZM_TMUXD_SOCKET = fx.socketPath
+    try {
+      expect(await runTmuxd(['ctl', 'start', ...argv])).toBe(0)
+    } finally {
+      stdout.mockRestore()
+      if (previousSocket === undefined) {
+        Reflect.deleteProperty(process.env, 'KODIZM_TMUXD_SOCKET')
+      } else {
+        process.env.KODIZM_TMUXD_SOCKET = previousSocket
+      }
+    }
+
+    expect(JSON.parse(written.join(''))).toMatchObject({ ok: true })
+    expect(await remaining([features, cliConfig])).toEqual([])
+    const launched = await stubArgs(fx)
+    expect(launched[launched.indexOf('--disallowedTools') + 1]).toBe('Monitor')
+  }, 20_000)
 
   test('a started pane keeps only its mcp-config, launches on the extras and drops the file on stop', async () => {
     const fx = await fixture()

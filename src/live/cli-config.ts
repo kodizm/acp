@@ -33,15 +33,13 @@ export interface PaneCliConfig {
 }
 
 /**
- * A parsed config, or the refusal. `key` names what was refused (`disallowedTools`, `env.NAME`, an unknown top-level
- * key) and is undefined for content that is no JSON object or a key that is no plain identifier, so a refusal never
- * echoes a value, nor a key that could be one.
+ * A parsed config, or the refusal. `key` is one of `disallowedTools`, `env`, `env.NAME` (an allowlisted name at a bad
+ * value) or `disableSlashCommands`, and undefined for content that is no JSON object or an unknown key, so a refusal
+ * never echoes a value, nor a key a caller chose.
  */
 export type CliConfigResult = { ok: true; config: PaneCliConfig } | { ok: false; key: string | undefined }
 
 const KNOWN_KEYS: ReadonlySet<string> = new Set(['disallowedTools', 'env', 'disableSlashCommands'])
-
-const REPORTABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
 
 /**
  * Validate the content of a `--cli-config-file`. Every key is optional; `{}` changes nothing.
@@ -58,9 +56,8 @@ export function parseCliConfig(content: string): CliConfigResult {
   }
 
   // 1. The key set is closed: a key Laravel learns before this package must fail loudly, not run unenforced.
-  const unknown = Object.keys(json).find((key) => !KNOWN_KEYS.has(key))
-  if (unknown !== undefined) {
-    return refused(reportable(unknown))
+  if (Object.keys(json).some((key) => !KNOWN_KEYS.has(key))) {
+    return refused(undefined)
   }
 
   // 2. Bare names only: a scoped rule or a wildcard would keep the tool advertised or remove more than one.
@@ -80,8 +77,11 @@ export function parseCliConfig(content: string): CliConfigResult {
   const switches: Record<string, string> = {}
   for (const [name, value] of Object.entries(env)) {
     const pinned = Object.hasOwn(CLI_CONFIG_ENV, name) ? CLI_CONFIG_ENV[name] : undefined
-    if (pinned === undefined || value !== pinned) {
-      return refused(reportable(name) === undefined ? 'env' : `env.${name}`)
+    if (pinned === undefined) {
+      return refused('env')
+    }
+    if (value !== pinned) {
+      return refused(`env.${name}`)
     }
     switches[name] = pinned
   }
@@ -103,10 +103,6 @@ export function parseCliConfig(content: string): CliConfigResult {
 
 function refused(key: string | undefined): CliConfigResult {
   return { ok: false, key }
-}
-
-function reportable(key: string): string | undefined {
-  return REPORTABLE_KEY.test(key) ? key : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

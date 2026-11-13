@@ -120,8 +120,10 @@ export interface StartExtras {
 const MAX_SECONDS = 2147483
 const DIGITS = /^[0-9]+$/
 
-// The CLI takes the name as one argv element; a leading dash would read as an option.
-const AGENT_NAME = /^(?!-)[A-Za-z0-9_.:-]{1,80}$/
+// Plugin-qualified only: the CLI also matches a bare name or a suffix against its built-in agents (`general-purpose`,
+// `claude`), which would run a role the per-pane plugin dir never defined. The name is one argv element, so a leading
+// dash would read as an option.
+const AGENT_NAME = /^(?!-)[A-Za-z0-9_.-]{1,40}:[A-Za-z0-9_.-]{1,60}$/
 
 /**
  * Validate the start args and read the value-taking extras out of them.
@@ -133,9 +135,9 @@ const AGENT_NAME = /^(?!-)[A-Za-z0-9_.:-]{1,80}$/
  * @returns `null` when a key is not a start flag or an extra has a bad value: `permission-mode` outside
  *   `default|dontAsk`, `one-shot` outside `0|1`, `deadline-seconds` outside 1..2147483, `retain-failed-seconds`
  *   outside 0..2147483, `plugin-dir` not strictly under the plugin root or holding a `..` segment, `setting-sources`
- *   other than `project`, `prompt-mode` outside `append|system|agent`, an `agent` name outside the pattern, an
- *   `agent` without `prompt-mode agent`, or an agent mode missing `agent` or `plugin-dir` or carrying a
- *   `system-prompt-file`.
+ *   other than `project`, `prompt-mode` outside `append|system|agent`, an `agent` name that is not
+ *   `<plugin>:<agent>`, an `agent` without `prompt-mode agent`, a system mode without `system-prompt-file`, or an
+ *   agent mode missing `agent` or `plugin-dir` or carrying a `system-prompt-file` or a `resume`.
  */
 export function parseStartExtras(args: Readonly<Record<string, string>>): StartExtras | null {
   for (const key of Object.keys(args)) {
@@ -161,7 +163,7 @@ export function parseStartExtras(args: Readonly<Record<string, string>>): StartE
     pluginDir === null ||
     settingSources === null ||
     promptMode === null ||
-    !agentFits(promptMode, agent, pluginDir, args['system-prompt-file'])
+    !promptModeFits(promptMode, agent, pluginDir, args['system-prompt-file'], args.resume)
   ) {
     return null
   }
@@ -186,19 +188,28 @@ function parsePromptMode(value: string | undefined): PromptMode | null {
   return value === 'append' || value === 'system' || value === 'agent' ? value : null
 }
 
-// An agent is looked up in a `--plugin-dir` plugin, and its body is the whole prompt: a prompt file beside it would be
-// a second prompt the role never meant to send.
-function agentFits(
+// The system mode replaces the default prompt with the file, so without one it would launch the default prompt it was
+// asked to replace. An agent is looked up in a `--plugin-dir` plugin, and its body is the whole prompt: a prompt file
+// beside it would be a second prompt the role never meant to send, and a resume would let the CLI fall back to the
+// default prompt without an error when the agent is gone.
+function promptModeFits(
   mode: PromptMode,
   agent: string | undefined,
   pluginDir: string | undefined,
   systemPromptFile: string | undefined,
+  resume: string | undefined,
 ): boolean {
   if (mode !== 'agent') {
-    return agent === undefined
+    return agent === undefined && (mode !== 'system' || systemPromptFile !== undefined)
   }
 
-  return agent !== undefined && AGENT_NAME.test(agent) && pluginDir !== undefined && systemPromptFile === undefined
+  return (
+    agent !== undefined &&
+    AGENT_NAME.test(agent) &&
+    pluginDir !== undefined &&
+    systemPromptFile === undefined &&
+    resume === undefined
+  )
 }
 
 // The same confinement the session wire applies to `plugins`, so both transports load code from one root only.

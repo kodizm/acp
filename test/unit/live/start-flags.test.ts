@@ -206,9 +206,15 @@ describe('parseStartExtras, prompt-mode and agent', () => {
     'plugin-dir': '/opt/kodizm/plugins/live-1',
   }
 
-  test('accepts append and system, each without an agent', () => {
+  test('accepts append without a prompt file and system with one, each without an agent', () => {
     expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'append' })?.promptMode).toBe('append')
-    expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'system' })?.promptMode).toBe('system')
+    expect(
+      parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'system', 'system-prompt-file': '/tmp/prompt.md' })?.promptMode,
+    ).toBe('system')
+  })
+
+  test('the system mode without a prompt file is refused, not launched on the default prompt', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'system' })).toBeNull()
   })
 
   test('accepts agent with an agent name, a plugin dir and no system prompt file', () => {
@@ -219,8 +225,8 @@ describe('parseStartExtras, prompt-mode and agent', () => {
     })
   })
 
-  test('accepts an agent name of 80 characters from the whole allowed alphabet', () => {
-    const name = `Ab0_.:-${'x'.repeat(73)}`
+  test('accepts a plugin of 40 characters and an agent of 60 from the whole allowed alphabet', () => {
+    const name = `Ab0_.-${'x'.repeat(34)}:Ab0_.-${'y'.repeat(54)}`
 
     expect(parseStartExtras({ ...AGENT_ARGS, agent: name })?.agent).toBe(name)
   })
@@ -233,7 +239,14 @@ describe('parseStartExtras, prompt-mode and agent', () => {
 
   test.each([
     ['an empty name', ''],
-    ['a name over 80 characters', 'x'.repeat(81)],
+    ['a plugin over 40 characters', `${'x'.repeat(41)}:reviewer`],
+    ['an agent over 60 characters', `kodizm-review:${'x'.repeat(61)}`],
+    ['a bare name, which the CLI would match against a built-in agent', 'general-purpose'],
+    ['a bare built-in agent', 'claude'],
+    ['a missing plugin', ':reviewer'],
+    ['a missing agent', 'kodizm-review:'],
+    ['a second colon', 'kodizm-review:reviewer:extra'],
+    ['a leading dash on the plugin', '-x:reviewer'],
     ['a space', 'kodizm review'],
     ['a slash', 'kodizm/reviewer'],
     ['a comma', 'a,b'],
@@ -253,6 +266,10 @@ describe('parseStartExtras, prompt-mode and agent', () => {
     const { 'plugin-dir': _pluginDir, ...args } = AGENT_ARGS
 
     expect(parseStartExtras(args)).toBeNull()
+  })
+
+  test('agent mode with a resume id is refused: the CLI would drop an unknown agent and run the default prompt', () => {
+    expect(parseStartExtras({ ...AGENT_ARGS, resume: 'abc' })).toBeNull()
   })
 
   test('agent mode with a system prompt file is refused', () => {

@@ -33,8 +33,9 @@ Commands:
                                              start also takes --permission-mode default|dontAsk, --one-shot 0|1,
                                              --deadline-seconds N, --retain-failed-seconds N,
                                              --plugin-dir /opt/kodizm/plugins/DIR, --setting-sources project,
-                                             --prompt-mode append|system|agent, --agent PLUGIN:AGENT (agent mode
-                                             only, with --plugin-dir and no --system-prompt-file) and
+                                             --prompt-mode append|system|agent (system needs --system-prompt-file),
+                                             --agent PLUGIN:AGENT (agent mode only, with --plugin-dir and neither
+                                             --system-prompt-file nor --resume) and
                                              --mcp-config/--tool-policy/--system-prompt-file/--features/
                                              --cli-config-file PATH.
   hook <Event> --pane <id> --socket <path>   Hook helper the pane settings run; reads the payload on stdin.
@@ -61,6 +62,8 @@ const PATH_FLAGS: ReadonlySet<string> = new Set([
   'mcp-config',
   'tool-policy',
   'system-prompt-file',
+  'features',
+  'cli-config-file',
 ])
 
 // The files Laravel hands each verb (token, auth env, prompt text, start config): the daemon deletes them once read,

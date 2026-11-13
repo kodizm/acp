@@ -352,15 +352,6 @@ describe('createPane', () => {
     expect((await argsOf(fx)).slice(4)).toEqual(['--system-prompt-file', '/hand-off/prompt.md', '--model', 'opus'])
   })
 
-  test('the system mode without a prompt file adds no prompt flag', async () => {
-    const fx = await fixture()
-    await launchReady(fx, { promptMode: 'system' })
-
-    const args = await argsOf(fx)
-    expect(args).not.toContain('--system-prompt-file')
-    expect(args).not.toContain('--append-system-prompt-file')
-  })
-
   test('the agent mode passes the agent and no prompt file flag', async () => {
     const fx = await fixture()
     await launchReady(fx, {

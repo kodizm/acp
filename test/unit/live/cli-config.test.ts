@@ -90,8 +90,8 @@ describe('parseCliConfig, refusals', () => {
     ['a JSON array', '[]', undefined],
     ['a JSON string', '"x"', undefined],
     ['null', 'null', undefined],
-    ['an unknown top-level key', '{"settings":{}}', 'settings'],
-    ['a snake_case spelling of a known key', '{"disallowed_tools":[]}', 'disallowed_tools'],
+    ['an unknown top-level key', '{"settings":{}}', undefined],
+    ['a snake_case spelling of a known key', '{"disallowed_tools":[]}', undefined],
     ['disallowedTools that is no list', '{"disallowedTools":"Write"}', 'disallowedTools'],
     ['a tool name that is no string', '{"disallowedTools":[1]}', 'disallowedTools'],
     ['a scoped tool rule', '{"disallowedTools":["Bash(rm *)"]}', 'disallowedTools'],
@@ -102,15 +102,11 @@ describe('parseCliConfig, refusals', () => {
     ['an empty tool name', '{"disallowedTools":[""]}', 'disallowedTools'],
     ['a tool name with a leading digit', '{"disallowedTools":["1Write"]}', 'disallowedTools'],
     ['env that is no object', '{"env":["CLAUDE_CODE_DISABLE_WORKFLOWS"]}', 'env'],
-    [
-      'an env name outside the allowlist',
-      '{"env":{"ANTHROPIC_BASE_URL":"https://evil.example"}}',
-      'env.ANTHROPIC_BASE_URL',
-    ],
-    ['an auth variable', '{"env":{"ANTHROPIC_API_KEY":"sk-ant-x"}}', 'env.ANTHROPIC_API_KEY'],
-    ['HOME', '{"env":{"HOME":"/tmp"}}', 'env.HOME'],
-    ['PATH', '{"env":{"PATH":"/tmp"}}', 'env.PATH'],
-    ['an ingest variable', '{"env":{"KODIZM_LIVE_TOKEN":"x"}}', 'env.KODIZM_LIVE_TOKEN'],
+    ['an env name outside the allowlist', '{"env":{"ANTHROPIC_BASE_URL":"https://evil.example"}}', 'env'],
+    ['an auth variable', '{"env":{"ANTHROPIC_API_KEY":"sk-ant-x"}}', 'env'],
+    ['HOME', '{"env":{"HOME":"/tmp"}}', 'env'],
+    ['PATH', '{"env":{"PATH":"/tmp"}}', 'env'],
+    ['an ingest variable', '{"env":{"KODIZM_LIVE_TOKEN":"x"}}', 'env'],
     [
       'an allowlisted name at another value',
       '{"env":{"CLAUDE_CODE_DISABLE_WORKFLOWS":"0"}}',
@@ -124,12 +120,19 @@ describe('parseCliConfig, refusals', () => {
     ],
     ['disableSlashCommands as a string', '{"disableSlashCommands":"true"}', 'disableSlashCommands'],
     ['disableSlashCommands as a number', '{"disableSlashCommands":1}', 'disableSlashCommands'],
-  ])('refuses %s and names the key', (_label, content, key) => {
+  ])('refuses %s and names only a known key', (_label, content, key) => {
     expect(parseCliConfig(content)).toEqual({ ok: false, key })
   })
 
-  test('a key that is no plain identifier is refused without being echoed', () => {
-    for (const content of ['{"sk-ant-secret value":1}', '{"env":{"sk-ant secret":"1"}}']) {
+  test('a key that could carry a secret is refused without being echoed, plain identifier or not', () => {
+    const contents = [
+      '{"sk-ant-secret value":1}',
+      '{"sk_ant_api03_secret":1}',
+      '{"env":{"sk-ant secret":"1"}}',
+      '{"env":{"sk_ant_api03_secret":"1"}}',
+    ]
+
+    for (const content of contents) {
       const result = parseCliConfig(content)
 
       expect(result.ok).toBe(false)
