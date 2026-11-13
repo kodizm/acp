@@ -956,6 +956,41 @@ describe('start contract v2', () => {
     expect(args).not.toContain('--disallowedTools')
   }, 20_000)
 
+  test('a plugin dir and the project setting source reach the CLI, and the plugin dir is never unlinked', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+    const extra = { 'plugin-dir': '/opt/kodizm/plugins/live-1', 'setting-sources': 'project' }
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, files, extra))).ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe('project')
+    expect(args[args.indexOf('--plugin-dir') + 1]).toBe('/opt/kodizm/plugins/live-1')
+    expect(await remaining(Object.values(files))).toEqual([files.mcp])
+  }, 20_000)
+
+  test('a plugin dir outside the plugin root or a source other than project is a usage_error', async () => {
+    const fx = await fixture()
+    const bad: Array<Record<string, string>> = [
+      { 'plugin-dir': '/opt/kodizm/plugins/../etc' },
+      { 'plugin-dir': '/opt/kodizm/pluginsx/a' },
+      { 'plugin-dir': 'plugins/live-1' },
+      { 'plugin-dir': '/opt/kodizm/plugins/' },
+      { 'setting-sources': 'user' },
+    ]
+
+    for (const extra of bad) {
+      const files = await handoff(fx)
+
+      expect(await fx.daemon.ctl('start', startArgs(fx, files, extra))).toMatchObject({
+        ok: false,
+        code: 'usage_error',
+      })
+      expect(await remaining(Object.values(files))).toEqual([])
+    }
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 30_000)
+
   test('a bad features file is a usage_error that starts no pane and removes every hand-off file', async () => {
     const fx = await fixture()
     const contents = ['not json', '{"tools":[]}', '{"tools":["-x"]}', '{"simple":true}']

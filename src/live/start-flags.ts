@@ -4,7 +4,7 @@
  */
 
 import { translateFeaturesToClaude } from '../backends/claude/features.ts'
-import { FeaturesSchema } from '../wire/schemas.ts'
+import { FeaturesSchema, PluginPathSchema } from '../wire/schemas.ts'
 
 /**
  * Every key a `ctl start` request may carry. Anything else is rejected by the caller.
@@ -24,10 +24,13 @@ export const START_FLAGS: ReadonlySet<string> = new Set([
   'one-shot',
   'deadline-seconds',
   'retain-failed-seconds',
+  'plugin-dir',
+  'setting-sources',
 ])
 
 /**
- * The start flags whose value is an absolute path to a hand-off file the caller wrote for this start.
+ * The start flags whose value is an absolute path to a hand-off file the caller wrote for this start. `plugin-dir` is
+ * not one: it names a plugin directory the caller manages, which a start must never unlink.
  */
 export const START_FILE_FLAGS: readonly string[] = [
   'env-file',
@@ -88,11 +91,17 @@ export function parsePaneFeatures(content: string, permissionMode: PermissionMod
   return { tools: translated.tools, disallowedTools: translated.disallowedTools, env: translated.env }
 }
 
+/** The one settings source a pane may load besides its `--settings` file; absent means none. */
+export type SettingSource = 'project'
+
 export interface StartExtras {
   permissionMode: PermissionMode | undefined
   oneShot: boolean
   deadlineSeconds: number | undefined
   retainFailedSeconds: number
+  /** A plugin directory strictly under `/opt/kodizm/plugins/` with no `..` segment. */
+  pluginDir: string | undefined
+  settingSources: SettingSource | undefined
 }
 
 const MAX_SECONDS = 2147483
@@ -101,12 +110,13 @@ const DIGITS = /^[0-9]+$/
 /**
  * Validate the start args and read the value-taking extras out of them.
  *
- * Absent optional flags give `undefined`, `false`, `undefined` and `0`. Flags that are plain strings (pane, cwd,
- * model and the file paths) are not checked here; only their key has to be known.
+ * Absent optional flags give `undefined`, `false`, `undefined`, `0`, `undefined` and `undefined`. Flags that are plain
+ * strings (pane, cwd, model and the file paths) are not checked here; only their key has to be known.
  *
  * @returns `null` when a key is not a start flag or an extra has a bad value: `permission-mode` outside
  *   `default|dontAsk`, `one-shot` outside `0|1`, `deadline-seconds` outside 1..2147483, `retain-failed-seconds`
- *   outside 0..2147483.
+ *   outside 0..2147483, `plugin-dir` not strictly under the plugin root or holding a `..` segment, `setting-sources`
+ *   other than `project`.
  */
 export function parseStartExtras(args: Readonly<Record<string, string>>): StartExtras | null {
   for (const key of Object.keys(args)) {
@@ -119,8 +129,17 @@ export function parseStartExtras(args: Readonly<Record<string, string>>): StartE
   const oneShot = parseOneShot(args['one-shot'])
   const deadlineSeconds = parseSeconds(args['deadline-seconds'], 1)
   const retainFailedSeconds = parseSeconds(args['retain-failed-seconds'], 0)
+  const pluginDir = parsePluginDir(args['plugin-dir'])
+  const settingSources = parseSettingSources(args['setting-sources'])
 
-  if (permissionMode === null || oneShot === null || deadlineSeconds === null || retainFailedSeconds === null) {
+  if (
+    permissionMode === null ||
+    oneShot === null ||
+    deadlineSeconds === null ||
+    retainFailedSeconds === null ||
+    pluginDir === null ||
+    settingSources === null
+  ) {
     return null
   }
 
@@ -129,7 +148,26 @@ export function parseStartExtras(args: Readonly<Record<string, string>>): StartE
     oneShot,
     deadlineSeconds,
     retainFailedSeconds: retainFailedSeconds ?? 0,
+    pluginDir,
+    settingSources,
   }
+}
+
+// The same confinement the session wire applies to `plugins`, so both transports load code from one root only.
+function parsePluginDir(value: string | undefined): string | undefined | null {
+  if (value === undefined) {
+    return undefined
+  }
+
+  return PluginPathSchema.safeParse(value).success ? value : null
+}
+
+function parseSettingSources(value: string | undefined): SettingSource | undefined | null {
+  if (value === undefined) {
+    return undefined
+  }
+
+  return value === 'project' ? value : null
 }
 
 function parsePermissionMode(value: string | undefined): PermissionMode | undefined | null {
