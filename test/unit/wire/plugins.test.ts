@@ -49,6 +49,10 @@ describe('plugins on the session wire', () => {
     ['a sibling whose name extends the root', '/opt/kodizm/pluginsx/a'],
     ['a relative path', 'plugins/live-1'],
     ['the root itself', '/opt/kodizm/plugins/'],
+    ['a dot segment that names the root', '/opt/kodizm/plugins/.'],
+    ['a dot segment inside the path', '/opt/kodizm/plugins/./live-1'],
+    ['an empty segment', '/opt/kodizm/plugins//live-1'],
+    ['a trailing slash', '/opt/kodizm/plugins/live-1/'],
   ])('the exported schema rejects %s', (_label, path) => {
     expect(PluginPathSchema.safeParse(path).success).toBe(false)
   })
