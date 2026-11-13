@@ -2,6 +2,22 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-11-13
+
+### Added
+
+- **`ctl start --plugin-dir DIR`.** A directory strictly under
+  `/opt/kodizm/plugins/` that the pane loads as a Claude Code plugin, so a
+  role can ship native skills. The daemon validates the path (no `..` segment,
+  nothing outside the plugin root) and passes it to the CLI as `--plugin-dir`;
+  anything else is a `usage_error` and starts no pane. A pane without the flag
+  loads no plugin directory, as before.
+- **`ctl start --setting-sources project`.** The pane loads the repository's
+  project settings besides its `--settings` file. Without the flag the daemon
+  keeps passing an empty source list, so a pane still loads nothing but its own
+  settings file. `project` is the only accepted value; any other is a
+  `usage_error`.
+
 ## [0.9.2] - 2026-11-08
 
 ### Changed
