@@ -13,7 +13,7 @@ import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/prom
 import { dirname, join, resolve } from 'node:path'
 
 import { MODEL_NAME, sanitizeCommand, sanitizePrompt } from './input.ts'
-import type { PermissionMode, SettingSource } from './start-flags.ts'
+import type { PermissionMode, PromptMode, SettingSource } from './start-flags.ts'
 
 export const LIVE_SOCKET = 'kodizm-live'
 
@@ -90,12 +90,21 @@ export interface CreatePaneOptions {
   model?: string
   /** Absolute path of an MCP config file; the pane then loads that file's servers and no others. */
   mcpConfig?: string
-  /** Absolute path of a file the CLI appends to its system prompt; only the path ever reaches argv. */
+  /**
+   * Absolute path of the role's prompt file; only the path ever reaches argv. The CLI appends it to its default
+   * prompt, or replaces the default with it under the `system` prompt mode; the `agent` mode never passes it.
+   */
   systemPromptFile?: string
+  /** Absent means `append`, the behaviour of a start that names no mode. */
+  promptMode?: PromptMode
+  /** The `<plugin>:<agent>` the main session runs as (`--agent`); the caller sets it for the `agent` mode only. */
+  agent?: string
   /** The built-in tool set the CLI offers (`--tools`); every name is a plain identifier, the list is never empty. */
   tools?: readonly string[]
   /** Bare tool names the CLI removes from the model's context (`--disallowedTools`). */
   disallowedTools?: readonly string[]
+  /** Removes every skill and the Skill tool (`--disable-slash-commands`). */
+  disableSlashCommands?: boolean
   permissionMode?: PermissionMode
   /** A plugin directory the caller confined to `/opt/kodizm/plugins/` (`parseStartExtras`); passed as `--plugin-dir`. */
   pluginDir?: string
@@ -352,15 +361,16 @@ function launchArgv(options: CreatePaneOptions): string[] {
     // `--mcp-config` takes any number of values, so the strict flag has to follow the path directly.
     argv.push('--mcp-config', options.mcpConfig, '--strict-mcp-config')
   }
-  if (options.systemPromptFile !== undefined) {
-    argv.push('--append-system-prompt-file', options.systemPromptFile)
-  }
+  argv.push(...promptArgv(options))
   // Both flags are variadic in the CLI, so each list is one comma-joined element and the next flag ends it.
   if (options.tools !== undefined) {
     argv.push('--tools', options.tools.join(','))
   }
   if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
     argv.push('--disallowedTools', options.disallowedTools.join(','))
+  }
+  if (options.disableSlashCommands === true) {
+    argv.push('--disable-slash-commands')
   }
   if (options.model !== undefined) {
     argv.push('--model', options.model)
@@ -370,6 +380,17 @@ function launchArgv(options: CreatePaneOptions): string[] {
   }
 
   return argv
+}
+
+function promptArgv(options: CreatePaneOptions): string[] {
+  switch (options.promptMode ?? 'append') {
+    case 'agent':
+      return options.agent === undefined ? [] : ['--agent', options.agent]
+    case 'system':
+      return options.systemPromptFile === undefined ? [] : ['--system-prompt-file', options.systemPromptFile]
+    case 'append':
+      return options.systemPromptFile === undefined ? [] : ['--append-system-prompt-file', options.systemPromptFile]
+  }
 }
 
 /**

@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
-import { idleTimeoutMs } from '@/live/ctl.ts'
+import { idleTimeoutMs, runTmuxd } from '@/live/ctl.ts'
 import {
   type CtlResult,
   DAEMON_VERSION,
@@ -1012,6 +1012,231 @@ describe('start contract v2', () => {
     })
     expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
   }, 30_000)
+
+  test('the system prompt mode hands the prompt file over as the replacing prompt', async () => {
+    const fx = await fixture()
+    const files = await handoff(fx)
+
+    expect((await fx.daemon.ctl('start', startArgs(fx, files, { 'prompt-mode': 'system' }))).ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    expect(args[args.indexOf('--system-prompt-file') + 1]).toBe(files.prompt)
+    expect(args).not.toContain('--append-system-prompt-file')
+    expect(await remaining(Object.values(files))).toEqual([files.mcp])
+  }, 20_000)
+
+  test('the agent prompt mode runs the plugin agent with no prompt file flag', async () => {
+    const fx = await fixture()
+    const { 'system-prompt-file': _prompt, ...args } = startArgs(fx, await handoff(fx), {
+      'prompt-mode': 'agent',
+      agent: 'kodizm-review:reviewer',
+      'plugin-dir': '/opt/kodizm/plugins/live-1',
+    })
+
+    expect((await fx.daemon.ctl('start', args)).ok).toBe(true)
+
+    const argv = await stubArgs(fx)
+    expect(argv[argv.indexOf('--agent') + 1]).toBe('kodizm-review:reviewer')
+    expect(argv[argv.indexOf('--plugin-dir') + 1]).toBe('/opt/kodizm/plugins/live-1')
+    expect(argv).not.toContain('--system-prompt-file')
+    expect(argv).not.toContain('--append-system-prompt-file')
+  }, 20_000)
+
+  test('an agent start missing its agent or plugin dir, or carrying a prompt file, is a usage_error', async () => {
+    const fx = await fixture()
+    const agentExtra = {
+      'prompt-mode': 'agent',
+      agent: 'kodizm-review:reviewer',
+      'plugin-dir': '/opt/kodizm/plugins/live-1',
+    }
+    const cases: Array<{ drop: string[]; extra: Record<string, string> }> = [
+      { drop: ['system-prompt-file', 'agent'], extra: agentExtra },
+      { drop: ['system-prompt-file', 'plugin-dir'], extra: agentExtra },
+      { drop: [], extra: agentExtra },
+      { drop: ['prompt-mode'], extra: agentExtra },
+      { drop: [], extra: { ...agentExtra, 'prompt-mode': 'system' } },
+      { drop: [], extra: { 'prompt-mode': 'replace' } },
+      { drop: ['system-prompt-file'], extra: { 'prompt-mode': 'system' } },
+      { drop: ['system-prompt-file'], extra: { ...agentExtra, resume: '11111111-2222-3333-4444-555555555555' } },
+      { drop: ['system-prompt-file'], extra: { ...agentExtra, agent: 'reviewer' } },
+    ]
+
+    for (const { drop, extra } of cases) {
+      const files = await handoff(fx)
+      const args = Object.fromEntries(
+        Object.entries(startArgs(fx, files, extra)).filter(([flag]) => !drop.includes(flag)),
+      )
+
+      expect(await fx.daemon.ctl('start', args)).toMatchObject({ ok: false, code: 'usage_error' })
+      expect(await remaining(namedFiles(args))).toEqual([])
+    }
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 30_000)
+
+  test('a cli config unions its denied tools with the features, adds its switches and is removed', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(
+      join(fx.dir, 'features.json'),
+      JSON.stringify({ todos: false, scheduling: false }),
+    )
+    const cliConfig = await writeSecretFile(
+      join(fx.dir, 'cli-config.json'),
+      JSON.stringify({
+        disallowedTools: ['Monitor', 'Write', 'TodoWrite', 'Write'],
+        env: {
+          CLAUDE_CODE_DISABLE_WORKFLOWS: '1',
+          CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: 'false',
+        },
+        disableSlashCommands: true,
+      }),
+    )
+    const files = await handoff(fx)
+
+    const result = await fx.daemon.ctl('start', startArgs(fx, files, { features, 'cli-config-file': cliConfig }))
+    expect(result.ok).toBe(true)
+    expect(await remaining([...Object.values(files), features, cliConfig])).toEqual([files.mcp])
+
+    // 1. The feature removals come first, then the config's own, each name once.
+    const args = await stubArgs(fx)
+    const fromFeatures = (args[args.indexOf('--disallowedTools') + 1] ?? '').split(',')
+    expect(fromFeatures).toEqual([
+      'TodoWrite',
+      'TaskCreate',
+      'TaskGet',
+      'TaskUpdate',
+      'TaskList',
+      'Monitor',
+      'CronCreate',
+      'CronDelete',
+      'CronList',
+      'ScheduleWakeup',
+      'RemoteTrigger',
+      'Write',
+    ])
+    expect(args).toContain('--disable-slash-commands')
+
+    // 2. The switches join the feature env; auth and home stay the daemon's.
+    const env = JSON.parse(await readFile(join(fx.dir, 'env.json'), 'utf8')) as Record<string, string>
+    expect(env.CLAUDE_CODE_DISABLE_WORKFLOWS).toBe('1')
+    expect(env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION).toBe('false')
+    expect(env.CLAUDE_CODE_DISABLE_CRON).toBe('1')
+    expect(env.ANTHROPIC_API_KEY).toBe(API_KEY)
+    expect(env.HOME).toBe(fx.home)
+    expect(env.KODIZM_LIVE_TOKEN).toBeUndefined()
+  }, 20_000)
+
+  test('a tool denied by both the features and the cli config reaches the CLI once, in the features order', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(join(fx.dir, 'features.json'), JSON.stringify({ todos: false }))
+    const cliConfig = await writeSecretFile(
+      join(fx.dir, 'cli-config.json'),
+      JSON.stringify({ disallowedTools: ['Write', 'TodoWrite', 'Edit'] }),
+    )
+
+    const result = await fx.daemon.ctl(
+      'start',
+      startArgs(fx, await handoff(fx), { features, 'cli-config-file': cliConfig }),
+    )
+    expect(result.ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    const denied = (args[args.indexOf('--disallowedTools') + 1] ?? '').split(',')
+    expect(denied.filter((tool) => tool === 'TodoWrite')).toHaveLength(1)
+    expect(denied.indexOf('TodoWrite')).toBe(0)
+    expect(denied.slice(-2)).toEqual(['Write', 'Edit'])
+  }, 20_000)
+
+  test('a cli config alone denies its tools, and one without the switch keeps slash commands', async () => {
+    const fx = await fixture()
+    const cliConfig = await writeSecretFile(
+      join(fx.dir, 'cli-config.json'),
+      JSON.stringify({ disallowedTools: ['Monitor'], disableSlashCommands: false }),
+    )
+
+    const result = await fx.daemon.ctl('start', startArgs(fx, await handoff(fx), { 'cli-config-file': cliConfig }))
+    expect(result.ok).toBe(true)
+
+    const args = await stubArgs(fx)
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Monitor')
+    expect(args).not.toContain('--tools')
+    expect(args).not.toContain('--disable-slash-commands')
+  }, 20_000)
+
+  test('a bad cli config is a usage_error naming the key, never the value, and removes every file', async () => {
+    const fx = await fixture()
+    const cases: Array<[string, string | undefined]> = [
+      ['not json', undefined],
+      ['{"settings":{"model":"x"}}', undefined],
+      ['{"sk-ant-api03-do-not-echo":1}', undefined],
+      ['{"disallowedTools":["Bash(rm *)"]}', 'disallowedTools'],
+      ['{"env":{"ANTHROPIC_BASE_URL":"https://do-not-echo.example"}}', 'env'],
+      ['{"env":{"sk-ant-api03-do-not-echo":"1"}}', 'env'],
+      ['{"env":{"HOME":"/do-not-echo"}}', 'env'],
+      ['{"env":{"PATH":"/do-not-echo"}}', 'env'],
+      ['{"env":{"CLAUDE_CODE_DISABLE_WORKFLOWS":"do-not-echo"}}', 'env.CLAUDE_CODE_DISABLE_WORKFLOWS'],
+      ['{"disableSlashCommands":"yes"}', 'disableSlashCommands'],
+    ]
+
+    for (const [content, key] of cases) {
+      const files = await handoff(fx)
+      const cliConfig = await writeSecretFile(join(fx.dir, 'cli-config.json'), content)
+
+      const result = await fx.daemon.ctl('start', startArgs(fx, files, { 'cli-config-file': cliConfig }))
+      expect(result).toMatchObject({ ok: false, code: 'usage_error' })
+      expect(result.data?.cli_config_key).toBe(key)
+      expect(JSON.stringify(result)).not.toContain('do-not-echo')
+      expect(await remaining([...Object.values(files), cliConfig])).toEqual([])
+    }
+
+    // A config readable by others or named by a relative path is refused like any other hand-off file.
+    const loose = await writeSecretFile(join(fx.dir, 'loose.json'), '{}', 0o644)
+    const looseFiles = await handoff(fx)
+    expect(await fx.daemon.ctl('start', startArgs(fx, looseFiles, { 'cli-config-file': loose }))).toMatchObject({
+      code: 'usage_error',
+    })
+    expect(await remaining([...Object.values(looseFiles), loose])).toEqual([])
+    const relativeFiles = await handoff(fx)
+    expect(
+      await fx.daemon.ctl('start', startArgs(fx, relativeFiles, { 'cli-config-file': 'cli-config.json' })),
+    ).toMatchObject({ code: 'usage_error' })
+    expect(await remaining(Object.values(relativeFiles))).toEqual([])
+    expect(await paneAlive({ id: fx.pane, socket: SOCKET })).toBe(false)
+  }, 40_000)
+
+  test('ctl resolves a relative cli-config and features path, so the daemon reads and removes both', async () => {
+    const fx = await fixture()
+    const features = await writeSecretFile(join(fx.dir, 'features.json'), '{}')
+    const cliConfig = await writeSecretFile(join(fx.dir, 'cli-config.json'), '{"disallowedTools":["Monitor"]}')
+    const args = startArgs(fx, await handoff(fx), {
+      features: relative(process.cwd(), features),
+      'cli-config-file': relative(process.cwd(), cliConfig),
+    })
+    const argv = Object.entries(args).flatMap(([flag, value]) => [`--${flag}`, value])
+
+    const written: string[] = []
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk))
+
+      return true
+    })
+    const previousSocket = process.env.KODIZM_TMUXD_SOCKET
+    process.env.KODIZM_TMUXD_SOCKET = fx.socketPath
+    try {
+      expect(await runTmuxd(['ctl', 'start', ...argv])).toBe(0)
+    } finally {
+      stdout.mockRestore()
+      if (previousSocket === undefined) {
+        Reflect.deleteProperty(process.env, 'KODIZM_TMUXD_SOCKET')
+      } else {
+        process.env.KODIZM_TMUXD_SOCKET = previousSocket
+      }
+    }
+
+    expect(JSON.parse(written.join(''))).toMatchObject({ ok: true })
+    expect(await remaining([features, cliConfig])).toEqual([])
+    const launched = await stubArgs(fx)
+    expect(launched[launched.indexOf('--disallowedTools') + 1]).toBe('Monitor')
+  }, 20_000)
 
   test('a started pane keeps only its mcp-config, launches on the extras and drops the file on stop', async () => {
     const fx = await fixture()

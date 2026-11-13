@@ -9,7 +9,7 @@ const BASE_ARGS: Readonly<Record<string, string>> = {
 }
 
 describe('START_FLAGS', () => {
-  test('holds exactly the sixteen start flag names', () => {
+  test('holds exactly the nineteen start flag names', () => {
     expect([...START_FLAGS].sort()).toEqual(
       [
         'pane',
@@ -28,12 +28,22 @@ describe('START_FLAGS', () => {
         'retain-failed-seconds',
         'plugin-dir',
         'setting-sources',
+        'prompt-mode',
+        'agent',
+        'cli-config-file',
       ].sort(),
     )
   })
 
-  test('file flags are the five hand-off files, all known start flags', () => {
-    expect([...START_FILE_FLAGS]).toEqual(['env-file', 'tool-policy', 'system-prompt-file', 'mcp-config', 'features'])
+  test('file flags are the six hand-off files, all known start flags', () => {
+    expect([...START_FILE_FLAGS]).toEqual([
+      'env-file',
+      'tool-policy',
+      'system-prompt-file',
+      'mcp-config',
+      'features',
+      'cli-config-file',
+    ])
     for (const flag of START_FILE_FLAGS) {
       expect(START_FLAGS.has(flag)).toBe(true)
     }
@@ -45,7 +55,7 @@ describe('START_FLAGS', () => {
 })
 
 describe('parseStartExtras, defaults', () => {
-  test('absent optional flags give undefined, false, undefined, 0 and no plugin dir or setting source', () => {
+  test('absent optional flags give undefined, false, undefined, 0, no plugin dir or source, and append', () => {
     expect(parseStartExtras(BASE_ARGS)).toEqual({
       permissionMode: undefined,
       oneShot: false,
@@ -53,6 +63,8 @@ describe('parseStartExtras, defaults', () => {
       retainFailedSeconds: 0,
       pluginDir: undefined,
       settingSources: undefined,
+      promptMode: 'append',
+      agent: undefined,
     })
   })
 
@@ -71,6 +83,8 @@ describe('parseStartExtras, defaults', () => {
       'retain-failed-seconds': '90',
       'plugin-dir': '/opt/kodizm/plugins/live-1',
       'setting-sources': 'project',
+      'prompt-mode': 'system',
+      'cli-config-file': '/tmp/cli-config.json',
     }
 
     expect(parseStartExtras(args)).toEqual({
@@ -80,6 +94,8 @@ describe('parseStartExtras, defaults', () => {
       retainFailedSeconds: 90,
       pluginDir: '/opt/kodizm/plugins/live-1',
       settingSources: 'project',
+      promptMode: 'system',
+      agent: undefined,
     })
   })
 })
@@ -180,6 +196,99 @@ describe('parseStartExtras, setting-sources', () => {
       expect(parseStartExtras({ ...BASE_ARGS, 'setting-sources': bad })).toBeNull()
     })
   }
+})
+
+describe('parseStartExtras, prompt-mode and agent', () => {
+  const AGENT_ARGS: Readonly<Record<string, string>> = {
+    ...BASE_ARGS,
+    'prompt-mode': 'agent',
+    agent: 'kodizm-review:reviewer',
+    'plugin-dir': '/opt/kodizm/plugins/live-1',
+  }
+
+  test('accepts append without a prompt file and system with one, each without an agent', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'append' })?.promptMode).toBe('append')
+    expect(
+      parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'system', 'system-prompt-file': '/tmp/prompt.md' })?.promptMode,
+    ).toBe('system')
+  })
+
+  test('the system mode without a prompt file is refused, not launched on the default prompt', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': 'system' })).toBeNull()
+  })
+
+  test('accepts agent with an agent name, a plugin dir and no system prompt file', () => {
+    expect(parseStartExtras(AGENT_ARGS)).toMatchObject({
+      promptMode: 'agent',
+      agent: 'kodizm-review:reviewer',
+      pluginDir: '/opt/kodizm/plugins/live-1',
+    })
+  })
+
+  test('accepts a plugin of 40 characters and an agent of 60 from the whole allowed alphabet', () => {
+    const name = `Ab0_.-${'x'.repeat(34)}:Ab0_.-${'y'.repeat(54)}`
+
+    expect(parseStartExtras({ ...AGENT_ARGS, agent: name })?.agent).toBe(name)
+  })
+
+  for (const bad of ['', 'Append', 'replace', 'agent ', 'append,system']) {
+    test(`rejects the prompt mode ${JSON.stringify(bad)}`, () => {
+      expect(parseStartExtras({ ...BASE_ARGS, 'prompt-mode': bad })).toBeNull()
+    })
+  }
+
+  test.each([
+    ['an empty name', ''],
+    ['a plugin over 40 characters', `${'x'.repeat(41)}:reviewer`],
+    ['an agent over 60 characters', `kodizm-review:${'x'.repeat(61)}`],
+    ['a bare name, which the CLI would match against a built-in agent', 'general-purpose'],
+    ['a bare built-in agent', 'claude'],
+    ['a missing plugin', ':reviewer'],
+    ['a missing agent', 'kodizm-review:'],
+    ['a second colon', 'kodizm-review:reviewer:extra'],
+    ['a leading dash on the plugin', '-x:reviewer'],
+    ['a space', 'kodizm review'],
+    ['a slash', 'kodizm/reviewer'],
+    ['a comma', 'a,b'],
+    ['a name the CLI could read as an option', '--dangerously-skip-permissions'],
+    ['a leading dash', '-x'],
+  ])('rejects an agent with %s', (_label, agent) => {
+    expect(parseStartExtras({ ...AGENT_ARGS, agent })).toBeNull()
+  })
+
+  test('agent mode without an agent name is refused', () => {
+    const { agent: _agent, ...args } = AGENT_ARGS
+
+    expect(parseStartExtras(args)).toBeNull()
+  })
+
+  test('agent mode without a plugin dir is refused', () => {
+    const { 'plugin-dir': _pluginDir, ...args } = AGENT_ARGS
+
+    expect(parseStartExtras(args)).toBeNull()
+  })
+
+  test('agent mode with a resume id is refused: the CLI would drop an unknown agent and run the default prompt', () => {
+    expect(parseStartExtras({ ...AGENT_ARGS, resume: 'abc' })).toBeNull()
+  })
+
+  test('agent mode with a system prompt file is refused', () => {
+    expect(parseStartExtras({ ...AGENT_ARGS, 'system-prompt-file': '/tmp/prompt.md' })).toBeNull()
+  })
+
+  for (const mode of [undefined, 'append', 'system']) {
+    test(`an agent name under the prompt mode ${mode ?? '(absent)'} is refused`, () => {
+      const { 'prompt-mode': _mode, ...args } = AGENT_ARGS
+
+      expect(parseStartExtras(mode === undefined ? args : { ...args, 'prompt-mode': mode })).toBeNull()
+    })
+  }
+})
+
+describe('parseStartExtras, cli-config-file', () => {
+  test('is a known flag whose content the daemon checks', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'cli-config-file': '/tmp/cli-config.json' })).not.toBeNull()
+  })
 })
 
 describe('parseStartExtras, unknown keys', () => {
