@@ -313,6 +313,31 @@ describe('createPane', () => {
     expect(args).not.toContain('--append-system-prompt-file')
   })
 
+  test('adds the plugin dir and loads the project setting source when both are given', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { pluginDir: '/opt/kodizm/plugins/live-1', settingSources: 'project', model: 'opus' })
+
+    expect(await argsOf(fx)).toEqual([
+      '--settings',
+      join(fx.dir, 'settings.json'),
+      '--setting-sources',
+      'project',
+      '--plugin-dir',
+      '/opt/kodizm/plugins/live-1',
+      '--model',
+      'opus',
+    ])
+  })
+
+  test('keeps the empty source list and adds no plugin dir when neither is given', async () => {
+    const fx = await fixture()
+    await launchReady(fx)
+
+    const args = await argsOf(fx)
+    expect(args.slice(0, 4)).toEqual(['--settings', join(fx.dir, 'settings.json'), '--setting-sources', ''])
+    expect(args).not.toContain('--plugin-dir')
+  })
+
   test('disables background tasks even when the env asks otherwise', async () => {
     const fx = await fixture()
     await launchReady(fx, { env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '0' } })

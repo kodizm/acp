@@ -1536,7 +1536,8 @@ export class LiveDaemon {
       return refuse('usage_error')
     }
 
-    // 1. An unknown flag or a bad extra fails the start, and so does an optional path that is not absolute.
+    // 1. An unknown flag or a bad extra fails the start (a plugin dir outside its root, a setting source other than
+    // project), and so does an optional path that is not absolute.
     const extras = parseStartExtras(args)
     if (
       extras === null ||
@@ -1661,6 +1662,8 @@ export class LiveDaemon {
         tools: features?.tools,
         disallowedTools: features?.disallowedTools,
         permissionMode: extras.permissionMode,
+        pluginDir: extras.pluginDir,
+        settingSources: extras.settingSources,
         claudeBin: this.options.claudeBin,
         socket: pane.socket,
         confirmStarted: (timeoutMs) => live.started.wait(timeoutMs),

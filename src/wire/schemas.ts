@@ -22,14 +22,16 @@ import { z } from 'zod'
  */
 const AbsolutePathSchema = z.string().regex(/^\//, 'path must be absolute (start with "/")')
 
-const PLUGIN_ROOT = '/opt/kodizm/plugins/'
+/** The one directory every plugin the CLI may load lives under, trailing slash included. */
+export const PLUGIN_ROOT = '/opt/kodizm/plugins/'
 
 /**
  * A Claude Code plugin directory baked into the image. Confined to
  * {@link PLUGIN_ROOT} with no `..` segment, so a request cannot make the
  * CLI load code from anywhere else on the container's filesystem.
+ * Shared by the session wire and the tmuxd `--plugin-dir` start flag.
  */
-const PluginPathSchema = AbsolutePathSchema.refine(
+export const PluginPathSchema = AbsolutePathSchema.refine(
   (path) => path.length > PLUGIN_ROOT.length && path.startsWith(PLUGIN_ROOT) && !path.split('/').includes('..'),
   { message: `plugin path must live under ${PLUGIN_ROOT} with no ".." segment` },
 )

@@ -13,7 +13,7 @@ import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/prom
 import { dirname, join, resolve } from 'node:path'
 
 import { MODEL_NAME, sanitizeCommand, sanitizePrompt } from './input.ts'
-import type { PermissionMode } from './start-flags.ts'
+import type { PermissionMode, SettingSource } from './start-flags.ts'
 
 export const LIVE_SOCKET = 'kodizm-live'
 
@@ -97,6 +97,10 @@ export interface CreatePaneOptions {
   /** Bare tool names the CLI removes from the model's context (`--disallowedTools`). */
   disallowedTools?: readonly string[]
   permissionMode?: PermissionMode
+  /** A plugin directory the caller confined to `/opt/kodizm/plugins/` (`parseStartExtras`); passed as `--plugin-dir`. */
+  pluginDir?: string
+  /** The settings source loaded besides the `--settings` file; absent loads none. */
+  settingSources?: SettingSource
   claudeBin?: string
   socket?: string
   /** Called with {@link SESSION_START_TIMEOUT_MS}; on false the pane is killed and `start_timeout` thrown. */
@@ -328,8 +332,19 @@ function launchArgv(options: CreatePaneOptions): string[] {
   // An empty `--setting-sources` loads no source but the `--settings` file (CLI 2.1.280). That keeps the repository's
   // settings out, so a repo `disableAllHooks` cannot silence the hooks the daemon depends on, and keeps the user file
   // out too: its clone guards (`Edit` denies on /workspace/.default and .repos) would block a main-checkout pane, and
-  // the pane file already carries everything else the user file holds.
-  const argv = [options.claudeBin ?? 'claude', '--settings', options.settingsPath, '--setting-sources', '']
+  // the pane file already carries everything else the user file holds. `project` re-admits the repository's
+  // `.claude/settings.json`, its hooks and a `disableAllHooks` included, so only a caller that accepts that for the
+  // repository's own skills and settings asks for it; the user file stays out either way.
+  const argv = [
+    options.claudeBin ?? 'claude',
+    '--settings',
+    options.settingsPath,
+    '--setting-sources',
+    options.settingSources ?? '',
+  ]
+  if (options.pluginDir !== undefined) {
+    argv.push('--plugin-dir', options.pluginDir)
+  }
   if (options.permissionMode !== undefined) {
     argv.push('--permission-mode', options.permissionMode)
   }

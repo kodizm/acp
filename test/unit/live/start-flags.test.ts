@@ -9,7 +9,7 @@ const BASE_ARGS: Readonly<Record<string, string>> = {
 }
 
 describe('START_FLAGS', () => {
-  test('holds exactly the fourteen start flag names', () => {
+  test('holds exactly the sixteen start flag names', () => {
     expect([...START_FLAGS].sort()).toEqual(
       [
         'pane',
@@ -26,6 +26,8 @@ describe('START_FLAGS', () => {
         'one-shot',
         'deadline-seconds',
         'retain-failed-seconds',
+        'plugin-dir',
+        'setting-sources',
       ].sort(),
     )
   })
@@ -36,15 +38,21 @@ describe('START_FLAGS', () => {
       expect(START_FLAGS.has(flag)).toBe(true)
     }
   })
+
+  test('the plugin dir is no hand-off file, so a start never unlinks it', () => {
+    expect(START_FILE_FLAGS).not.toContain('plugin-dir')
+  })
 })
 
 describe('parseStartExtras, defaults', () => {
-  test('absent optional flags give undefined, false, undefined and 0', () => {
+  test('absent optional flags give undefined, false, undefined, 0 and no plugin dir or setting source', () => {
     expect(parseStartExtras(BASE_ARGS)).toEqual({
       permissionMode: undefined,
       oneShot: false,
       deadlineSeconds: undefined,
       retainFailedSeconds: 0,
+      pluginDir: undefined,
+      settingSources: undefined,
     })
   })
 
@@ -61,6 +69,8 @@ describe('parseStartExtras, defaults', () => {
       'one-shot': '1',
       'deadline-seconds': '600',
       'retain-failed-seconds': '90',
+      'plugin-dir': '/opt/kodizm/plugins/live-1',
+      'setting-sources': 'project',
     }
 
     expect(parseStartExtras(args)).toEqual({
@@ -68,6 +78,8 @@ describe('parseStartExtras, defaults', () => {
       oneShot: true,
       deadlineSeconds: 600,
       retainFailedSeconds: 90,
+      pluginDir: '/opt/kodizm/plugins/live-1',
+      settingSources: 'project',
     })
   })
 })
@@ -132,6 +144,40 @@ describe('parseStartExtras, retain-failed-seconds', () => {
   for (const bad of ['2147484', '-1', '1.5', 'abc', '', '0x10', ' 5']) {
     test(`rejects ${JSON.stringify(bad)}`, () => {
       expect(parseStartExtras({ ...BASE_ARGS, 'retain-failed-seconds': bad })).toBeNull()
+    })
+  }
+})
+
+describe('parseStartExtras, plugin-dir', () => {
+  test('accepts a directory under the plugin root', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'plugin-dir': '/opt/kodizm/plugins/live-1' })?.pluginDir).toBe(
+      '/opt/kodizm/plugins/live-1',
+    )
+  })
+
+  test.each([
+    ['a parent segment that climbs out of the root', '/opt/kodizm/plugins/../etc'],
+    ['a parent segment in the middle', '/opt/kodizm/plugins/live-1/../../etc'],
+    ['a sibling that merely shares the prefix', '/opt/kodizm/pluginsx/a'],
+    ['a relative path', 'opt/kodizm/plugins/live-1'],
+    ['a relative path below the root name', 'plugins/live-1'],
+    ['the root itself', '/opt/kodizm/plugins/'],
+    ['the root without its slash', '/opt/kodizm/plugins'],
+    ['a path outside the root', '/etc/passwd'],
+    ['an empty value', ''],
+  ])('rejects %s', (_label, path) => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'plugin-dir': path })).toBeNull()
+  })
+})
+
+describe('parseStartExtras, setting-sources', () => {
+  test('accepts project', () => {
+    expect(parseStartExtras({ ...BASE_ARGS, 'setting-sources': 'project' })?.settingSources).toBe('project')
+  })
+
+  for (const bad of ['user', 'local', '', 'Project', 'project,user', 'user,project', ' project', 'project ']) {
+    test(`rejects ${JSON.stringify(bad)}`, () => {
+      expect(parseStartExtras({ ...BASE_ARGS, 'setting-sources': bad })).toBeNull()
     })
   }
 })

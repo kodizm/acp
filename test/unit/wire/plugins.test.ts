@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { LoadSessionRequestSchema, NewSessionRequestSchema } from '@/wire/schemas.ts'
+import { LoadSessionRequestSchema, NewSessionRequestSchema, PLUGIN_ROOT, PluginPathSchema } from '@/wire/schemas.ts'
 
 const base = { cwd: '/workspace', mcpServers: [] }
 
@@ -37,6 +37,20 @@ describe('plugins on the session wire', () => {
   ])('rejects %s', (_label, path) => {
     expect(NewSessionRequestSchema.safeParse({ ...base, plugins: [path] }).success).toBe(false)
     expect(LoadSessionRequestSchema.safeParse({ ...base, sessionId: 'prior', plugins: [path] }).success).toBe(false)
+  })
+
+  test('the exported schema the tmuxd start shares accepts a directory under the exported root', () => {
+    expect(PLUGIN_ROOT).toBe('/opt/kodizm/plugins/')
+    expect(PluginPathSchema.safeParse('/opt/kodizm/plugins/live-1').success).toBe(true)
+  })
+
+  test.each([
+    ['a parent segment that climbs out of the root', '/opt/kodizm/plugins/../etc'],
+    ['a sibling whose name extends the root', '/opt/kodizm/pluginsx/a'],
+    ['a relative path', 'plugins/live-1'],
+    ['the root itself', '/opt/kodizm/plugins/'],
+  ])('the exported schema rejects %s', (_label, path) => {
+    expect(PluginPathSchema.safeParse(path).success).toBe(false)
   })
 
   test('rejects plugins smuggled inside _meta', () => {
