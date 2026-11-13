@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import pkg from '../../package.json' with { type: 'json' }
 
 import { type Logger, createLogger } from '../util/logger.ts'
+import { type CliConfigResult, parseCliConfig } from './cli-config.ts'
 import {
   type EventDraft,
   type LiveEvent,
@@ -281,6 +282,7 @@ interface StartRequest {
   systemPromptFile: string | undefined
   mcpConfig: string | undefined
   featuresFile: string | undefined
+  cliConfigFile: string | undefined
   extras: StartExtras
 }
 
@@ -1526,6 +1528,7 @@ export class LiveDaemon {
     const systemPromptFile = args['system-prompt-file']
     const mcpConfig = args['mcp-config']
     const featuresFile = args.features
+    const cliConfigFile = args['cli-config-file']
     if (id === undefined || !PANE_ID.test(id) || cwd === undefined || !isAbsolute(cwd)) {
       return refuse('usage_error')
     }
@@ -1537,11 +1540,11 @@ export class LiveDaemon {
     }
 
     // 1. An unknown flag or a bad extra fails the start (a plugin dir outside its root, a setting source other than
-    // project), and so does an optional path that is not absolute.
+    // project, an agent mode without its agent), and so does an optional path that is not absolute.
     const extras = parseStartExtras(args)
     if (
       extras === null ||
-      [policyFile, systemPromptFile, mcpConfig, featuresFile].some((path) => !optionalAbsolute(path))
+      [policyFile, systemPromptFile, mcpConfig, featuresFile, cliConfigFile].some((path) => !optionalAbsolute(path))
     ) {
       return refuse('usage_error')
     }
@@ -1568,6 +1571,7 @@ export class LiveDaemon {
         systemPromptFile,
         mcpConfig,
         featuresFile,
+        cliConfigFile,
         extras,
       })
     } finally {
@@ -1588,11 +1592,12 @@ export class LiveDaemon {
       systemPromptFile,
       mcpConfig,
       featuresFile,
+      cliConfigFile,
       extras,
     } = request
 
-    // 1. The env, policy and features files are read; the prompt and MCP config only reach the CLI as paths, never
-    // read here.
+    // 1. The env, policy, features and CLI config files are read; the prompt and MCP config only reach the CLI as
+    // paths, never read here.
     const content = await readSecretFile(envFile)
     const env = content === null ? null : parseStartEnv(content)
     if (env === null) {
@@ -1612,6 +1617,11 @@ export class LiveDaemon {
     if (features === null) {
       return refuse('usage_error')
     }
+    const cliConfig = cliConfigFile === undefined ? undefined : await readCliConfig(cliConfigFile)
+    if (cliConfig?.ok === false) {
+      return refuse('usage_error', { cli_config_key: cliConfig.key })
+    }
+    const role = cliConfig?.config
 
     // 2. The CLI matches a Read deny against the path it is given and its symlink chain, so a read through the real
     // path of the MCP config needs a rule of its own.
@@ -1654,13 +1664,17 @@ export class LiveDaemon {
         cwd,
         home: this.options.home,
         settingsPath,
-        env: { ...env.authEnv, ...features?.env },
+        // The role switches go last; their allowlist holds no auth, ingest, HOME or PATH name to override.
+        env: { ...env.authEnv, ...features?.env, ...role?.env },
         model,
         resumeSessionId: resume,
         mcpConfig,
         systemPromptFile,
+        promptMode: extras.promptMode,
+        agent: extras.agent,
         tools: features?.tools,
-        disallowedTools: features?.disallowedTools,
+        disallowedTools: [...new Set([...(features?.disallowedTools ?? []), ...(role?.disallowedTools ?? [])])],
+        disableSlashCommands: role?.disableSlashCommands,
         permissionMode: extras.permissionMode,
         pluginDir: extras.pluginDir,
         settingSources: extras.settingSources,
@@ -2154,6 +2168,13 @@ async function readPaneFeatures(
   const content = await readSecretFile(path)
 
   return content === null ? null : parsePaneFeatures(content, permissionMode)
+}
+
+/** The checked CLI config, or a refusal without a key when the file is no secret file. */
+async function readCliConfig(path: string): Promise<CliConfigResult> {
+  const content = await readSecretFile(path)
+
+  return content === null ? { ok: false, key: undefined } : parseCliConfig(content)
 }
 
 async function readFileOrNull(path: string): Promise<string | null> {

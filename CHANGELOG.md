@@ -2,6 +2,34 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-11-13
+
+### Added
+
+- **`ctl start --prompt-mode append|system|agent`.** How the role prompt
+  reaches the pane. `append` (also the default when the flag is absent)
+  keeps passing the prompt file as `--append-system-prompt-file`; `system`
+  passes it as `--system-prompt-file`, replacing the CLI's default prompt.
+  Any other value is a `usage_error`.
+- **`ctl start --agent PLUGIN:AGENT`.** The `agent` prompt mode runs the main
+  session as a plugin agent (`--agent`) whose body is the whole prompt. The
+  start needs `--prompt-mode agent`, `--agent` (letters, digits and `_.:-`,
+  up to 80 characters, no leading dash) and `--plugin-dir`, and takes no
+  `--system-prompt-file`; anything else is a `usage_error` and starts no pane.
+  `--tools` still decides the final tool list.
+- **`ctl start --cli-config-file PATH`.** A per-role JSON hand-off file
+  (absolute, 0600, removed after the start like the other hand-off files):
+  `disallowedTools` (bare tool names, added after the features file's
+  removals, each name once), `env` (switches from a fixed allowlist, each at
+  its one pinned value, merged after the feature env) and
+  `disableSlashCommands` (adds `--disable-slash-commands`). An unknown key, a
+  scoped or wildcard tool rule, an env name outside the allowlist or a value
+  other than the pinned one is a `usage_error` whose reply names the key in
+  `cli_config_key` and never echoes a value. The allowlist holds no auth,
+  ingest, `HOME` or `PATH` variable.
+
+A start that sends none of the three flags launches exactly as on 0.9.3.
+
 ## [0.9.3] - 2026-11-13
 
 ### Added

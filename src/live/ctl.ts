@@ -32,8 +32,11 @@ Commands:
                                              Verbs: start, prompt, command, cancel, stop, rotate-token, status.
                                              start also takes --permission-mode default|dontAsk, --one-shot 0|1,
                                              --deadline-seconds N, --retain-failed-seconds N,
-                                             --plugin-dir /opt/kodizm/plugins/DIR, --setting-sources project and
-                                             --mcp-config/--tool-policy/--system-prompt-file/--features PATH.
+                                             --plugin-dir /opt/kodizm/plugins/DIR, --setting-sources project,
+                                             --prompt-mode append|system|agent, --agent PLUGIN:AGENT (agent mode
+                                             only, with --plugin-dir and no --system-prompt-file) and
+                                             --mcp-config/--tool-policy/--system-prompt-file/--features/
+                                             --cli-config-file PATH.
   hook <Event> --pane <id> --socket <path>   Hook helper the pane settings run; reads the payload on stdin.
   daemon                                     Run the daemon in the foreground; ctl start spawns it detached.
 

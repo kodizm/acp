@@ -338,6 +338,53 @@ describe('createPane', () => {
     expect(args).not.toContain('--plugin-dir')
   })
 
+  test('the append mode passes the prompt file as the appended prompt, as a start without a mode does', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { promptMode: 'append', systemPromptFile: '/hand-off/prompt.md' })
+
+    expect((await argsOf(fx)).slice(4)).toEqual(['--append-system-prompt-file', '/hand-off/prompt.md'])
+  })
+
+  test('the system mode passes the prompt file as the replacing prompt', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { promptMode: 'system', systemPromptFile: '/hand-off/prompt.md', model: 'opus' })
+
+    expect((await argsOf(fx)).slice(4)).toEqual(['--system-prompt-file', '/hand-off/prompt.md', '--model', 'opus'])
+  })
+
+  test('the system mode without a prompt file adds no prompt flag', async () => {
+    const fx = await fixture()
+    await launchReady(fx, { promptMode: 'system' })
+
+    const args = await argsOf(fx)
+    expect(args).not.toContain('--system-prompt-file')
+    expect(args).not.toContain('--append-system-prompt-file')
+  })
+
+  test('the agent mode passes the agent and no prompt file flag', async () => {
+    const fx = await fixture()
+    await launchReady(fx, {
+      promptMode: 'agent',
+      agent: 'kodizm-review:reviewer',
+      pluginDir: '/opt/kodizm/plugins/live-1',
+    })
+
+    const args = await argsOf(fx)
+    expect(args.slice(4)).toEqual(['--plugin-dir', '/opt/kodizm/plugins/live-1', '--agent', 'kodizm-review:reviewer'])
+    expect(args).not.toContain('--system-prompt-file')
+    expect(args).not.toContain('--append-system-prompt-file')
+  })
+
+  test('disables slash commands after the tool lists only when asked', async () => {
+    const asked = await fixture()
+    await launchReady(asked, { disallowedTools: ['Monitor', 'Write'], disableSlashCommands: true })
+    const notAsked = await fixture()
+    await launchReady(notAsked, { id: 'kdz-pane-slash-off', disableSlashCommands: false })
+
+    expect((await argsOf(asked)).slice(4)).toEqual(['--disallowedTools', 'Monitor,Write', '--disable-slash-commands'])
+    expect(await argsOf(notAsked)).not.toContain('--disable-slash-commands')
+  })
+
   test('disables background tasks even when the env asks otherwise', async () => {
     const fx = await fixture()
     await launchReady(fx, { env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '0' } })
