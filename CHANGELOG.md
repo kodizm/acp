@@ -2,6 +2,14 @@
 
 All notable changes to `@kodizm/acp` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-11-25
+
+### Changed
+
+- **Claude Code CLI follows the stable channel.** The SDK pin moves
+  from 0.3.325 to 0.3.326, so the image installs Claude Code 2.1.326,
+  the version the stable channel serves. Opened by the `claude-stable-bump` workflow.
+
 ## [0.9.6] - 2026-11-24
 
 ### Changed
